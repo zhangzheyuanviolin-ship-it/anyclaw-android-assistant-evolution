@@ -18,6 +18,7 @@ class PromptManagerActivity : AppCompatActivity() {
     private lateinit var listView: ListView
     private lateinit var btnAddPrompt: Button
     private lateinit var btnClearSelectedPrompt: Button
+    private lateinit var btnDeleteSelectedPrompt: Button
     private var profiles = mutableListOf<PromptProfile>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,9 +28,11 @@ class PromptManagerActivity : AppCompatActivity() {
         listView = findViewById(R.id.listPromptProfiles)
         btnAddPrompt = findViewById(R.id.btnAddPrompt)
         btnClearSelectedPrompt = findViewById(R.id.btnClearSelectedPrompt)
+        btnDeleteSelectedPrompt = findViewById(R.id.btnDeleteSelectedPrompt)
 
         btnAddPrompt.setOnClickListener { openEditDialog(null) }
         btnClearSelectedPrompt.setOnClickListener { clearSelectedProfile() }
+        btnDeleteSelectedPrompt.setOnClickListener { confirmDeleteSelectedProfile() }
 
         listView.setOnItemClickListener { _, _, position, _ ->
             val row = profiles.getOrNull(position) ?: return@setOnItemClickListener
@@ -100,6 +103,24 @@ class PromptManagerActivity : AppCompatActivity() {
         PromptProfileStore.saveProfiles(this, profiles)
         Toast.makeText(this, getString(R.string.prompt_selection_cleared_toast), Toast.LENGTH_SHORT).show()
         refreshList()
+    }
+
+    private fun confirmDeleteSelectedProfile() {
+        val selected = profiles.firstOrNull { it.selected } ?: run {
+            Toast.makeText(this, getString(R.string.prompt_no_selected_toast), Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.prompt_delete_confirm_title))
+            .setMessage(getString(R.string.prompt_delete_confirm_message))
+            .setNegativeButton(getString(R.string.cancel), null)
+            .setPositiveButton(getString(R.string.prompt_delete_text)) { _, _ ->
+                profiles = profiles.filterNot { it.id == selected.id }.toMutableList()
+                PromptProfileStore.saveProfiles(this, profiles)
+                Toast.makeText(this, getString(R.string.prompt_deleted_toast), Toast.LENGTH_SHORT).show()
+                refreshList()
+            }
+            .show()
     }
 
     private fun showItemMenu(profile: PromptProfile) {

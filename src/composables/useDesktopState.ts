@@ -1,10 +1,12 @@
 import { computed, ref } from 'vue'
 import {
   archiveThread,
+  forkThread,
   getAvailableModelIds,
   getCurrentModelConfig,
   getPendingServerRequests,
   interruptThreadTurn,
+  rollbackThread,
   replyToServerRequest,
   getThreadGroups,
   getThreadMessages,
@@ -256,6 +258,8 @@ function areMessageFieldsEqual(first: UiMessage, second: UiMessage): boolean {
     first.text === second.text &&
     areStringArraysEqual(first.images, second.images) &&
     first.messageType === second.messageType &&
+    first.turnId === second.turnId &&
+    first.turnIndex === second.turnIndex &&
     first.rawPayload === second.rawPayload &&
     first.isUnhandled === second.isUnhandled
   )
@@ -1608,6 +1612,81 @@ export function useDesktopState() {
     }
   }
 
+  function getMessageTurnMeta(threadId: string, messageId: string): { turnIndex: number; totalTurns: number } | null {
+    const rows = persistedMessagesByThreadId.value[threadId] ?? []
+    const target = rows.find((message) => message.id === messageId)
+    if (!target || typeof target.turnIndex !== 'number' || !Number.isInteger(target.turnIndex) || target.turnIndex < 0) {
+      return null
+    }
+
+    let maxTurnIndex = -1
+    for (const row of rows) {
+      if (typeof row.turnIndex === 'number' && Number.isInteger(row.turnIndex) && row.turnIndex > maxTurnIndex) {
+        maxTurnIndex = row.turnIndex
+      }
+    }
+    if (maxTurnIndex < target.turnIndex) {
+      return null
+    }
+
+    return {
+      turnIndex: target.turnIndex,
+      totalTurns: maxTurnIndex + 1,
+    }
+  }
+
+  async function deleteFromMessage(messageId: string): Promise<void> {
+    const threadId = selectedThreadId.value.trim()
+    if (!threadId || !messageId.trim()) return
+
+    const meta = getMessageTurnMeta(threadId, messageId)
+    if (!meta) {
+      throw new Error('This message cannot be deleted directly')
+    }
+
+    const turnsToDrop = meta.totalTurns - meta.turnIndex
+    if (turnsToDrop < 1) return
+
+    try {
+      await rollbackThread(threadId, turnsToDrop)
+      pendingThreadMessageRefresh.add(threadId)
+      pendingThreadsRefresh = true
+      await syncFromNotifications()
+      await loadThreads()
+      await loadMessages(threadId)
+    } catch (unknownError) {
+      const errorMessage = unknownError instanceof Error ? unknownError.message : 'Unknown application error'
+      error.value = errorMessage
+      throw unknownError
+    }
+  }
+
+  async function forkFromMessage(messageId: string): Promise<string> {
+    const threadId = selectedThreadId.value.trim()
+    if (!threadId || !messageId.trim()) return ''
+
+    const meta = getMessageTurnMeta(threadId, messageId)
+    if (!meta) {
+      throw new Error('This message cannot be used as a branch point')
+    }
+
+    try {
+      const nextThreadId = await forkThread(threadId)
+      const turnsToDrop = meta.totalTurns - (meta.turnIndex + 1)
+      if (turnsToDrop > 0) {
+        await rollbackThread(nextThreadId, turnsToDrop)
+      }
+
+      await loadThreads()
+      await selectThread(nextThreadId)
+      return nextThreadId
+    } catch (unknownError) {
+      const errorMessage = unknownError instanceof Error ? unknownError.message : 'Unknown application error'
+      error.value = errorMessage
+      throw unknownError
+    }
+  }
+
   async function sendMessageToSelectedThread(text: string): Promise<void> {
     const threadId = selectedThreadId.value
     const nextText = text.trim()
@@ -2015,6 +2094,8 @@ export function useDesktopState() {
     selectThread,
     setThreadScrollState,
     archiveThreadById,
+    deleteFromMessage,
+    forkFromMessage,
     sendMessageToSelectedThread,
     sendMessageToNewThread,
     interruptSelectedThreadTurn,

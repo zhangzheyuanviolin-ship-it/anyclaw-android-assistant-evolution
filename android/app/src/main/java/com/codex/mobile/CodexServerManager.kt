@@ -386,12 +386,19 @@ WEOF
             Log.w(TAG, "Deps extract failed with code $extractCode (non-fatal)")
         }
 
-        // Create symlinks for tools that expect different names
-        runInPrefix("""
-            [ ! -f "$prefix/bin/ar" ] && [ -f "$prefix/bin/llvm-ar" ] && ln -sf llvm-ar "$prefix/bin/ar"
-            [ ! -f "$prefix/bin/ld" ] || [ -L "$prefix/bin/ld" ] && ln -sf ld.lld "$prefix/bin/ld"
-            echo "Symlinks created"
-        """.trimIndent())
+        onProgress("Repairing toolchain links…")
+        ensureOpenClawToolchain(onProgress)
+
+        onProgress("Running toolchain preflight…")
+        val preflightOk = runOpenClawToolchainPreflight(onProgress)
+        if (!preflightOk) {
+            onProgress("Toolchain preflight failed, trying external recovery…")
+            runExternalRecoveryScripts(onProgress)
+            ensureOpenClawToolchain(onProgress)
+            if (!runOpenClawToolchainPreflight(onProgress)) {
+                onProgress("Toolchain still not healthy after recovery")
+            }
+        }
 
         onProgress("Fixing git-core script shebangs…")
         fixGitCoreShebangs(prefix)
@@ -403,6 +410,103 @@ WEOF
         createHeaderStubs(prefix)
 
         return true
+    }
+
+    private fun ensureOpenClawToolchain(onProgress: (String) -> Unit) {
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        val cmd = """
+            set -e
+
+            fix_tool() {
+              local name="${'$'}1"
+              local llvm_name="${'$'}2"
+              local target="$prefix/bin/${'$'}name"
+              local llvm_target="$prefix/bin/${'$'}llvm_name"
+              local termux_target="$prefix/libexec/binutils/${'$'}name"
+
+              if [ -L "${'$'}target" ] && [ ! -e "${'$'}target" ]; then
+                rm -f "${'$'}target"
+              fi
+              if [ -x "${'$'}target" ]; then
+                return 0
+              fi
+              if [ -x "${'$'}llvm_target" ]; then
+                ln -sf "${'$'}llvm_name" "${'$'}target"
+                return 0
+              fi
+              if [ -x "${'$'}termux_target" ]; then
+                ln -sf "../libexec/binutils/${'$'}name" "${'$'}target"
+                return 0
+              fi
+              return 1
+            }
+
+            fix_tool ar llvm-ar || true
+            fix_tool ranlib llvm-ranlib || true
+
+            if [ -x "$prefix/bin/ld.lld" ]; then
+              ln -sf ld.lld "$prefix/bin/ld"
+            fi
+
+            AR_BIN="${'$'}(command -v ar || true)"
+            RANLIB_BIN="${'$'}(command -v ranlib || true)"
+            mkdir -p "${'$'}HOME/.openclaw-android/state"
+            {
+              echo "CMAKE_AR=${'$'}AR_BIN"
+              echo "CMAKE_RANLIB=${'$'}RANLIB_BIN"
+            } > "${'$'}HOME/.openclaw-android/state/toolchain.env"
+            echo "toolchain linked: ar=${'$'}AR_BIN ranlib=${'$'}RANLIB_BIN"
+        """.trimIndent()
+
+        runInPrefix(cmd, onOutput = { onProgress(it) })
+    }
+
+    private fun runOpenClawToolchainPreflight(onProgress: (String) -> Unit): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        val cmd = """
+            set -e
+            TMP_DIR="$prefix/tmp/anyclaw-toolchain-${'$'}${'$'}"
+            rm -rf "${'$'}TMP_DIR"
+            mkdir -p "${'$'}TMP_DIR"
+
+            AR_BIN="${'$'}(command -v ar || true)"
+            RANLIB_BIN="${'$'}(command -v ranlib || true)"
+            CLANG_BIN="${'$'}(command -v clang || true)"
+            if [ -z "${'$'}AR_BIN" ] || [ -z "${'$'}RANLIB_BIN" ] || [ -z "${'$'}CLANG_BIN" ]; then
+              echo "toolchain missing: ar=${'$'}AR_BIN ranlib=${'$'}RANLIB_BIN clang=${'$'}CLANG_BIN"
+              rm -rf "${'$'}TMP_DIR"
+              exit 12
+            fi
+
+            cat > "${'$'}TMP_DIR/probe.c" <<'EOF'
+int anyclaw_toolchain_probe = 1;
+EOF
+
+            "${'$'}CLANG_BIN" -c "${'$'}TMP_DIR/probe.c" -o "${'$'}TMP_DIR/probe.o"
+            "${'$'}AR_BIN" qc "${'$'}TMP_DIR/libprobe.a" "${'$'}TMP_DIR/probe.o"
+            "${'$'}RANLIB_BIN" "${'$'}TMP_DIR/libprobe.a"
+            rm -rf "${'$'}TMP_DIR"
+            echo "toolchain preflight ok"
+        """.trimIndent()
+
+        val code = runInPrefix(cmd, onOutput = { onProgress(it) })
+        return code == 0
+    }
+
+    private fun runExternalRecoveryScripts(onProgress: (String) -> Unit) {
+        val cmd = """
+            set +e
+            if [ -f /sdcard/Download/CodexExports/termux_pkg_repair.sh ]; then
+              sh /sdcard/Download/CodexExports/termux_pkg_repair.sh 2>&1
+            fi
+            if [ -f /sdcard/Download/CodexExports/tls_doctor.sh ]; then
+              sh /sdcard/Download/CodexExports/tls_doctor.sh 2>&1
+            fi
+            exit 0
+        """.trimIndent()
+        runInPrefix(cmd, onOutput = { onProgress(it) })
     }
 
     /**
@@ -757,6 +861,14 @@ H3
             |    "defaults": {
             |      "model": {
             |        "primary": "openai-codex/gpt-5.3-codex"
+            |      },
+            |      "memorySearch": {
+            |        "store": {
+            |          "vector": {
+            |            "enabled": true,
+            |            "extensionPath": "$prefix/lib/node_modules/openclaw/node_modules/sqlite-vec-linux-arm64/vec0"
+            |          }
+            |        }
             |      }
             |    }
             |  }
@@ -810,6 +922,20 @@ H3
         } else {
             Log.w(TAG, "Codex auth.json not found — OpenClaw will lack API credentials")
         }
+    }
+
+    fun runOpenClawPreflight(onProgress: (String) -> Unit): Boolean {
+        onProgress("Repairing OpenClaw toolchain links…")
+        ensureOpenClawToolchain(onProgress)
+        onProgress("Validating ar/ranlib preflight…")
+        if (runOpenClawToolchainPreflight(onProgress)) {
+            return true
+        }
+
+        onProgress("Preflight failed, running recovery scripts…")
+        runExternalRecoveryScripts(onProgress)
+        ensureOpenClawToolchain(onProgress)
+        return runOpenClawToolchainPreflight(onProgress)
     }
 
     /**
@@ -1717,7 +1843,7 @@ EOF
         val bionicCompat = "${paths.homeDir}/.openclaw-android/patches/bionic-compat.js"
         val bionicCompatOpt = if (File(bionicCompat).exists()) " -r $bionicCompat" else ""
 
-        return mapOf(
+        val env = mutableMapOf(
             "PREFIX" to paths.prefixDir,
             "HOME" to paths.homeDir,
             "PATH" to "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin",
@@ -1749,5 +1875,22 @@ EOF
             "NODE_OPTIONS" to "--openssl-config=${paths.prefixDir}/etc/tls/openssl.cnf --unhandled-rejections=warn$bionicCompatOpt",
             "CONTAINER" to "1",
         )
+
+        val toolchainEnvFile = File(paths.homeDir, ".openclaw-android/state/toolchain.env")
+        if (toolchainEnvFile.exists()) {
+            toolchainEnvFile.forEachLine { raw ->
+                val line = raw.trim()
+                if (line.isEmpty() || line.startsWith("#")) return@forEachLine
+                val parts = line.split("=", limit = 2)
+                if (parts.size != 2) return@forEachLine
+                val key = parts[0].trim()
+                val value = parts[1].trim()
+                if (key.isNotEmpty() && value.isNotEmpty()) {
+                    env[key] = value
+                }
+            }
+        }
+
+        return env
     }
 }

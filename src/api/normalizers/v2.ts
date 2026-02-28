@@ -42,6 +42,8 @@ function extractCodexUserRequestText(value: string): string {
 
 function parseUserMessageContent(
   itemId: string,
+  turnId: string,
+  turnIndex: number,
   content: UserInput[] | undefined,
 ): { text: string; images: string[]; rawBlocks: UiMessage[] } {
   if (!Array.isArray(content)) return { text: '', images: [], rawBlocks: [] }
@@ -64,6 +66,8 @@ function parseUserMessageContent(
         role: 'user',
         text: '',
         messageType: `userContent.${block.type}`,
+        turnId,
+        turnIndex,
         rawPayload: toRawPayload(block),
         isUnhandled: true,
       })
@@ -77,7 +81,7 @@ function parseUserMessageContent(
   }
 }
 
-function toUiMessages(item: ThreadItem): UiMessage[] {
+function toUiMessages(item: ThreadItem, turnId: string, turnIndex: number): UiMessage[] {
   if (item.type === 'agentMessage') {
     return [
       {
@@ -85,12 +89,14 @@ function toUiMessages(item: ThreadItem): UiMessage[] {
         role: 'assistant',
         text: item.text,
         messageType: item.type,
+        turnId,
+        turnIndex,
       },
     ]
   }
 
   if (item.type === 'userMessage') {
-    const parsed = parseUserMessageContent(item.id, item.content as UserInput[] | undefined)
+    const parsed = parseUserMessageContent(item.id, turnId, turnIndex, item.content as UserInput[] | undefined)
     const messages: UiMessage[] = []
     const hasRenderableUserContent = parsed.text.length > 0 || parsed.images.length > 0
 
@@ -101,6 +107,8 @@ function toUiMessages(item: ThreadItem): UiMessage[] {
         text: parsed.text,
         images: parsed.images,
         messageType: item.type,
+        turnId,
+        turnIndex,
       })
     }
 
@@ -191,10 +199,11 @@ export function normalizeThreadGroupsV2(payload: ThreadListResponse): UiProjectG
 export function normalizeThreadMessagesV2(payload: ThreadReadResponse): UiMessage[] {
   const turns = Array.isArray(payload.thread.turns) ? payload.thread.turns : []
   const messages: UiMessage[] = []
-  for (const turn of turns) {
+  for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+    const turn = turns[turnIndex]
     const items = Array.isArray(turn.items) ? turn.items : []
     for (const item of items) {
-      messages.push(...toUiMessages(item))
+      messages.push(...toUiMessages(item, turn.id, turnIndex))
     }
   }
   return messages

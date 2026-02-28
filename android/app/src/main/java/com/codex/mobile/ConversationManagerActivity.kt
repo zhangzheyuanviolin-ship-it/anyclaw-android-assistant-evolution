@@ -1,0 +1,578 @@
+package com.codex.mobile
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.os.Bundle
+import android.text.InputType
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.ProgressBar
+import android.widget.Spinner
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
+
+class ConversationManagerActivity : AppCompatActivity() {
+
+    private data class ConversationRow(
+        val source: SourceType,
+        val id: String,
+        var title: String,
+        val updatedAtMs: Long,
+        val preview: String,
+        val path: String = "",
+    )
+
+    private enum class SourceType {
+        ALL,
+        CODEX,
+        OPENCLAW,
+    }
+
+    private lateinit var spinnerSource: Spinner
+    private lateinit var btnRefresh: Button
+    private lateinit var progressBar: ProgressBar
+    private lateinit var tvStatus: TextView
+    private lateinit var listView: ListView
+
+    private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+    private val serverManager by lazy { CodexServerManager(this) }
+    private val gateway by lazy { LocalBridgeClients.OpenClawGateway(serverManager) }
+
+    private var allRows = mutableListOf<ConversationRow>()
+    private var visibleRows = mutableListOf<ConversationRow>()
+    private var loading = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_conversation_manager)
+
+        spinnerSource = findViewById(R.id.spinnerConversationSource)
+        btnRefresh = findViewById(R.id.btnConversationRefresh)
+        progressBar = findViewById(R.id.progressConversation)
+        tvStatus = findViewById(R.id.tvConversationStatus)
+        listView = findViewById(R.id.listConversations)
+
+        val sourceOptions = listOf(
+            getString(R.string.conversation_source_all),
+            getString(R.string.conversation_source_codex),
+            getString(R.string.conversation_source_openclaw),
+        )
+        spinnerSource.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            sourceOptions,
+        )
+        spinnerSource.setSelection(0)
+        spinnerSource.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                applyFilterAndRender()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+        }
+
+        btnRefresh.setOnClickListener {
+            loadConversations()
+        }
+
+    }
+
+    override fun onResume() {
+        super.onResume()
+        loadConversations()
+    }
+
+    private fun sourceFromSelection(): SourceType {
+        return when (spinnerSource.selectedItemPosition) {
+            1 -> SourceType.CODEX
+            2 -> SourceType.OPENCLAW
+            else -> SourceType.ALL
+        }
+    }
+
+    private fun loadConversations() {
+        if (loading) return
+        loading = true
+        progressBar.visibility = View.VISIBLE
+        tvStatus.visibility = View.VISIBLE
+        tvStatus.text = getString(R.string.conversation_loading)
+
+        Thread {
+            try {
+                val codexRows = loadCodexRows()
+                val openClawRows = loadOpenClawRows()
+                allRows = (codexRows + openClawRows)
+                    .distinctBy { "${it.source}:${it.id}" }
+                    .sortedByDescending { it.updatedAtMs }
+                    .toMutableList()
+
+                runOnUiThread {
+                    loading = false
+                    progressBar.visibility = View.GONE
+                    applyFilterAndRender()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    loading = false
+                    progressBar.visibility = View.GONE
+                    tvStatus.visibility = View.VISIBLE
+                    tvStatus.text = getString(R.string.conversation_error_prefix) + (error.message ?: "unknown")
+                    Toast.makeText(
+                        this,
+                        getString(R.string.conversation_error_prefix) + (error.message ?: "unknown"),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun loadCodexRows(): List<ConversationRow> {
+        val active = LocalBridgeClients.callCodexRpc(
+            "thread/list",
+            JSONObject()
+                .put("archived", false)
+                .put("limit", 200)
+                .put("sortKey", "updated_at"),
+        )
+        val archived = LocalBridgeClients.callCodexRpc(
+            "thread/list",
+            JSONObject()
+                .put("archived", true)
+                .put("limit", 200)
+                .put("sortKey", "updated_at"),
+        )
+
+        val rows = mutableListOf<ConversationRow>()
+        rows += parseCodexList(active.optJSONArray("data"))
+        rows += parseCodexList(archived.optJSONArray("data"))
+        return rows
+    }
+
+    private fun parseCodexList(data: JSONArray?): List<ConversationRow> {
+        if (data == null) return emptyList()
+        val rows = mutableListOf<ConversationRow>()
+        for (index in 0 until data.length()) {
+            val item = data.optJSONObject(index) ?: continue
+            val id = item.optString("id", "").trim()
+            if (id.isEmpty()) continue
+            val preview = item.optString("preview", "").trim()
+            val updatedAtSeconds = item.optLong("updatedAt", 0L)
+            val titleCandidate = preview.lineSequence().firstOrNull()?.trim().orEmpty()
+            rows += ConversationRow(
+                source = SourceType.CODEX,
+                id = id,
+                title = if (titleCandidate.isEmpty()) getString(R.string.conversation_unknown_title) else titleCandidate,
+                updatedAtMs = updatedAtSeconds * 1000L,
+                preview = preview,
+                path = item.optString("path", ""),
+            )
+        }
+        return rows
+    }
+
+    private fun loadOpenClawRows(): List<ConversationRow> {
+        val payload = gateway.call(
+            "sessions.list",
+            JSONObject()
+                .put("limit", 300)
+                .put("includeDerivedTitles", true)
+                .put("includeLastMessage", true)
+                .put("includeGlobal", true)
+                .put("includeUnknown", true),
+        )
+        val sessions = payload.optJSONArray("sessions") ?: JSONArray()
+        val rows = mutableListOf<ConversationRow>()
+        for (index in 0 until sessions.length()) {
+            val item = sessions.optJSONObject(index) ?: continue
+            val key = item.optString("key", "").trim()
+            if (key.isEmpty()) continue
+            val title = item.optString("label", "").trim()
+                .ifEmpty { item.optString("derivedTitle", "").trim() }
+                .ifEmpty { key }
+            rows += ConversationRow(
+                source = SourceType.OPENCLAW,
+                id = key,
+                title = title,
+                updatedAtMs = item.optLong("updatedAt", 0L),
+                preview = item.optString("lastMessagePreview", "").trim(),
+            )
+        }
+        return rows
+    }
+
+    private fun applyFilterAndRender() {
+        val selected = sourceFromSelection()
+        visibleRows = allRows.filter { row ->
+            selected == SourceType.ALL || row.source == selected
+        }.toMutableList()
+
+        listView.adapter = object : android.widget.BaseAdapter() {
+            override fun getCount(): Int = visibleRows.size
+
+            override fun getItem(position: Int): Any = visibleRows[position]
+
+            override fun getItemId(position: Int): Long = position.toLong()
+
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val rowView = convertView ?: LayoutInflater.from(this@ConversationManagerActivity)
+                    .inflate(R.layout.item_conversation_row, parent, false)
+                val row = visibleRows[position]
+
+                val sourceName = when (row.source) {
+                    SourceType.CODEX -> getString(R.string.conversation_source_codex)
+                    SourceType.OPENCLAW -> getString(R.string.conversation_source_openclaw)
+                    SourceType.ALL -> getString(R.string.conversation_source_all)
+                }
+                val updated = if (row.updatedAtMs > 0L) {
+                    dateFormat.format(Date(row.updatedAtMs))
+                } else {
+                    getString(R.string.status_no)
+                }
+                val preview = row.preview.lineSequence().firstOrNull()?.trim().orEmpty()
+
+                rowView.findViewById<TextView>(R.id.tvConversationRowTitle).text = row.title
+                rowView.findViewById<TextView>(R.id.tvConversationRowMeta).text = "$sourceName | $updated | ${row.id}"
+                rowView.findViewById<TextView>(R.id.tvConversationRowPreview).text = preview
+
+                rowView.findViewById<Button>(R.id.btnConversationRowRename).setOnClickListener {
+                    openRenameDialog(row)
+                }
+                rowView.findViewById<Button>(R.id.btnConversationRowDelete).setOnClickListener {
+                    confirmDelete(row)
+                }
+                rowView.findViewById<Button>(R.id.btnConversationRowCopy).setOnClickListener {
+                    copyConversation(row)
+                }
+                rowView.findViewById<Button>(R.id.btnConversationRowExport).setOnClickListener {
+                    exportConversation(row)
+                }
+                rowView.setOnLongClickListener {
+                    openRenameDialog(row)
+                    true
+                }
+                return rowView
+            }
+        }
+        tvStatus.visibility = View.VISIBLE
+        tvStatus.text = if (visibleRows.isEmpty()) {
+            getString(R.string.conversation_empty)
+        } else {
+            "${visibleRows.size} ${getString(R.string.conversation_source_all)}"
+        }
+    }
+
+    private fun openRenameDialog(row: ConversationRow) {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            setText(row.title)
+            setSelection(text.length)
+            hint = getString(R.string.conversation_title_hint)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (18 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.conversation_action_rename))
+            .setView(container)
+            .setNegativeButton(getString(R.string.cancel), null)
+            .setPositiveButton(getString(R.string.ok), null)
+            .create()
+            .also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val nextTitle = input.text.toString().trim()
+                        if (nextTitle.isEmpty()) {
+                            input.error = getString(R.string.conversation_title_hint)
+                            return@setOnClickListener
+                        }
+                        renameConversation(row, nextTitle) {
+                            dialog.dismiss()
+                        }
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun renameConversation(row: ConversationRow, newTitle: String, onDone: () -> Unit) {
+        Thread {
+            try {
+                when (row.source) {
+                    SourceType.CODEX -> {
+                        LocalBridgeClients.callCodexRpc(
+                            "thread/name/set",
+                            JSONObject()
+                                .put("threadId", row.id)
+                                .put("name", newTitle),
+                        )
+                    }
+                    SourceType.OPENCLAW -> {
+                        gateway.call(
+                            "sessions.patch",
+                            JSONObject()
+                                .put("key", row.id)
+                                .put("label", newTitle),
+                        )
+                    }
+                    SourceType.ALL -> Unit
+                }
+                row.title = newTitle
+                runOnUiThread {
+                    applyFilterAndRender()
+                    Toast.makeText(this, getString(R.string.conversation_renamed_toast), Toast.LENGTH_SHORT).show()
+                    onDone()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.conversation_update_failed) + " " + (error.message ?: ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun confirmDelete(row: ConversationRow) {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.conversation_delete_confirm_title))
+            .setMessage(getString(R.string.conversation_delete_confirm_message))
+            .setNegativeButton(getString(R.string.cancel), null)
+            .setPositiveButton(getString(R.string.conversation_action_delete)) { _, _ ->
+                deleteConversation(row)
+            }
+            .show()
+    }
+
+    private fun deleteConversation(row: ConversationRow) {
+        Thread {
+            try {
+                when (row.source) {
+                    SourceType.CODEX -> {
+                        LocalBridgeClients.callCodexRpc(
+                            "thread/archive",
+                            JSONObject().put("threadId", row.id),
+                        )
+                        deleteCodexPathIfPossible(row.path)
+                    }
+                    SourceType.OPENCLAW -> {
+                        gateway.call(
+                            "sessions.delete",
+                            JSONObject()
+                                .put("key", row.id)
+                                .put("deleteTranscript", true)
+                                .put("emitLifecycleHooks", false),
+                        )
+                    }
+                    SourceType.ALL -> Unit
+                }
+                allRows.removeAll { it.source == row.source && it.id == row.id }
+                runOnUiThread {
+                    applyFilterAndRender()
+                    Toast.makeText(this, getString(R.string.conversation_deleted_toast), Toast.LENGTH_SHORT).show()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.conversation_delete_failed) + " " + (error.message ?: ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun deleteCodexPathIfPossible(pathValue: String) {
+        val rawPath = pathValue.trim()
+        if (rawPath.isEmpty()) return
+        val baseHome = BootstrapInstaller.getPaths(this).homeDir
+        val target = if (rawPath.startsWith("/")) File(rawPath) else File(baseHome, rawPath)
+        val canonicalTarget = runCatching { target.canonicalFile }.getOrNull() ?: return
+        val canonicalHome = runCatching { File(baseHome).canonicalFile }.getOrNull() ?: return
+        if (!canonicalTarget.path.startsWith(canonicalHome.path)) return
+        if (canonicalTarget.exists()) {
+            canonicalTarget.deleteRecursively()
+        }
+    }
+
+    private fun copyConversation(row: ConversationRow) {
+        Thread {
+            try {
+                val text = loadConversationTranscript(row)
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText(row.title, text)
+                clipboard.setPrimaryClip(clip)
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.conversation_copied_toast), Toast.LENGTH_SHORT).show()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.conversation_copy_failed) + " " + (error.message ?: ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun exportConversation(row: ConversationRow) {
+        Thread {
+            try {
+                val text = loadConversationTranscript(row)
+                val exportDir = File("/sdcard/Download/AnyClaw/exports")
+                exportDir.mkdirs()
+                val safeName = row.title.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(48).ifEmpty { "conversation" }
+                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                val file = File(exportDir, "${safeName}_${stamp}.txt")
+                file.writeText(text)
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.conversation_exported_toast), Toast.LENGTH_SHORT).show()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.conversation_export_failed) + " " + (error.message ?: ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun loadConversationTranscript(row: ConversationRow): String {
+        return when (row.source) {
+            SourceType.CODEX -> loadCodexTranscript(row)
+            SourceType.OPENCLAW -> loadOpenClawTranscript(row)
+            SourceType.ALL -> ""
+        }
+    }
+
+    private fun loadCodexTranscript(row: ConversationRow): String {
+        val payload = LocalBridgeClients.callCodexRpc(
+            "thread/read",
+            JSONObject()
+                .put("threadId", row.id)
+                .put("includeTurns", true),
+        )
+        val thread = payload.optJSONObject("thread") ?: JSONObject()
+        val turns = thread.optJSONArray("turns") ?: JSONArray()
+        val out = StringBuilder()
+        out.appendLine(row.title)
+        out.appendLine("source=codex")
+        out.appendLine("id=${row.id}")
+        out.appendLine()
+        for (turnIndex in 0 until turns.length()) {
+            val turn = turns.optJSONObject(turnIndex) ?: continue
+            val items = turn.optJSONArray("items") ?: continue
+            for (itemIndex in 0 until items.length()) {
+                val item = items.optJSONObject(itemIndex) ?: continue
+                when (item.optString("type", "")) {
+                    "userMessage" -> {
+                        val text = parseCodexUserText(item.optJSONArray("content"))
+                        if (text.isNotEmpty()) {
+                            out.appendLine("User: $text")
+                        }
+                    }
+                    "agentMessage" -> {
+                        val text = item.optString("text", "").trim()
+                        if (text.isNotEmpty()) {
+                            out.appendLine("Assistant: $text")
+                        }
+                    }
+                }
+            }
+            out.appendLine()
+        }
+        return out.toString().trim()
+    }
+
+    private fun parseCodexUserText(content: JSONArray?): String {
+        if (content == null) return ""
+        val chunks = mutableListOf<String>()
+        for (index in 0 until content.length()) {
+            val block = content.optJSONObject(index) ?: continue
+            if (block.optString("type", "") == "text") {
+                val text = block.optString("text", "").trim()
+                if (text.isNotEmpty()) chunks += text
+            }
+        }
+        return chunks.joinToString("\n").trim()
+    }
+
+    private fun loadOpenClawTranscript(row: ConversationRow): String {
+        val payload = gateway.call(
+            "chat.history",
+            JSONObject()
+                .put("sessionKey", row.id)
+                .put("limit", 400),
+        )
+        val messages = payload.optJSONArray("messages") ?: JSONArray()
+        val out = StringBuilder()
+        out.appendLine(row.title)
+        out.appendLine("source=openclaw")
+        out.appendLine("sessionKey=${row.id}")
+        out.appendLine()
+        for (index in 0 until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            val role = message.optString("role", "unknown")
+            val text = parseOpenClawMessageText(message.optJSONArray("content"))
+            if (text.isNotEmpty()) {
+                out.appendLine("${role.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }}: $text")
+            }
+            out.appendLine()
+        }
+        return out.toString().trim()
+    }
+
+    private fun parseOpenClawMessageText(content: JSONArray?): String {
+        if (content == null) return ""
+        val chunks = mutableListOf<String>()
+        for (index in 0 until content.length()) {
+            val block = content.optJSONObject(index) ?: continue
+            when (block.optString("type", "")) {
+                "text" -> {
+                    val text = block.optString("text", "").trim()
+                    if (text.isNotEmpty()) chunks += text
+                }
+                "thinking" -> {
+                    val text = block.optString("thinking", "").trim()
+                    if (text.isNotEmpty()) chunks += "[thinking] $text"
+                }
+                "toolCall" -> {
+                    val toolName = block.optString("name", "").trim()
+                    if (toolName.isNotEmpty()) chunks += "[toolCall] $toolName"
+                }
+                "toolResult" -> {
+                    val toolName = block.optString("toolName", "").trim()
+                    if (toolName.isNotEmpty()) chunks += "[toolResult] $toolName"
+                }
+            }
+        }
+        return chunks.joinToString("\n").trim()
+    }
+}

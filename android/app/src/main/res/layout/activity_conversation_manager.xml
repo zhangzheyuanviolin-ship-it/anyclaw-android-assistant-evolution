@@ -6,59 +6,65 @@
     android:padding="16dp">
 
     <TextView
-        android:id="@+id/tvPromptManagerTitle"
+        android:id="@+id/tvConversationManagerTitle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/prompt_manager_title"
+        android:importantForAccessibility="yes"
+        android:text="@string/conversation_manager_title"
         android:textSize="22sp"
-        android:textStyle="bold"
-        android:importantForAccessibility="yes" />
+        android:textStyle="bold" />
 
     <TextView
-        android:id="@+id/tvPromptManagerSubtitle"
+        android:id="@+id/tvConversationManagerSubtitle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:text="@string/prompt_manager_subtitle"
-        android:textSize="14sp"
-        android:importantForAccessibility="yes" />
+        android:importantForAccessibility="yes"
+        android:text="@string/conversation_manager_subtitle"
+        android:textSize="14sp" />
 
     <LinearLayout
-        android:id="@+id/layoutPromptActions"
+        android:id="@+id/layoutConversationFilters"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/btnAddPrompt"
+        <Spinner
+            android:id="@+id/spinnerConversationSource"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="@string/prompt_add_button_text"
             android:importantForAccessibility="yes" />
 
         <Button
-            android:id="@+id/btnClearSelectedPrompt"
-            android:layout_width="0dp"
+            android:id="@+id/btnConversationRefresh"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/prompt_clear_selected_button_text"
-            android:importantForAccessibility="yes" />
-
+            android:importantForAccessibility="yes"
+            android:text="@string/conversation_refresh" />
     </LinearLayout>
 
-    <Button
-        android:id="@+id/btnDeleteSelectedPrompt"
+    <ProgressBar
+        android:id="@+id/progressConversation"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:indeterminate="true"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/tvConversationStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:text="@string/prompt_delete_selected_button_text"
-        android:importantForAccessibility="yes" />
+        android:importantForAccessibility="yes"
+        android:text="@string/conversation_loading"
+        android:visibility="gone" />
 
     <ListView
-        android:id="@+id/listPromptProfiles"
+        android:id="@+id/listConversations"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="12dp"

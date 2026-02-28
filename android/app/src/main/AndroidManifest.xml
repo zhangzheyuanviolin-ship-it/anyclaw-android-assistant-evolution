@@ -45,6 +45,18 @@
             android:label="@string/prompt_manager_title"
             android:windowSoftInputMode="adjustResize" />
 
+        <activity
+            android:name=".ConversationManagerActivity"
+            android:exported="false"
+            android:label="@string/conversation_manager_title"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ModelManagerActivity"
+            android:exported="false"
+            android:label="@string/model_manager_title"
+            android:windowSoftInputMode="adjustResize" />
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

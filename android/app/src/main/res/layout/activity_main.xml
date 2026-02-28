@@ -42,6 +42,30 @@
             android:textAllCaps="false"
             android:visibility="gone" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnConversationManager"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:contentDescription="@string/conversation_manager_button_desc"
+            android:importantForAccessibility="yes"
+            android:minHeight="48dp"
+            android:text="@string/conversation_manager_button_text"
+            android:textAllCaps="false"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnModelManager"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:contentDescription="@string/model_manager_button_desc"
+            android:importantForAccessibility="yes"
+            android:minHeight="48dp"
+            android:text="@string/model_manager_button_text"
+            android:textAllCaps="false"
+            android:visibility="gone" />
+
     </LinearLayout>
 
     <LinearLayout

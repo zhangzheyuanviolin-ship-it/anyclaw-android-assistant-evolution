@@ -123,6 +123,34 @@
                     <code v-else class="message-inline-code">{{ segment.value }}</code>
                   </template>
                 </p>
+                <div
+                  v-if="message.messageType !== 'worked' && (message.role === 'assistant' || message.role === 'user')"
+                  class="message-actions"
+                >
+                  <button
+                    class="message-action-button"
+                    type="button"
+                    @click="emit('copyMessage', message.id)"
+                  >
+                    Copy
+                  </button>
+                  <button
+                    class="message-action-button"
+                    type="button"
+                    :disabled="typeof message.turnIndex !== 'number'"
+                    @click="emit('deleteFromMessage', message.id)"
+                  >
+                    Delete
+                  </button>
+                  <button
+                    class="message-action-button"
+                    type="button"
+                    :disabled="typeof message.turnIndex !== 'number'"
+                    @click="emit('branchFromMessage', message.id)"
+                  >
+                    Branch
+                  </button>
+                </div>
               </article>
             </article>
           </div>
@@ -175,6 +203,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   updateScrollState: [payload: { threadId: string; state: ThreadScrollState }]
   respondServerRequest: [payload: { id: number; result?: unknown; error?: { code?: number; message: string } }]
+  copyMessage: [messageId: string]
+  deleteFromMessage: [messageId: string]
+  branchFromMessage: [messageId: string]
 }>()
 
 const conversationListRef = ref<HTMLElement | null>(null)
@@ -845,6 +876,18 @@ onBeforeUnmount(() => {
 
 .message-text {
   @apply m-0 text-sm leading-relaxed whitespace-pre-wrap text-slate-800;
+}
+
+.message-actions {
+  @apply mt-2 flex flex-wrap gap-2;
+}
+
+.message-action-button {
+  @apply rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 transition hover:bg-slate-100;
+}
+
+.message-action-button:disabled {
+  @apply cursor-not-allowed opacity-50 hover:bg-white;
 }
 
 .message-inline-code {

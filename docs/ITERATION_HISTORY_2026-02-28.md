@@ -14,6 +14,10 @@
 - shizuku bridge：system-shell 通道完成并实测通过
 - prompt manager：新建/编辑/删除/启用及会话注入完成
 - fixed signing：固定签名与可覆盖升级链路完成
+- conversation manager：统一会话管理入口完成（Codex + OpenClaw，支持重命名/删除/复制/导出）
+- model manager：大龙虾模型管理入口完成（模型切换 + provider URL/API 密钥配置）
+- message actions：单条消息操作完成（复制、从该消息删除后续上下文、从该消息创建分支）
+- openclaw memory preflight：本地记忆检索相关工具链预检与修复回退链路完成
 
 ## 3. 交接期关键版本事实
 
@@ -42,4 +46,3 @@
 - 双令牌必须严格区分并最小权限使用
 - 令牌和签名私钥不得明文暴露
 - 公开仓库不提交签名私钥资产
-

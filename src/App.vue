@@ -110,7 +110,10 @@
                   :live-overlay="liveOverlay"
                   :pending-requests="selectedThreadServerRequests"
                   @update-scroll-state="onUpdateThreadScrollState"
-                  @respond-server-request="onRespondServerRequest" />
+                  @respond-server-request="onRespondServerRequest"
+                  @copy-message="onCopyMessage"
+                  @delete-from-message="onDeleteFromMessage"
+                  @branch-from-message="onBranchFromMessage" />
               </div>
 
               <ThreadComposer :active-thread-id="composerThreadContextId"
@@ -170,6 +173,8 @@ const {
   selectThread,
   setThreadScrollState,
   archiveThreadById,
+  deleteFromMessage,
+  forkFromMessage,
   sendMessageToSelectedThread,
   sendMessageToNewThread,
   interruptSelectedThreadTurn,
@@ -331,6 +336,41 @@ function onUpdateThreadScrollState(payload: { threadId: string; state: ThreadScr
 
 function onRespondServerRequest(payload: { id: number; result?: unknown; error?: { code?: number; message: string } }): void {
   void respondToPendingServerRequest(payload)
+}
+
+function onCopyMessage(messageId: string): void {
+  const row = filteredMessages.value.find((message) => message.id === messageId)
+  if (!row || row.text.trim().length === 0) return
+  if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return
+  void navigator.clipboard.writeText(row.text)
+}
+
+function onDeleteFromMessage(messageId: string): void {
+  if (typeof window !== 'undefined') {
+    const shouldContinue = window.confirm('Delete this message and all later context?')
+    if (!shouldContinue) return
+  }
+  void (async () => {
+    try {
+      await deleteFromMessage(messageId)
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        window.alert(error instanceof Error ? error.message : 'Failed to delete message')
+      }
+    }
+  })()
+}
+
+function onBranchFromMessage(messageId: string): void {
+  void (async () => {
+    try {
+      await forkFromMessage(messageId)
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        window.alert(error instanceof Error ? error.message : 'Failed to create branch')
+      }
+    }
+  })()
 }
 
 function onToggleAutoRefreshTimer(): void {

@@ -107,6 +107,37 @@ export async function archiveThread(threadId: string): Promise<void> {
   await callRpc('thread/archive', { threadId })
 }
 
+export async function forkThread(threadId: string): Promise<string> {
+  try {
+    const payload = await callRpc<{ thread?: { id?: string } }>('thread/fork', {
+      threadId,
+      persistExtendedHistory: true,
+    })
+    const nextThreadId = normalizeThreadIdFromPayload(payload)
+    if (!nextThreadId) {
+      throw new Error('thread/fork did not return a thread id')
+    }
+    return nextThreadId
+  } catch (error) {
+    throw normalizeCodexApiError(error, `Failed to fork thread ${threadId}`, 'thread/fork')
+  }
+}
+
+export async function rollbackThread(threadId: string, numTurns: number): Promise<void> {
+  const normalizedThreadId = threadId.trim()
+  if (!normalizedThreadId || !Number.isInteger(numTurns) || numTurns < 1) {
+    return
+  }
+  try {
+    await callRpc('thread/rollback', {
+      threadId: normalizedThreadId,
+      numTurns,
+    })
+  } catch (error) {
+    throw normalizeCodexApiError(error, `Failed to rollback thread ${normalizedThreadId}`, 'thread/rollback')
+  }
+}
+
 function normalizeThreadIdFromPayload(payload: unknown): string {
   if (!payload || typeof payload !== 'object') return ''
   const record = payload as Record<string, unknown>

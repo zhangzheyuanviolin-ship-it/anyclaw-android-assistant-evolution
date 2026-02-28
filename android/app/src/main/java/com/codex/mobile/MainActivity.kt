@@ -39,6 +39,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var permissionCenterButton: Button
     private lateinit var promptManagerButton: Button
+    private lateinit var conversationManagerButton: Button
+    private lateinit var modelManagerButton: Button
     private lateinit var serverManager: CodexServerManager
     private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
@@ -78,6 +80,8 @@ class MainActivity : AppCompatActivity() {
         progressBar = findViewById(R.id.progressBar)
         permissionCenterButton = findViewById(R.id.btnPermissionCenter)
         promptManagerButton = findViewById(R.id.btnPromptManager)
+        conversationManagerButton = findViewById(R.id.btnConversationManager)
+        modelManagerButton = findViewById(R.id.btnModelManager)
 
         serverManager = CodexServerManager(this)
 
@@ -86,6 +90,12 @@ class MainActivity : AppCompatActivity() {
         }
         promptManagerButton.setOnClickListener {
             startActivity(Intent(this, PromptManagerActivity::class.java))
+        }
+        conversationManagerButton.setOnClickListener {
+            startActivity(Intent(this, ConversationManagerActivity::class.java))
+        }
+        modelManagerButton.setOnClickListener {
+            startActivity(Intent(this, ModelManagerActivity::class.java))
         }
 
         requestBatteryOptimizationExemption()
@@ -323,6 +333,9 @@ class MainActivity : AppCompatActivity() {
 
         // Step 7: Configure and start OpenClaw
         if (serverManager.isOpenClawInstalled()) {
+            updateStatus("Running OpenClaw preflight…")
+            serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
+
             updateStatus("Configuring OpenClaw…")
             serverManager.configureOpenClawAuth()
 
@@ -353,6 +366,8 @@ class MainActivity : AppCompatActivity() {
             webView.visibility = View.VISIBLE
             permissionCenterButton.visibility = View.VISIBLE
             promptManagerButton.visibility = View.VISIBLE
+            conversationManagerButton.visibility = View.VISIBLE
+            modelManagerButton.visibility = View.VISIBLE
             webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
         }
     }
@@ -530,6 +545,8 @@ class MainActivity : AppCompatActivity() {
         if (show) {
             permissionCenterButton.visibility = View.GONE
             promptManagerButton.visibility = View.GONE
+            conversationManagerButton.visibility = View.GONE
+            modelManagerButton.visibility = View.GONE
         }
     }
 

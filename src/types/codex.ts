@@ -76,6 +76,8 @@ export type UiMessage = {
   text: string
   images?: string[]
   messageType?: string
+  turnId?: string
+  turnIndex?: number
   rawPayload?: string
   isUnhandled?: boolean
 }
