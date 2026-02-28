@@ -1,0 +1,19 @@
+node_modules/
+dist/
+dist-cli/
+*.tsbuildinfo
+PROJECT_SPEC.md
+codex_tools_from_notices.txt
+package-lock.json
+/output/
+android/signing/*.p12
+android/signing/*.pfx
+android/signing/*.jks
+android/signing/*.keystore
+android/signing/*.pem
+android/signing/*.key
+android/signing/*.crt
+
+# Never commit signing private material
+android/signing/*.p12.base64.txt
+android/signing/*password*

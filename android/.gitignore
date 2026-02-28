@@ -1,0 +1,19 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Bootstrap archive (downloaded at build time, ~30MB)
+app/src/main/assets/bootstrap-*.zip
+
+# Server bundle (built from parent project)
+app/src/main/assets/server-bundle/
+
+# Gradle wrapper jar (downloaded automatically)
+gradle/wrapper/gradle-wrapper.jar
+/.kotlin/

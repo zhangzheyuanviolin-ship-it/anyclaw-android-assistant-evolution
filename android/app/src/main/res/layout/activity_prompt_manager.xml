@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/tvPromptManagerTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/prompt_manager_title"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:importantForAccessibility="yes" />
+
+    <TextView
+        android:id="@+id/tvPromptManagerSubtitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/prompt_manager_subtitle"
+        android:textSize="14sp"
+        android:importantForAccessibility="yes" />
+
+    <LinearLayout
+        android:id="@+id/layoutPromptActions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnAddPrompt"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/prompt_add_button_text"
+            android:importantForAccessibility="yes" />
+
+        <Button
+            android:id="@+id/btnClearSelectedPrompt"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/prompt_clear_selected_button_text"
+            android:importantForAccessibility="yes" />
+
+    </LinearLayout>
+
+    <ListView
+        android:id="@+id/listPromptProfiles"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="12dp"
+        android:layout_weight="1"
+        android:importantForAccessibility="yes" />
+
+</LinearLayout>
