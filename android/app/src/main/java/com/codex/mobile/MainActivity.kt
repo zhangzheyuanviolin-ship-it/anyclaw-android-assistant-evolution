@@ -325,17 +325,8 @@ class MainActivity : AppCompatActivity() {
         if (!codexLoggedIn) {
             updateStatus("Codex not logged in", "Continuing in OpenClaw mode")
         } else {
+            // Keep startup fast and non-blocking even when Codex network is unavailable.
             updateStatus("Codex authenticated")
-
-            // Step 6: Codex health check is best-effort and non-fatal.
-            updateStatus("Verifying Codex API access…", "Sending test message")
-            val healthOk = serverManager.healthCheck { msg -> updateDetail(msg) }
-            if (healthOk) {
-                updateStatus("Codex API verified")
-            } else {
-                Log.w(TAG, "Codex health check failed; continuing with OpenClaw mode")
-                updateStatus("Codex API unavailable", "Continuing in OpenClaw mode")
-            }
         }
 
         // Step 7: Configure and start OpenClaw

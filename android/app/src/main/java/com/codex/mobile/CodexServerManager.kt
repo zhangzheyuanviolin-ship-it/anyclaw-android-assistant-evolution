@@ -7,6 +7,7 @@ import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -1512,7 +1513,18 @@ WEOF
             line = reader.readLine()
         }
 
-        val exitCode = proc.waitFor()
+        val finished = proc.waitFor(20, TimeUnit.SECONDS)
+        if (!finished) {
+            onProgress("Health check timed out; skipping")
+            proc.destroy()
+            if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+                proc.destroyForcibly()
+            }
+            Log.w(TAG, "Health check timed out and process was terminated")
+            return false
+        }
+
+        val exitCode = proc.exitValue()
         val output = sb.toString().trim()
         Log.i(TAG, "Health check exit=$exitCode output=$output")
 

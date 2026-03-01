@@ -201,7 +201,7 @@ class ModelManagerActivity : AppCompatActivity() {
         val providerNames = providers.keys().asSequence().toList().sorted()
         for (providerName in providerNames) {
             val providerObj = providers.optJSONObject(providerName) ?: continue
-            val apiKey = providerObj.optString("apiKey", "").trim()
+            val apiKey = normalizeApiKey(providerObj.optString("apiKey", ""))
             val baseUrl = providerObj.optString("baseUrl", "").trim().ifEmpty { inferBaseUrlForProvider(providerName) }
             val mode = when {
                 apiKey.isNotEmpty() -> AuthMode.API
@@ -229,7 +229,7 @@ class ModelManagerActivity : AppCompatActivity() {
         val overrides = readAgentModelOverrides()
         for ((providerName, ids) in overrides) {
             val providerObj = providers.optJSONObject(providerName)
-            val apiKey = providerObj?.optString("apiKey", "")?.trim().orEmpty()
+            val apiKey = providerObj?.optString("apiKey", "")?.let { normalizeApiKey(it) }.orEmpty()
             val baseUrl = providerObj?.optString("baseUrl", "")?.trim().orEmpty().ifEmpty {
                 inferBaseUrlForProvider(providerName)
             }
@@ -258,7 +258,7 @@ class ModelManagerActivity : AppCompatActivity() {
         if (currentModel.isNotEmpty()) {
             val providerName = inferProviderName(currentModel)
             val providerObj = if (providerName.isNotEmpty()) providers.optJSONObject(providerName) else null
-            val apiKey = providerObj?.optString("apiKey", "")?.trim().orEmpty()
+            val apiKey = providerObj?.optString("apiKey", "")?.let { normalizeApiKey(it) }.orEmpty()
             val mode = when {
                 apiKey.isNotEmpty() -> AuthMode.API
                 providerName.isNotEmpty() && tokenProvidersSet.contains(providerName) -> AuthMode.TOKEN
@@ -341,7 +341,7 @@ class ModelManagerActivity : AppCompatActivity() {
             ?.optJSONObject("providers")
             ?: JSONObject()
         val providerObj = providers.optJSONObject(providerName)
-        val apiKey = providerObj?.optString("apiKey", "")?.trim().orEmpty()
+        val apiKey = providerObj?.optString("apiKey", "")?.let { normalizeApiKey(it) }.orEmpty()
         return when {
             apiKey.isNotEmpty() -> AuthMode.API
             tokenProviderSet.contains(providerName) -> AuthMode.TOKEN
@@ -441,7 +441,7 @@ class ModelManagerActivity : AppCompatActivity() {
     private fun setPrimaryModel(row: ModelRow) {
         Thread {
             try {
-                val root = JSONObject(configRaw)
+                val root = readLatestConfigRoot()
                 val agents = ensureObject(root, "agents")
                 val defaults = ensureObject(agents, "defaults")
                 val model = ensureObject(defaults, "model")
@@ -470,11 +470,13 @@ class ModelManagerActivity : AppCompatActivity() {
                 ensureAgentModelOverride(row.provider, row.id)
                 applyConfig(root, "set primary model: ${row.id}")
                 runCatching {
-                    gateway.call(
+                    callGatewayWithRetry(
                         "sessions.patch",
                         JSONObject()
                             .put("key", "agent:main:main")
                             .put("model", row.id),
+                        attempts = 6,
+                        baseDelayMs = 200,
                     )
                 }
 
@@ -594,7 +596,8 @@ class ModelManagerActivity : AppCompatActivity() {
                 if (modelId.isBlank() || !modelId.contains('/')) {
                     throw IllegalArgumentException(getString(R.string.model_manager_config_model_id_hint))
                 }
-                if (apiKey.isBlank()) {
+                val normalizedApiKey = normalizeApiKey(apiKey)
+                if (normalizedApiKey.isBlank()) {
                     throw IllegalArgumentException(getString(R.string.model_manager_config_key_hint))
                 }
 
@@ -603,7 +606,7 @@ class ModelManagerActivity : AppCompatActivity() {
                     throw IllegalArgumentException(getString(R.string.model_manager_config_model_id_hint))
                 }
 
-                val root = JSONObject(configRaw)
+                val root = readLatestConfigRoot()
                 val models = ensureObject(root, "models")
                 val providers = ensureObject(models, "providers")
                 val provider = ensureObject(providers, providerName)
@@ -613,7 +616,7 @@ class ModelManagerActivity : AppCompatActivity() {
                     "baseUrl",
                     if (normalizedBaseUrl.isBlank()) inferBaseUrlForProvider(providerName) else normalizedBaseUrl,
                 )
-                provider.put("apiKey", apiKey)
+                provider.put("apiKey", normalizedApiKey)
                 if (!provider.has("auth")) {
                     provider.put("auth", "api-key")
                 }
@@ -638,11 +641,13 @@ class ModelManagerActivity : AppCompatActivity() {
                 applyConfig(root, "create model: $modelId")
                 if (setAsPrimary) {
                     runCatching {
-                        gateway.call(
+                        callGatewayWithRetry(
                             "sessions.patch",
                             JSONObject()
                                 .put("key", "agent:main:main")
                                 .put("model", modelId),
+                            attempts = 6,
+                            baseDelayMs = 200,
                         )
                     }
                 }
@@ -666,10 +671,11 @@ class ModelManagerActivity : AppCompatActivity() {
     private fun saveProviderConfig(row: ModelRow, baseUrl: String, apiKey: String) {
         Thread {
             try {
-                val root = JSONObject(configRaw)
+                val root = readLatestConfigRoot()
                 val models = ensureObject(root, "models")
                 val providers = ensureObject(models, "providers")
                 val provider = ensureObject(providers, row.provider)
+                val normalizedApiKey = normalizeApiKey(apiKey)
 
                 val normalizedBaseUrl = normalizeProviderBaseUrl(row.provider, baseUrl)
                 if (normalizedBaseUrl.isEmpty()) {
@@ -677,10 +683,10 @@ class ModelManagerActivity : AppCompatActivity() {
                 } else {
                     provider.put("baseUrl", normalizedBaseUrl)
                 }
-                if (apiKey.isEmpty()) {
+                if (normalizedApiKey.isEmpty()) {
                     provider.remove("apiKey")
                 } else {
-                    provider.put("apiKey", apiKey)
+                    provider.put("apiKey", normalizedApiKey)
                 }
                 if (!provider.has("auth")) {
                     provider.put("auth", "api-key")
@@ -716,21 +722,30 @@ class ModelManagerActivity : AppCompatActivity() {
     private fun testCurrentModelConnection() {
         Thread {
             try {
-                val row = resolveCurrentModelRow()
-                    ?: throw IllegalStateException(getString(R.string.model_manager_provider_missing))
-                val probe = if (row.mode == AuthMode.API) {
-                    val root = JSONObject(configRaw)
-                    val provider = resolveApiProvider(root, row.provider)
-                        ?: throw IllegalStateException(getString(R.string.model_manager_provider_missing))
-                    val baseUrl = provider.config.optString("baseUrl", "").trim()
-                        .ifEmpty { inferBaseUrlForProvider(provider.name) }
-                    val apiKey = provider.config.optString("apiKey", "").trim()
+                val root = readLatestConfigRoot()
+                val latestModelId = readPrimaryModelId(root).ifEmpty { currentModelId }
+                val latestProviderName = inferProviderName(latestModelId)
+                var debugInfo = ""
+                val namedProvider = resolveNamedApiProvider(root, latestProviderName)
+                val probe = if (namedProvider != null) {
+                    val baseUrl = normalizeProviderBaseUrl(
+                        namedProvider.name,
+                        namedProvider.config.optString("baseUrl", "").trim(),
+                    )
+                        .ifEmpty { inferBaseUrlForProvider(namedProvider.name) }
+                    val apiKey = normalizeApiKey(namedProvider.config.optString("apiKey", ""))
                     if (apiKey.isEmpty()) {
                         throw IllegalStateException(getString(R.string.model_manager_provider_missing))
                     }
+                    debugInfo = " provider=${namedProvider.name} keyTail=${apiKeyTail(apiKey)}"
                     runConnectionProbe(baseUrl, apiKey)
                 } else {
-                    runTokenProbe(row.id)
+                    val tokenModelId = latestModelId.ifEmpty { resolveCurrentModelRow()?.id.orEmpty() }
+                    if (tokenModelId.isEmpty()) {
+                        throw IllegalStateException(getString(R.string.model_manager_provider_missing))
+                    }
+                    debugInfo = " provider=${latestProviderName.ifEmpty { "token" }} mode=token"
+                    runTokenProbe(tokenModelId)
                 }
 
                 runOnUiThread {
@@ -741,7 +756,7 @@ class ModelManagerActivity : AppCompatActivity() {
                     }
                     Toast.makeText(
                         this,
-                        "$prefix HTTP ${probe.code} ${probe.detail}",
+                        "$prefix$debugInfo HTTP ${probe.code} ${probe.detail}",
                         if (probe.ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
                     ).show()
                 }
@@ -758,12 +773,31 @@ class ModelManagerActivity : AppCompatActivity() {
     }
 
     private fun fetchCurrentModelList() {
-        val row = resolveCurrentModelRow()
-        if (row == null) {
-            Toast.makeText(this, getString(R.string.model_manager_provider_missing), Toast.LENGTH_LONG).show()
-            return
-        }
-        fetchModelsForRow(row)
+        Thread {
+            try {
+                val root = readLatestConfigRoot()
+                val latestModelId = readPrimaryModelId(root).ifEmpty { currentModelId }
+                val latestProviderName = inferProviderName(latestModelId)
+                val namedProvider = resolveNamedApiProvider(root, latestProviderName)
+                if (namedProvider != null) {
+                    fetchModelsFromApiProvider(namedProvider.name)
+                } else {
+                    val providerName = latestProviderName.ifEmpty { resolveCurrentModelRow()?.provider.orEmpty() }
+                    if (providerName.isEmpty()) {
+                        throw IllegalStateException(getString(R.string.model_manager_provider_missing))
+                    }
+                    fetchModelsFromTokenProvider(providerName)
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.model_manager_save_failed) + " " + (error.message ?: ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }.start()
     }
 
     private fun fetchModelsForRow(row: ModelRow) {
@@ -787,13 +821,16 @@ class ModelManagerActivity : AppCompatActivity() {
     }
 
     private fun fetchModelsFromApiProvider(providerName: String) {
-        val root = JSONObject(configRaw)
-        val provider = resolveApiProvider(root, providerName)
+        val root = readLatestConfigRoot()
+        val provider = resolveNamedApiProvider(root, providerName)
             ?: throw IllegalStateException(getString(R.string.model_manager_provider_missing))
 
-        val baseUrl = provider.config.optString("baseUrl", "").trim()
+        val baseUrl = normalizeProviderBaseUrl(
+            provider.name,
+            provider.config.optString("baseUrl", "").trim(),
+        )
             .ifEmpty { inferBaseUrlForProvider(provider.name) }
-        val apiKey = provider.config.optString("apiKey", "").trim()
+        val apiKey = normalizeApiKey(provider.config.optString("apiKey", ""))
         if (apiKey.isEmpty()) {
             throw IllegalStateException(getString(R.string.model_manager_provider_missing))
         }
@@ -825,7 +862,7 @@ class ModelManagerActivity : AppCompatActivity() {
     }
 
     private fun fetchModelsFromTokenProvider(providerName: String) {
-        val payload = gateway.call("models.list", JSONObject())
+        val payload = callGatewayWithRetry("models.list", JSONObject(), attempts = 6, baseDelayMs = 200)
         val models = payload.optJSONArray("models") ?: JSONArray()
 
         val collected = linkedSetOf<String>()
@@ -863,14 +900,16 @@ class ModelManagerActivity : AppCompatActivity() {
         val sessionKey = "agent:main:model-probe-${System.currentTimeMillis()}"
         val idempotency = "model-probe-${System.currentTimeMillis()}"
         return try {
-            gateway.call(
+            callGatewayWithRetry(
                 "sessions.patch",
                 JSONObject()
                     .put("key", sessionKey)
                     .put("model", modelId),
+                attempts = 6,
+                baseDelayMs = 200,
             )
 
-            val sendPayload = gateway.call(
+            val sendPayload = callGatewayWithRetry(
                 "chat.send",
                 JSONObject()
                     .put("sessionKey", sessionKey)
@@ -878,29 +917,35 @@ class ModelManagerActivity : AppCompatActivity() {
                     .put("deliver", false)
                     .put("timeoutMs", 12000)
                     .put("idempotencyKey", idempotency),
+                attempts = 6,
+                baseDelayMs = 200,
             )
             val runId = sendPayload.optString("runId", "").trim()
             if (runId.isEmpty()) {
                 return ProviderConnectionProbe(false, 502, "chat.send missing runId")
             }
 
-            val waitPayload = gateway.call(
+            val waitPayload = callGatewayWithRetry(
                 "agent.wait",
                 JSONObject()
                     .put("runId", runId)
                     .put("timeoutMs", 25000),
+                attempts = 4,
+                baseDelayMs = 250,
             )
             val status = waitPayload.optString("status", "").trim().lowercase(Locale.getDefault())
             val ok = status == "ok" || status == "completed"
             ProviderConnectionProbe(ok, if (ok) 200 else 502, "agent.wait=$status")
         } finally {
             runCatching {
-                gateway.call(
+                callGatewayWithRetry(
                     "sessions.delete",
                     JSONObject()
                         .put("key", sessionKey)
                         .put("deleteTranscript", true)
                         .put("emitLifecycleHooks", false),
+                    attempts = 3,
+                    baseDelayMs = 150,
                 )
             }
         }
@@ -921,7 +966,7 @@ class ModelManagerActivity : AppCompatActivity() {
         if (row.mode != AuthMode.API) return
         Thread {
             try {
-                val root = JSONObject(configRaw)
+                val root = readLatestConfigRoot()
                 val providers = root
                     .optJSONObject("models")
                     ?.optJSONObject("providers")
@@ -945,11 +990,13 @@ class ModelManagerActivity : AppCompatActivity() {
                     val model = ensureObject(defaults, "model")
                     model.put("primary", replacement.id)
                     runCatching {
-                        gateway.call(
+                        callGatewayWithRetry(
                             "sessions.patch",
                             JSONObject()
                                 .put("key", "agent:main:main")
                                 .put("model", replacement.id),
+                            attempts = 6,
+                            baseDelayMs = 200,
                         )
                     }
                 }
@@ -1181,7 +1228,7 @@ class ModelManagerActivity : AppCompatActivity() {
 
         if (preferredProvider.isNotBlank()) {
             val preferred = providers.optJSONObject(preferredProvider)
-            val apiKey = preferred?.optString("apiKey", "")?.trim().orEmpty()
+            val apiKey = preferred?.optString("apiKey", "")?.let { normalizeApiKey(it) }.orEmpty()
             if (preferred != null && apiKey.isNotEmpty()) {
                 return ProviderEntry(preferredProvider, preferred)
             }
@@ -1190,12 +1237,34 @@ class ModelManagerActivity : AppCompatActivity() {
         val names = providers.keys().asSequence().toList().sorted()
         for (name in names) {
             val item = providers.optJSONObject(name) ?: continue
-            val hasKey = item.optString("apiKey", "").trim().isNotEmpty()
+            val hasKey = normalizeApiKey(item.optString("apiKey", "")).isNotEmpty()
             if (hasKey) {
                 return ProviderEntry(name, item)
             }
         }
         return null
+    }
+
+    private fun resolveNamedApiProvider(root: JSONObject, providerName: String): ProviderEntry? {
+        if (providerName.isBlank()) return null
+        val providers = root
+            .optJSONObject("models")
+            ?.optJSONObject("providers")
+            ?: return null
+        val provider = providers.optJSONObject(providerName) ?: return null
+        val apiKey = normalizeApiKey(provider.optString("apiKey", ""))
+        if (apiKey.isEmpty()) return null
+        return ProviderEntry(providerName, provider)
+    }
+
+    private fun readPrimaryModelId(root: JSONObject): String {
+        return root
+            .optJSONObject("agents")
+            ?.optJSONObject("defaults")
+            ?.optJSONObject("model")
+            ?.optString("primary", "")
+            .orEmpty()
+            .trim()
     }
 
     private fun inferApiForProvider(providerName: String): String {
@@ -1251,6 +1320,23 @@ class ModelManagerActivity : AppCompatActivity() {
             normalized += "/v1"
         }
         return normalized
+    }
+
+    private fun normalizeApiKey(rawApiKey: String): String {
+        return rawApiKey.filterNot { it.isWhitespace() }.trim()
+    }
+
+    private fun apiKeyTail(apiKey: String): String {
+        val normalized = normalizeApiKey(apiKey)
+        if (normalized.length <= 4) return normalized
+        return normalized.takeLast(4)
+    }
+
+    private fun readLatestConfigRoot(): JSONObject {
+        val payload = callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
+        configRaw = payload.optString("raw", configRaw.ifBlank { "{}" })
+        configBaseHash = payload.optString("hash", configBaseHash)
+        return JSONObject(configRaw.ifBlank { "{}" })
     }
 
     private fun applyConfig(root: JSONObject, note: String) {
