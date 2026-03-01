@@ -349,7 +349,7 @@ WEOF
         // All packages needed for native compilation (koffi) in one batch.
         // Split into groups to avoid apt-get download failures on missing pkgs.
         val pkgGroups = listOf(
-            "git make cmake clang binutils lld",
+            "git make cmake clang binutils binutils-bin lld",
             "libllvm libedit libffi ndk-sysroot ndk-multilib libcompiler-rt",
             "libarchive libxml2 liblzma libcurl libuv libnghttp2 libnghttp3",
             "rhash jsoncpp",
@@ -417,6 +417,24 @@ WEOF
         val prefix = paths.prefixDir
         val cmd = """
             set -e
+
+            if [ ! -x "$prefix/libexec/binutils/ar" ] || [ ! -x "$prefix/libexec/binutils/ranlib" ]; then
+              echo "binutils missing, attempting targeted repair..."
+              cd "$prefix/tmp" || exit 1
+              apt-get update --allow-insecure-repositories 2>&1 || true
+              apt-get download --allow-unauthenticated binutils binutils-bin 2>&1 || true
+              rm -rf _binutils_stage
+              mkdir -p _binutils_stage
+              for deb in binutils*.deb binutils-bin*.deb; do
+                [ -f "${'$'}deb" ] && dpkg-deb -x "${'$'}deb" _binutils_stage/ 2>&1 || true
+              done
+              if [ -d "_binutils_stage/data/data/com.termux/files/usr" ]; then
+                cp -a _binutils_stage/data/data/com.termux/files/usr/* "$prefix/" 2>&1 || true
+              elif [ -d "_binutils_stage/usr" ]; then
+                cp -a _binutils_stage/usr/* "$prefix/" 2>&1 || true
+              fi
+              rm -rf _binutils_stage
+            fi
 
             fix_tool() {
               local name="${'$'}1"
@@ -863,6 +881,11 @@ H3
             |        "primary": "openai-codex/gpt-5.3-codex"
             |      },
             |      "memorySearch": {
+            |        "provider": "local",
+            |        "fallback": "none",
+            |        "local": {
+            |          "modelPath": "hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf"
+            |        },
             |        "store": {
             |          "vector": {
             |            "enabled": true,

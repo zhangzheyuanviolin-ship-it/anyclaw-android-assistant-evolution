@@ -28,14 +28,56 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:orientation="horizontal">
+        android:orientation="vertical">
 
-        <Button
-            android:id="@+id/btnModelRefresh"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:id="@+id/layoutModelActionRowTop"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:importantForAccessibility="yes"
-            android:text="@string/model_manager_refresh" />
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnModelRefresh"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:importantForAccessibility="yes"
+                android:text="@string/model_manager_refresh" />
+
+            <Button
+                android:id="@+id/btnModelCreate"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:importantForAccessibility="yes"
+                android:text="@string/model_manager_create_button" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/layoutModelActionRowBottom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnModelTestConnection"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:importantForAccessibility="yes"
+                android:text="@string/model_manager_test_connection" />
+
+            <Button
+                android:id="@+id/btnModelFetchModels"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:importantForAccessibility="yes"
+                android:text="@string/model_manager_fetch_models" />
+        </LinearLayout>
     </LinearLayout>
 
     <TextView

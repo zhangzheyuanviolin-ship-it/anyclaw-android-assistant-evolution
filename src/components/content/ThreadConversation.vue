@@ -105,7 +105,15 @@
                 </li>
               </ul>
 
-              <article v-if="message.text.length > 0" class="message-card" :data-role="message.role">
+              <article
+                v-if="message.text.length > 0"
+                class="message-card"
+                :data-role="message.role"
+                @contextmenu.prevent="openMessageActionMenu(message.id)"
+                @touchstart="onMessageTouchStart(message.id)"
+                @touchend="onMessageTouchEnd"
+                @touchcancel="onMessageTouchEnd"
+              >
                 <div v-if="message.messageType === 'worked'" class="worked-separator" aria-live="polite">
                   <span class="worked-separator-line" aria-hidden="true" />
                   <p class="worked-separator-text">{{ message.text }}</p>
@@ -124,13 +132,13 @@
                   </template>
                 </p>
                 <div
-                  v-if="message.messageType !== 'worked' && (message.role === 'assistant' || message.role === 'user')"
-                  class="message-actions"
+                  v-if="message.id.length > 0 && messageActionMenuId === message.id && message.messageType !== 'worked' && (message.role === 'assistant' || message.role === 'user')"
+                  class="message-action-menu"
                 >
                   <button
                     class="message-action-button"
                     type="button"
-                    @click="emit('copyMessage', message.id)"
+                    @click="onCopyMessage(message.id)"
                   >
                     Copy
                   </button>
@@ -138,7 +146,7 @@
                     class="message-action-button"
                     type="button"
                     :disabled="typeof message.turnIndex !== 'number'"
-                    @click="emit('deleteFromMessage', message.id)"
+                    @click="onDeleteFromMessage(message.id)"
                   >
                     Delete
                   </button>
@@ -146,9 +154,16 @@
                     class="message-action-button"
                     type="button"
                     :disabled="typeof message.turnIndex !== 'number'"
-                    @click="emit('branchFromMessage', message.id)"
+                    @click="onBranchFromMessage(message.id)"
                   >
                     Branch
+                  </button>
+                  <button
+                    class="message-action-button"
+                    type="button"
+                    @click="closeMessageActionMenu"
+                  >
+                    Close
                   </button>
                 </div>
               </article>
@@ -187,7 +202,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ThreadScrollState, UiLiveOverlay, UiMessage, UiServerRequest } from '../../types/codex'
 import IconTablerX from '../icons/IconTablerX.vue'
 
@@ -211,9 +226,11 @@ const emit = defineEmits<{
 const conversationListRef = ref<HTMLElement | null>(null)
 const bottomAnchorRef = ref<HTMLElement | null>(null)
 const modalImageUrl = ref('')
+const messageActionMenuId = ref<string | null>(null)
 const toolQuestionAnswers = ref<Record<string, string>>({})
 const toolQuestionOtherAnswers = ref<Record<string, string>>({})
 const BOTTOM_THRESHOLD_PX = 16
+const MESSAGE_ACTION_LONG_PRESS_MS = 450
 type InlineSegment =
   | { kind: 'text'; value: string }
   | { kind: 'code'; value: string }
@@ -223,6 +240,7 @@ type InlineSegment =
 let scrollRestoreFrame = 0
 let bottomLockFrame = 0
 let bottomLockFramesLeft = 0
+let messageLongPressTimer: ReturnType<typeof setTimeout> | 0 = 0
 const trackedPendingImages = new WeakSet<HTMLImageElement>()
 
 type ParsedToolQuestion = {
@@ -699,6 +717,7 @@ watch(
 function onConversationScroll(): void {
   const container = conversationListRef.value
   if (!container || props.isLoading) return
+  closeMessageActionMenu()
   emitScrollState(container)
 }
 
@@ -710,6 +729,61 @@ function closeImageModal(): void {
   modalImageUrl.value = ''
 }
 
+function openMessageActionMenu(messageId: string): void {
+  if (!messageId || messageId.length === 0) return
+  messageActionMenuId.value = messageId
+}
+
+function closeMessageActionMenu(): void {
+  messageActionMenuId.value = null
+}
+
+function clearMessageLongPressTimer(): void {
+  if (messageLongPressTimer) {
+    clearTimeout(messageLongPressTimer)
+    messageLongPressTimer = 0
+  }
+}
+
+function onMessageTouchStart(messageId: string): void {
+  if (!messageId || messageId.length === 0) return
+  clearMessageLongPressTimer()
+  messageLongPressTimer = setTimeout(() => {
+    messageLongPressTimer = 0
+    openMessageActionMenu(messageId)
+  }, MESSAGE_ACTION_LONG_PRESS_MS)
+}
+
+function onMessageTouchEnd(): void {
+  clearMessageLongPressTimer()
+}
+
+function onCopyMessage(messageId: string): void {
+  emit('copyMessage', messageId)
+  closeMessageActionMenu()
+}
+
+function onDeleteFromMessage(messageId: string): void {
+  emit('deleteFromMessage', messageId)
+  closeMessageActionMenu()
+}
+
+function onBranchFromMessage(messageId: string): void {
+  emit('branchFromMessage', messageId)
+  closeMessageActionMenu()
+}
+
+function onWindowPointerDown(event: PointerEvent): void {
+  const target = event.target
+  if (!(target instanceof Element)) return
+  if (target.closest('.message-action-menu')) return
+  closeMessageActionMenu()
+}
+
+onMounted(() => {
+  window.addEventListener('pointerdown', onWindowPointerDown)
+})
+
 onBeforeUnmount(() => {
   if (scrollRestoreFrame) {
     cancelAnimationFrame(scrollRestoreFrame)
@@ -717,6 +791,8 @@ onBeforeUnmount(() => {
   if (bottomLockFrame) {
     cancelAnimationFrame(bottomLockFrame)
   }
+  clearMessageLongPressTimer()
+  window.removeEventListener('pointerdown', onWindowPointerDown)
 })
 </script>
 
@@ -878,8 +954,8 @@ onBeforeUnmount(() => {
   @apply m-0 text-sm leading-relaxed whitespace-pre-wrap text-slate-800;
 }
 
-.message-actions {
-  @apply mt-2 flex flex-wrap gap-2;
+.message-action-menu {
+  @apply mt-2 flex flex-wrap gap-2 rounded-lg border border-slate-300 bg-white px-2 py-2 shadow-sm;
 }
 
 .message-action-button {

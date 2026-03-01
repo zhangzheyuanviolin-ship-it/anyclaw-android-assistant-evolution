@@ -20,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -35,6 +36,7 @@ class ConversationManagerActivity : AppCompatActivity() {
         val updatedAtMs: Long,
         val preview: String,
         val path: String = "",
+        val archived: Boolean = false,
     )
 
     private enum class SourceType {
@@ -159,12 +161,12 @@ class ConversationManagerActivity : AppCompatActivity() {
         )
 
         val rows = mutableListOf<ConversationRow>()
-        rows += parseCodexList(active.optJSONArray("data"))
-        rows += parseCodexList(archived.optJSONArray("data"))
+        rows += parseCodexList(active.optJSONArray("data"), archived = false)
+        rows += parseCodexList(archived.optJSONArray("data"), archived = true)
         return rows
     }
 
-    private fun parseCodexList(data: JSONArray?): List<ConversationRow> {
+    private fun parseCodexList(data: JSONArray?, archived: Boolean): List<ConversationRow> {
         if (data == null) return emptyList()
         val rows = mutableListOf<ConversationRow>()
         for (index in 0 until data.length()) {
@@ -180,7 +182,10 @@ class ConversationManagerActivity : AppCompatActivity() {
                 title = if (titleCandidate.isEmpty()) getString(R.string.conversation_unknown_title) else titleCandidate,
                 updatedAtMs = updatedAtSeconds * 1000L,
                 preview = preview,
-                path = item.optString("path", ""),
+                path = item.optString("path", "").trim()
+                    .ifEmpty { item.optString("rolloutPath", "").trim() }
+                    .ifEmpty { item.optString("transcriptPath", "").trim() },
+                archived = archived,
             )
         }
         return rows
@@ -239,6 +244,11 @@ class ConversationManagerActivity : AppCompatActivity() {
                     SourceType.OPENCLAW -> getString(R.string.conversation_source_openclaw)
                     SourceType.ALL -> getString(R.string.conversation_source_all)
                 }
+                val stateTag = if (row.source == SourceType.CODEX && row.archived) {
+                    getString(R.string.conversation_state_archived)
+                } else {
+                    getString(R.string.conversation_state_active)
+                }
                 val updated = if (row.updatedAtMs > 0L) {
                     dateFormat.format(Date(row.updatedAtMs))
                 } else {
@@ -247,7 +257,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                 val preview = row.preview.lineSequence().firstOrNull()?.trim().orEmpty()
 
                 rowView.findViewById<TextView>(R.id.tvConversationRowTitle).text = row.title
-                rowView.findViewById<TextView>(R.id.tvConversationRowMeta).text = "$sourceName | $updated | ${row.id}"
+                rowView.findViewById<TextView>(R.id.tvConversationRowMeta).text = "$sourceName | $stateTag | $updated | ${row.id}"
                 rowView.findViewById<TextView>(R.id.tvConversationRowPreview).text = preview
 
                 rowView.findViewById<Button>(R.id.btnConversationRowRename).setOnClickListener {
@@ -370,11 +380,19 @@ class ConversationManagerActivity : AppCompatActivity() {
             try {
                 when (row.source) {
                     SourceType.CODEX -> {
-                        LocalBridgeClients.callCodexRpc(
-                            "thread/archive",
-                            JSONObject().put("threadId", row.id),
-                        )
-                        deleteCodexPathIfPossible(row.path)
+                        if (!row.archived) {
+                            try {
+                                LocalBridgeClients.callCodexRpc(
+                                    "thread/archive",
+                                    JSONObject().put("threadId", row.id),
+                                )
+                            } catch (archiveError: Exception) {
+                                if (!isMissingCodexRollout(archiveError)) {
+                                    throw archiveError
+                                }
+                            }
+                        }
+                        deleteCodexTranscriptFileIfPossible(row)
                     }
                     SourceType.OPENCLAW -> {
                         gateway.call(
@@ -404,17 +422,48 @@ class ConversationManagerActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun deleteCodexPathIfPossible(pathValue: String) {
-        val rawPath = pathValue.trim()
-        if (rawPath.isEmpty()) return
+    private fun isMissingCodexRollout(error: Exception): Boolean {
+        val raw = (error.message ?: "").lowercase(Locale.getDefault())
+        return raw.contains("no rollout found") ||
+            raw.contains("failed to locate rollout") ||
+            raw.contains("rollout not found")
+    }
+
+    private fun deleteCodexTranscriptFileIfPossible(row: ConversationRow) {
+        val target = resolveCodexTranscriptFile(row) ?: return
+        target.deleteRecursively()
+    }
+
+    private fun resolveCodexTranscriptFile(row: ConversationRow): File? {
         val baseHome = BootstrapInstaller.getPaths(this).homeDir
-        val target = if (rawPath.startsWith("/")) File(rawPath) else File(baseHome, rawPath)
-        val canonicalTarget = runCatching { target.canonicalFile }.getOrNull() ?: return
-        val canonicalHome = runCatching { File(baseHome).canonicalFile }.getOrNull() ?: return
-        if (!canonicalTarget.path.startsWith(canonicalHome.path)) return
-        if (canonicalTarget.exists()) {
-            canonicalTarget.deleteRecursively()
+        val canonicalHome = runCatching { File(baseHome).canonicalFile }.getOrNull() ?: return null
+
+        fun normalize(pathValue: String): File? {
+            val trimmed = pathValue.trim()
+            if (trimmed.isEmpty()) return null
+            val raw = if (trimmed.startsWith("/")) File(trimmed) else File(baseHome, trimmed)
+            val canonical = runCatching { raw.canonicalFile }.getOrNull() ?: return null
+            if (!canonical.path.startsWith(canonicalHome.path)) return null
+            if (!canonical.exists() || !canonical.isFile) return null
+            return canonical
         }
+
+        normalize(row.path)?.let { return it }
+
+        val probeDirs = listOf(
+            File(baseHome, ".codex/archived_sessions"),
+            File(baseHome, ".codex/sessions"),
+        )
+        for (dir in probeDirs) {
+            val candidates = dir.listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".jsonl") && it.name.contains(row.id) }
+                ?.sortedByDescending { it.lastModified() }
+                .orEmpty()
+            for (candidate in candidates) {
+                normalize(candidate.absolutePath)?.let { return it }
+            }
+        }
+        return null
     }
 
     private fun copyConversation(row: ConversationRow) {
@@ -473,40 +522,99 @@ class ConversationManagerActivity : AppCompatActivity() {
     }
 
     private fun loadCodexTranscript(row: ConversationRow): String {
-        val payload = LocalBridgeClients.callCodexRpc(
-            "thread/read",
-            JSONObject()
-                .put("threadId", row.id)
-                .put("includeTurns", true),
-        )
-        val thread = payload.optJSONObject("thread") ?: JSONObject()
-        val turns = thread.optJSONArray("turns") ?: JSONArray()
+        return try {
+            val payload = LocalBridgeClients.callCodexRpc(
+                "thread/read",
+                JSONObject()
+                    .put("threadId", row.id)
+                    .put("includeTurns", true),
+            )
+            val thread = payload.optJSONObject("thread") ?: JSONObject()
+            val turns = thread.optJSONArray("turns") ?: JSONArray()
+            val out = StringBuilder()
+            out.appendLine(row.title)
+            out.appendLine("source=codex")
+            out.appendLine("id=${row.id}")
+            out.appendLine()
+            for (turnIndex in 0 until turns.length()) {
+                val turn = turns.optJSONObject(turnIndex) ?: continue
+                val items = turn.optJSONArray("items") ?: continue
+                for (itemIndex in 0 until items.length()) {
+                    val item = items.optJSONObject(itemIndex) ?: continue
+                    when (item.optString("type", "")) {
+                        "userMessage" -> {
+                            val text = parseCodexUserText(item.optJSONArray("content"))
+                            if (text.isNotEmpty()) {
+                                out.appendLine("User: $text")
+                            }
+                        }
+                        "agentMessage" -> {
+                            val text = item.optString("text", "").trim()
+                            if (text.isNotEmpty()) {
+                                out.appendLine("Assistant: $text")
+                            }
+                        }
+                    }
+                }
+                out.appendLine()
+            }
+            out.toString().trim()
+        } catch (_: Exception) {
+            loadCodexTranscriptFromJsonl(row)
+        }
+    }
+
+    private fun loadCodexTranscriptFromJsonl(row: ConversationRow): String {
+        val canonicalTarget = resolveCodexTranscriptFile(row)
+            ?: throw IOException("Failed to locate local transcript file")
+
         val out = StringBuilder()
         out.appendLine(row.title)
         out.appendLine("source=codex")
         out.appendLine("id=${row.id}")
+        out.appendLine("archived=${row.archived}")
         out.appendLine()
-        for (turnIndex in 0 until turns.length()) {
-            val turn = turns.optJSONObject(turnIndex) ?: continue
-            val items = turn.optJSONArray("items") ?: continue
-            for (itemIndex in 0 until items.length()) {
-                val item = items.optJSONObject(itemIndex) ?: continue
-                when (item.optString("type", "")) {
-                    "userMessage" -> {
-                        val text = parseCodexUserText(item.optJSONArray("content"))
+
+        canonicalTarget.forEachLine { rawLine ->
+            val line = rawLine.trim()
+            if (line.isEmpty()) return@forEachLine
+            val item = runCatching { JSONObject(line) }.getOrNull() ?: return@forEachLine
+            when (item.optString("type", "")) {
+                "event_msg" -> {
+                    val payload = item.optJSONObject("payload") ?: return@forEachLine
+                    if (payload.optString("type", "") == "user_message") {
+                        val message = payload.opt("message")
+                        val text = when (message) {
+                            is String -> message.trim()
+                            is JSONObject -> message.optString("text", "").trim()
+                                .ifEmpty { parseCodexUserText(message.optJSONArray("content")) }
+                            else -> ""
+                        }
                         if (text.isNotEmpty()) {
                             out.appendLine("User: $text")
+                            out.appendLine()
                         }
                     }
-                    "agentMessage" -> {
-                        val text = item.optString("text", "").trim()
+                }
+                "response_item" -> {
+                    val payload = item.optJSONObject("payload") ?: return@forEachLine
+                    if (payload.optString("type", "") != "message") return@forEachLine
+                    if (payload.optString("role", "") != "assistant") return@forEachLine
+                    val content = payload.optJSONArray("content") ?: return@forEachLine
+                    for (index in 0 until content.length()) {
+                        val block = content.optJSONObject(index) ?: continue
+                        val type = block.optString("type", "")
+                        val text = when (type) {
+                            "output_text", "text" -> block.optString("text", "").trim()
+                            else -> ""
+                        }
                         if (text.isNotEmpty()) {
                             out.appendLine("Assistant: $text")
+                            out.appendLine()
                         }
                     }
                 }
             }
-            out.appendLine()
         }
         return out.toString().trim()
     }

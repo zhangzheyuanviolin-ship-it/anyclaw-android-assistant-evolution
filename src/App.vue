@@ -347,7 +347,9 @@ function onCopyMessage(messageId: string): void {
 
 function onDeleteFromMessage(messageId: string): void {
   if (typeof window !== 'undefined') {
-    const shouldContinue = window.confirm('Delete this message and all later context?')
+    const shouldContinue = window.confirm(
+      'This operation deletes the whole turn (user + assistant) from this point onward. Continue?',
+    )
     if (!shouldContinue) return
   }
   void (async () => {
