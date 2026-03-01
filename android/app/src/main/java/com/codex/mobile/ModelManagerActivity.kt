@@ -103,7 +103,7 @@ class ModelManagerActivity : AppCompatActivity() {
 
         Thread {
             try {
-                val configPayload = gateway.call("config.get", JSONObject())
+                val configPayload = callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
                 configRaw = configPayload.optString("raw", "{}")
                 configBaseHash = configPayload.optString("hash", "")
 
@@ -136,7 +136,7 @@ class ModelManagerActivity : AppCompatActivity() {
 
     private fun loadDefaultModelProvider(): String {
         return try {
-            val payload = gateway.call(
+            val payload = callGatewayWithRetry(
                 "sessions.list",
                 JSONObject()
                     .put("limit", 1)
@@ -144,6 +144,8 @@ class ModelManagerActivity : AppCompatActivity() {
                     .put("includeLastMessage", false)
                     .put("includeGlobal", true)
                     .put("includeUnknown", true),
+                attempts = 4,
+                baseDelayMs = 200,
             )
             payload.optJSONObject("defaults")?.optString("modelProvider", "").orEmpty().trim()
         } catch (_: Exception) {
@@ -455,9 +457,13 @@ class ModelManagerActivity : AppCompatActivity() {
                     if (!provider.has("auth")) {
                         provider.put("auth", "api-key")
                     }
-                    if (!provider.has("api")) {
-                        provider.put("api", inferApiForProvider(row.provider))
-                    }
+                    provider.put(
+                        "api",
+                        resolveProviderApi(
+                            row.provider,
+                            provider.optString("api", "").trim(),
+                        ),
+                    )
                     ensureProviderModel(provider, row.id)
                 }
 
@@ -602,14 +608,22 @@ class ModelManagerActivity : AppCompatActivity() {
                 val providers = ensureObject(models, "providers")
                 val provider = ensureObject(providers, providerName)
 
-                provider.put("baseUrl", if (baseUrl.isBlank()) inferBaseUrlForProvider(providerName) else baseUrl)
+                val normalizedBaseUrl = normalizeProviderBaseUrl(providerName, baseUrl)
+                provider.put(
+                    "baseUrl",
+                    if (normalizedBaseUrl.isBlank()) inferBaseUrlForProvider(providerName) else normalizedBaseUrl,
+                )
                 provider.put("apiKey", apiKey)
                 if (!provider.has("auth")) {
                     provider.put("auth", "api-key")
                 }
-                if (!provider.has("api")) {
-                    provider.put("api", inferApiForProvider(providerName))
-                }
+                provider.put(
+                    "api",
+                    resolveProviderApi(
+                        providerName,
+                        provider.optString("api", "").trim(),
+                    ),
+                )
 
                 ensureProviderModel(provider, modelId)
                 ensureAgentModelOverride(providerName, modelId)
@@ -657,10 +671,11 @@ class ModelManagerActivity : AppCompatActivity() {
                 val providers = ensureObject(models, "providers")
                 val provider = ensureObject(providers, row.provider)
 
-                if (baseUrl.isEmpty()) {
+                val normalizedBaseUrl = normalizeProviderBaseUrl(row.provider, baseUrl)
+                if (normalizedBaseUrl.isEmpty()) {
                     provider.remove("baseUrl")
                 } else {
-                    provider.put("baseUrl", baseUrl)
+                    provider.put("baseUrl", normalizedBaseUrl)
                 }
                 if (apiKey.isEmpty()) {
                     provider.remove("apiKey")
@@ -670,9 +685,13 @@ class ModelManagerActivity : AppCompatActivity() {
                 if (!provider.has("auth")) {
                     provider.put("auth", "api-key")
                 }
-                if (!provider.has("api")) {
-                    provider.put("api", inferApiForProvider(row.provider))
-                }
+                provider.put(
+                    "api",
+                    resolveProviderApi(
+                        row.provider,
+                        provider.optString("api", "").trim(),
+                    ),
+                )
 
                 ensureProviderModel(provider, row.id)
                 ensureAgentModelOverride(row.provider, row.id)
@@ -1181,12 +1200,24 @@ class ModelManagerActivity : AppCompatActivity() {
 
     private fun inferApiForProvider(providerName: String): String {
         return when {
+            providerName.contains("deepseek", ignoreCase = true) -> "openai-completions"
             providerName.contains("openai", ignoreCase = true) -> "openai-responses"
             providerName.contains("codex", ignoreCase = true) -> "openai-codex-responses"
             providerName.contains("anthropic", ignoreCase = true) -> "anthropic-messages"
             providerName.contains("ollama", ignoreCase = true) -> "ollama"
             else -> "openai-responses"
         }
+    }
+
+    private fun resolveProviderApi(providerName: String, currentApi: String): String {
+        if (providerName.contains("deepseek", ignoreCase = true)) {
+            // DeepSeek OpenAI-compatible endpoints use chat.completions, not responses.
+            return "openai-completions"
+        }
+        if (currentApi.isNotBlank()) {
+            return currentApi
+        }
+        return inferApiForProvider(providerName)
     }
 
     private fun inferBaseUrlForProvider(providerName: String): String {
@@ -1199,6 +1230,29 @@ class ModelManagerActivity : AppCompatActivity() {
         }
     }
 
+    private fun normalizeProviderBaseUrl(providerName: String, rawBaseUrl: String): String {
+        var normalized = rawBaseUrl.trim()
+        if (normalized.isEmpty()) return normalized
+
+        val lower = normalized.lowercase(Locale.getDefault())
+        when {
+            lower.endsWith("/chat/completions") -> {
+                normalized = normalized.dropLast("/chat/completions".length)
+            }
+            lower.endsWith("/responses") -> {
+                normalized = normalized.dropLast("/responses".length)
+            }
+        }
+        normalized = normalized.trimEnd('/')
+
+        if (providerName.contains("deepseek", ignoreCase = true) &&
+            !normalized.contains("/v1", ignoreCase = true)
+        ) {
+            normalized += "/v1"
+        }
+        return normalized
+    }
+
     private fun applyConfig(root: JSONObject, note: String) {
         val params = JSONObject()
             .put("raw", root.toString(2))
@@ -1206,9 +1260,35 @@ class ModelManagerActivity : AppCompatActivity() {
         if (configBaseHash.isNotEmpty()) {
             params.put("baseHash", configBaseHash)
         }
-        val applyResult = gateway.call("config.apply", params)
+        val applyResult = callGatewayWithRetry("config.apply", params, attempts = 4, baseDelayMs = 200)
         configRaw = root.toString(2)
         configBaseHash = applyResult.optString("hash", configBaseHash)
+    }
+
+    private fun callGatewayWithRetry(
+        method: String,
+        params: JSONObject,
+        attempts: Int = 3,
+        baseDelayMs: Long = 200L,
+    ): JSONObject {
+        var lastError: Exception? = null
+        repeat(attempts.coerceAtLeast(1)) { index ->
+            try {
+                return gateway.call(method, params)
+            } catch (error: Exception) {
+                lastError = error
+                val message = (error.message ?: "").lowercase(Locale.getDefault())
+                val retryable = message.contains("gateway closed") ||
+                    message.contains("abnormal closure") ||
+                    message.contains("gateway timeout") ||
+                    message.contains("connection refused")
+                if (!retryable || index == attempts - 1) {
+                    throw error
+                }
+                Thread.sleep(baseDelayMs * (index + 1))
+            }
+        }
+        throw lastError ?: IllegalStateException("Gateway call failed: $method")
     }
 
     private fun ensureObject(parent: JSONObject, key: String): JSONObject {

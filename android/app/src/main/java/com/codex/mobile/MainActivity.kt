@@ -315,42 +315,28 @@ class MainActivity : AppCompatActivity() {
         // Step 4: Start CONNECT proxy (needed for native binary DNS/TLS)
         updateStatus("Starting network proxy…")
         if (!serverManager.startProxy()) {
-            throw RuntimeException("Failed to start network proxy")
+            Log.w(TAG, "CONNECT proxy failed to start; continuing in reduced mode")
+            updateStatus("Network proxy unavailable", "Continuing in reduced mode")
         }
 
-        // Step 5: Authenticate via `codex login`
-        updateStatus("Checking authentication…")
-        if (!serverManager.isLoggedIn()) {
-            updateStatus("Login required — opening browser…")
-            val authOk = serverManager.loginWithUrl(
-                onLoginUrl = { url ->
-                    runOnUiThread {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                    }
-                },
-                onProgress = { msg -> updateDetail(msg) },
-            )
-            if (!authOk && !serverManager.isLoggedIn()) {
-                updateStatus("Browser login failed — enter API key manually")
-                val apiKey = requestApiKey()
-                if (apiKey.isBlank()) {
-                    throw RuntimeException("No API key provided")
-                }
-                val loginOk = serverManager.loginWithApiKey(apiKey)
-                if (!loginOk) {
-                    throw RuntimeException("Login failed — check your API key")
-                }
+        // Step 5: Codex auth is optional. Do not block startup for OpenClaw-only users.
+        updateStatus("Checking Codex authentication…")
+        val codexLoggedIn = serverManager.isLoggedIn()
+        if (!codexLoggedIn) {
+            updateStatus("Codex not logged in", "Continuing in OpenClaw mode")
+        } else {
+            updateStatus("Codex authenticated")
+
+            // Step 6: Codex health check is best-effort and non-fatal.
+            updateStatus("Verifying Codex API access…", "Sending test message")
+            val healthOk = serverManager.healthCheck { msg -> updateDetail(msg) }
+            if (healthOk) {
+                updateStatus("Codex API verified")
+            } else {
+                Log.w(TAG, "Codex health check failed; continuing with OpenClaw mode")
+                updateStatus("Codex API unavailable", "Continuing in OpenClaw mode")
             }
         }
-        updateStatus("Authenticated")
-
-        // Step 6: Health check
-        updateStatus("Verifying API access…", "Sending test message")
-        val healthOk = serverManager.healthCheck { msg -> updateDetail(msg) }
-        if (!healthOk) {
-            throw RuntimeException("API health check failed — Codex could not reach OpenAI")
-        }
-        updateStatus("API verified")
 
         // Step 7: Configure and start OpenClaw
         if (serverManager.isOpenClawInstalled()) {

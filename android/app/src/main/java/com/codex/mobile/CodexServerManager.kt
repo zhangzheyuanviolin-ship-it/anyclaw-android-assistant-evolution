@@ -7,6 +7,8 @@ import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Manages the lifecycle of the Node.js codex-web-local server process running
@@ -851,54 +853,72 @@ H3
         openclawDir.mkdirs()
 
         val configFile = File(openclawDir, "openclaw.json")
-        val configJson = """
-            |{
-            |  "meta": {
-            |    "lastTouchedVersion": "2026.2.21-2",
-            |    "lastTouchedAt": "${java.time.Instant.now()}"
-            |  },
-            |  "commands": {
-            |    "native": "auto",
-            |    "nativeSkills": "auto",
-            |    "restart": true,
-            |    "ownerDisplay": "raw"
-            |  },
-            |  "gateway": {
-            |    "mode": "local",
-            |    "controlUi": {
-            |      "enabled": true,
-            |      "allowedOrigins": ["http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT", "http://localhost:$OPENCLAW_CONTROL_UI_PORT"],
-            |      "allowInsecureAuth": true,
-            |      "dangerouslyDisableDeviceAuth": true
-            |    },
-            |    "auth": {
-            |      "mode": "none"
-            |    }
-            |  },
-            |  "agents": {
-            |    "defaults": {
-            |      "model": {
-            |        "primary": "openai-codex/gpt-5.3-codex"
-            |      },
-            |      "memorySearch": {
-            |        "provider": "local",
-            |        "fallback": "none",
-            |        "local": {
-            |          "modelPath": "hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf"
-            |        },
-            |        "store": {
-            |          "vector": {
-            |            "enabled": true,
-            |            "extensionPath": "$prefix/lib/node_modules/openclaw/node_modules/sqlite-vec-linux-arm64/vec0"
-            |          }
-            |        }
-            |      }
-            |    }
-            |  }
-            |}
-        """.trimMargin()
-        configFile.writeText(configJson)
-        Log.i(TAG, "Wrote OpenClaw config to $configFile")
+        val root = if (configFile.exists()) {
+            runCatching { JSONObject(configFile.readText()) }.getOrElse {
+                Log.w(TAG, "openclaw.json parse failed, rebuilding safe defaults")
+                JSONObject()
+            }
+        } else {
+            JSONObject()
+        }
+
+        val meta = ensureObject(root, "meta")
+        meta.put("lastTouchedVersion", "2026.3.1")
+        meta.put("lastTouchedAt", java.time.Instant.now().toString())
+
+        val commands = ensureObject(root, "commands")
+        if (!commands.has("native")) commands.put("native", "auto")
+        if (!commands.has("nativeSkills")) commands.put("nativeSkills", "auto")
+        if (!commands.has("restart")) commands.put("restart", true)
+        if (!commands.has("ownerDisplay")) commands.put("ownerDisplay", "raw")
+
+        val gateway = ensureObject(root, "gateway")
+        gateway.put("mode", "local")
+        val controlUi = ensureObject(gateway, "controlUi")
+        controlUi.put("enabled", true)
+        controlUi.put(
+            "allowedOrigins",
+            JSONArray()
+                .put("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT")
+                .put("http://localhost:$OPENCLAW_CONTROL_UI_PORT"),
+        )
+        controlUi.put("allowInsecureAuth", true)
+        controlUi.put("dangerouslyDisableDeviceAuth", true)
+        val auth = ensureObject(gateway, "auth")
+        auth.put("mode", "none")
+
+        val agents = ensureObject(root, "agents")
+        val defaults = ensureObject(agents, "defaults")
+        val model = ensureObject(defaults, "model")
+        if (model.optString("primary", "").trim().isEmpty()) {
+            // Keep legacy default for first install only; never override existing user model choice.
+            model.put("primary", "openai-codex/gpt-5.3-codex")
+        }
+
+        val memorySearch = ensureObject(defaults, "memorySearch")
+        if (memorySearch.optString("provider", "").isBlank()) {
+            memorySearch.put("provider", "local")
+        }
+        if (memorySearch.optString("fallback", "").isBlank()) {
+            memorySearch.put("fallback", "none")
+        }
+        val localMemory = ensureObject(memorySearch, "local")
+        if (localMemory.optString("modelPath", "").isBlank()) {
+            localMemory.put(
+                "modelPath",
+                "hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf",
+            )
+        }
+        val store = ensureObject(memorySearch, "store")
+        val vector = ensureObject(store, "vector")
+        vector.put("enabled", true)
+        vector.put(
+            "extensionPath",
+            "$prefix/lib/node_modules/openclaw/node_modules/sqlite-vec-linux-arm64/vec0",
+        )
+
+        configFile.writeText(root.toString(2))
+        Log.i(TAG, "Updated OpenClaw config at $configFile")
 
         // Copy the Codex access_token into OpenClaw's auth-profiles.json.
         // The profile needs: version=1, type="token", provider="openai-codex",
@@ -913,32 +933,44 @@ H3
                   const auth = JSON.parse(fs.readFileSync('${'$'}HOME/.codex/auth.json','utf8'));
                   const token = auth.tokens && auth.tokens.access_token;
                   if (!token) { console.error('No access_token in codex auth'); process.exit(1); }
-                  const profiles = {
-                    version: 1,
-                    profiles: {
-                      'openai-codex:codex-cli': {
-                        type: 'token',
-                        provider: 'openai-codex',
-                        token: token,
-                        source: 'codex-auth',
-                        createdAt: new Date().toISOString()
-                      },
-                      'openai:codex': {
-                        type: 'token',
-                        provider: 'openai',
-                        token: token,
-                        source: 'codex-auth',
-                        createdAt: new Date().toISOString()
-                      }
-                    },
-                    order: ['openai-codex:codex-cli', 'openai:codex']
-                  };
-                  const json = JSON.stringify(profiles, null, 2);
-                  fs.writeFileSync('${'$'}HOME/.openclaw/auth-profiles.json', json);
+                  function readJson(filePath) {
+                    try {
+                      if (!fs.existsSync(filePath)) return {};
+                      return JSON.parse(fs.readFileSync(filePath,'utf8'));
+                    } catch (_) {
+                      return {};
+                    }
+                  }
+                  function mergeProfiles(filePath) {
+                    const prev = readJson(filePath);
+                    const merged = {
+                      version: 1,
+                      profiles: Object.assign({}, prev.profiles || {}),
+                      order: Array.isArray(prev.order) ? prev.order.slice() : []
+                    };
+                    merged.profiles['openai-codex:codex-cli'] = {
+                      type: 'token',
+                      provider: 'openai-codex',
+                      token: token,
+                      source: 'codex-auth',
+                      createdAt: new Date().toISOString()
+                    };
+                    merged.profiles['openai:codex'] = {
+                      type: 'token',
+                      provider: 'openai',
+                      token: token,
+                      source: 'codex-auth',
+                      createdAt: new Date().toISOString()
+                    };
+                    const ordered = ['openai-codex:codex-cli', 'openai:codex', ...merged.order];
+                    merged.order = Array.from(new Set(ordered));
+                    fs.writeFileSync(filePath, JSON.stringify(merged, null, 2));
+                  }
+                  mergeProfiles('${'$'}HOME/.openclaw/auth-profiles.json');
                   const agentDir = '${'$'}HOME/.openclaw/agents/main/agent';
                   fs.mkdirSync(agentDir, { recursive: true });
-                  fs.writeFileSync(path.join(agentDir, 'auth-profiles.json'), json);
-                  console.log('OpenClaw auth-profiles.json written (global + agent)');
+                  mergeProfiles(path.join(agentDir, 'auth-profiles.json'));
+                  console.log('OpenClaw auth-profiles.json merged (global + agent)');
                 " 2>&1
             """.trimIndent()
             runInPrefix(copyScript) { Log.d(TAG, "[openclaw-auth] $it") }
@@ -1902,6 +1934,14 @@ EOF
         }
         configFile.writeText(desired)
         Log.i(TAG, "Wrote full-access config to $configFile")
+    }
+
+    private fun ensureObject(parent: JSONObject, key: String): JSONObject {
+        val existing = parent.optJSONObject(key)
+        if (existing != null) return existing
+        val created = JSONObject()
+        parent.put(key, created)
+        return created
     }
 
     private fun buildEnvironment(
