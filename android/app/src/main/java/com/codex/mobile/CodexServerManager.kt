@@ -1124,6 +1124,50 @@ H3
         return true
     }
 
+    fun isOpenClawGatewayResponsive(): Boolean {
+        if (!isOpenClawInstalled()) return false
+        val code = runInPrefix(
+            "openclaw gateway call health --json --params '{}' >/dev/null 2>&1",
+        )
+        return code == 0
+    }
+
+    fun disconnectOpenClawGateway(): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        openClawGatewayProcess?.destroy()
+        openClawGatewayProcess = null
+        openClawControlUiProcess?.destroy()
+        openClawControlUiProcess = null
+
+        runInPrefix(
+            """
+            for pidfile in ${paths.prefixDir}/tmp/openclaw*/gateway.pid ${paths.prefixDir}/tmp/openclaw/gateway.pid; do
+                [ -f "${'$'}pidfile" ] && kill -9 ${'$'}(cat "${'$'}pidfile" 2>/dev/null) 2>/dev/null
+            done
+            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
+                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
+                echo "${'$'}cmdline" | grep -q "openclaw gateway run" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${OPENCLAW_CONTROL_UI_PORT}" && kill -9 ${'$'}pid 2>/dev/null
+            done
+            rm -f ${paths.prefixDir}/tmp/openclaw*/gateway.lock ${paths.prefixDir}/tmp/openclaw*/gateway.pid 2>/dev/null
+            rm -f ${paths.prefixDir}/tmp/openclaw/gateway.lock ${paths.prefixDir}/tmp/openclaw/gateway.pid 2>/dev/null
+            """.trimIndent(),
+        )
+
+        Thread.sleep(500)
+        return !isOpenClawGatewayResponsive()
+    }
+
+    fun reconnectOpenClawGateway(): Boolean {
+        configureOpenClawAuth()
+        val gatewayOk = startOpenClawGateway()
+        if (!gatewayOk) return false
+        startOpenClawControlUiServer()
+        Thread.sleep(800)
+        return isOpenClawGatewayResponsive()
+    }
+
     fun installCodex(onProgress: (String) -> Unit): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir

@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -41,12 +43,23 @@ class MainActivity : AppCompatActivity() {
     private lateinit var promptManagerButton: Button
     private lateinit var conversationManagerButton: Button
     private lateinit var modelManagerButton: Button
+    private lateinit var gatewayToggleButton: Button
     private lateinit var serverManager: CodexServerManager
     private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
     private var waitingForStorageGrant = false
     private var waitingForShizukuGrant = false
     private var shizukuPermissionRequested = false
+    private val gatewayStatusHandler = Handler(Looper.getMainLooper())
+    private var gatewayStatusMonitorStarted = false
+    private var gatewayConnected = false
+    private var gatewayStatusChecking = false
+    private val gatewayStatusPollRunnable = object : Runnable {
+        override fun run() {
+            refreshGatewayStatusAsync(announce = false)
+            gatewayStatusHandler.postDelayed(this, 7000)
+        }
+    }
 
     private val storagePermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -82,6 +95,7 @@ class MainActivity : AppCompatActivity() {
         promptManagerButton = findViewById(R.id.btnPromptManager)
         conversationManagerButton = findViewById(R.id.btnConversationManager)
         modelManagerButton = findViewById(R.id.btnModelManager)
+        gatewayToggleButton = findViewById(R.id.btnGatewayToggle)
 
         serverManager = CodexServerManager(this)
 
@@ -96,6 +110,9 @@ class MainActivity : AppCompatActivity() {
         }
         modelManagerButton.setOnClickListener {
             startActivity(Intent(this, ModelManagerActivity::class.java))
+        }
+        gatewayToggleButton.setOnClickListener {
+            onGatewayTogglePressed()
         }
 
         requestBatteryOptimizationExemption()
@@ -116,10 +133,14 @@ class MainActivity : AppCompatActivity() {
             waitingForShizukuGrant = false
             startSetupFlow()
         }
+        if (setupStarted) {
+            startGatewayStatusMonitor()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        stopGatewayStatusMonitor()
         shizukuBridgeServer?.stop()
         shizukuBridgeServer = null
         serverManager.stopServer()
@@ -368,6 +389,9 @@ class MainActivity : AppCompatActivity() {
             promptManagerButton.visibility = View.VISIBLE
             conversationManagerButton.visibility = View.VISIBLE
             modelManagerButton.visibility = View.VISIBLE
+            gatewayToggleButton.visibility = View.VISIBLE
+            applyGatewayConnectedState(false, announce = false)
+            startGatewayStatusMonitor()
             webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
         }
     }
@@ -547,6 +571,91 @@ class MainActivity : AppCompatActivity() {
             promptManagerButton.visibility = View.GONE
             conversationManagerButton.visibility = View.GONE
             modelManagerButton.visibility = View.GONE
+            gatewayToggleButton.visibility = View.GONE
+        }
+    }
+
+    private fun onGatewayTogglePressed() {
+        gatewayToggleButton.isEnabled = false
+        Thread {
+            try {
+                if (gatewayConnected) {
+                    val ok = serverManager.disconnectOpenClawGateway()
+                    runOnUiThread {
+                        val msg = if (ok) {
+                            getString(R.string.gateway_toggle_disconnected_toast)
+                        } else {
+                            getString(R.string.gateway_toggle_disconnect_failed)
+                        }
+                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                        applyGatewayConnectedState(false, announce = true)
+                        gatewayToggleButton.isEnabled = true
+                        refreshGatewayStatusAsync(announce = true)
+                    }
+                } else {
+                    val ok = serverManager.reconnectOpenClawGateway()
+                    runOnUiThread {
+                        val msg = if (ok) {
+                            getString(R.string.gateway_toggle_connected_toast)
+                        } else {
+                            getString(R.string.gateway_toggle_connect_failed)
+                        }
+                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                        if (ok) {
+                            webView.postDelayed({ webView.reload() }, 800)
+                        }
+                        gatewayToggleButton.isEnabled = true
+                        refreshGatewayStatusAsync(announce = true)
+                    }
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    gatewayToggleButton.isEnabled = true
+                    Toast.makeText(
+                        this,
+                        getString(R.string.gateway_toggle_connect_failed) + " " + (error.message ?: ""),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun startGatewayStatusMonitor() {
+        if (gatewayStatusMonitorStarted) return
+        gatewayStatusMonitorStarted = true
+        gatewayStatusHandler.post(gatewayStatusPollRunnable)
+    }
+
+    private fun stopGatewayStatusMonitor() {
+        gatewayStatusMonitorStarted = false
+        gatewayStatusHandler.removeCallbacks(gatewayStatusPollRunnable)
+    }
+
+    private fun refreshGatewayStatusAsync(announce: Boolean) {
+        if (gatewayStatusChecking) return
+        gatewayStatusChecking = true
+        Thread {
+            val connected = serverManager.isOpenClawGatewayResponsive()
+            runOnUiThread {
+                gatewayStatusChecking = false
+                applyGatewayConnectedState(connected, announce)
+            }
+        }.start()
+    }
+
+    private fun applyGatewayConnectedState(connected: Boolean, announce: Boolean) {
+        val changed = connected != gatewayConnected
+        gatewayConnected = connected
+        if (connected) {
+            gatewayToggleButton.text = getString(R.string.gateway_toggle_button_connected)
+            gatewayToggleButton.contentDescription = getString(R.string.gateway_toggle_button_desc_connected)
+        } else {
+            gatewayToggleButton.text = getString(R.string.gateway_toggle_button_disconnected)
+            gatewayToggleButton.contentDescription = getString(R.string.gateway_toggle_button_desc_disconnected)
+        }
+        if ((changed || announce) && gatewayToggleButton.visibility == View.VISIBLE) {
+            gatewayToggleButton.announceForAccessibility(gatewayToggleButton.contentDescription)
         }
     }
 
