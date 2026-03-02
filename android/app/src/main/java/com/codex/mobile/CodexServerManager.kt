@@ -929,7 +929,10 @@ H3
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
-        if (!searchSuiteConfig.has("userAgent")) searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.0")
+        val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
+        if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
+            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.2")
+        }
 
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0 && !jsonArrayContains(allow, ANYCLAW_SEARCH_PLUGIN_ID)) {
@@ -1047,13 +1050,19 @@ H3
             done
             # Scan /proc for any node process bound to the gateway port
             for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                if cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ' | grep -q "18789"; then
+                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
+                if echo "${'$'}cmdline" | grep -q "openclaw gateway run"; then
+                    kill -9 ${'$'}pid 2>/dev/null
+                elif echo "${'$'}cmdline" | grep -q "18789"; then
                     kill -9 ${'$'}pid 2>/dev/null
                 fi
             done
             # Clear stale lock/pid files
             rm -f ${paths.prefixDir}/tmp/openclaw*/gateway.lock ${paths.prefixDir}/tmp/openclaw*/gateway.pid 2>/dev/null
             rm -f ${paths.prefixDir}/tmp/openclaw/gateway.lock ${paths.prefixDir}/tmp/openclaw/gateway.pid 2>/dev/null
+            # Clear plugin transpile/runtime caches so updated extensions are always reloaded
+            rm -rf ${paths.homeDir}/.cache/jiti 2>/dev/null
+            rm -rf ${paths.homeDir}/.openclaw/.cache/jiti ${paths.homeDir}/.openclaw/.cache/plugins 2>/dev/null
             # Clear device-auth state (identity keypair, device-auth tokens)
             rm -rf ${paths.homeDir}/.local/state/openclaw/identity 2>/dev/null
             rm -f ${paths.homeDir}/.local/state/openclaw/device-auth.json 2>/dev/null
