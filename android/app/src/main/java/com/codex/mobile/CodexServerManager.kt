@@ -26,6 +26,7 @@ class CodexServerManager(private val context: Context) {
         private const val CODEX_VERSION = "0.104.0"
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
+        private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
     }
 
     private var serverProcess: Process? = null
@@ -917,6 +918,23 @@ H3
             "extensionPath",
             "$prefix/lib/node_modules/openclaw/node_modules/sqlite-vec-linux-arm64/vec0",
         )
+
+        ensureAnyClawSearchPlugin(paths.homeDir)
+        val plugins = ensureObject(root, "plugins")
+        plugins.put("enabled", true)
+        val entries = ensureObject(plugins, "entries")
+        val searchSuiteEntry = ensureObject(entries, ANYCLAW_SEARCH_PLUGIN_ID)
+        searchSuiteEntry.put("enabled", true)
+        val searchSuiteConfig = ensureObject(searchSuiteEntry, "config")
+        if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
+        if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
+        if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
+        if (!searchSuiteConfig.has("userAgent")) searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.0")
+
+        val allow = plugins.optJSONArray("allow")
+        if (allow != null && allow.length() > 0 && !jsonArrayContains(allow, ANYCLAW_SEARCH_PLUGIN_ID)) {
+            allow.put(ANYCLAW_SEARCH_PLUGIN_ID)
+        }
 
         configFile.writeText(root.toString(2))
         Log.i(TAG, "Updated OpenClaw config at $configFile")
@@ -2013,6 +2031,49 @@ EOF
         val created = JSONObject()
         parent.put(key, created)
         return created
+    }
+
+    private fun jsonArrayContains(array: JSONArray, value: String): Boolean {
+        for (i in 0 until array.length()) {
+            if (array.optString(i) == value) return true
+        }
+        return false
+    }
+
+    private fun ensureAnyClawSearchPlugin(homeDir: String) {
+        val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_SEARCH_PLUGIN_ID")
+        if (!pluginRoot.exists()) {
+            pluginRoot.mkdirs()
+        }
+        val manifestFile = File(pluginRoot, "openclaw.plugin.json")
+        val indexFile = File(pluginRoot, "index.ts")
+        val manifestChanged = writeAssetIfChanged(
+            "plugins/$ANYCLAW_SEARCH_PLUGIN_ID/openclaw.plugin.json",
+            manifestFile,
+        )
+        val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_SEARCH_PLUGIN_ID/index.ts", indexFile)
+        if (manifestChanged || indexChanged) {
+            Log.i(TAG, "Installed/updated plugin $ANYCLAW_SEARCH_PLUGIN_ID at $pluginRoot")
+        }
+    }
+
+    private fun writeAssetIfChanged(assetPath: String, target: File): Boolean {
+        return try {
+            val bytes = context.assets.open(assetPath).use { it.readBytes() }
+            if (target.exists()) {
+                val current = target.readBytes()
+                if (current.contentEquals(bytes)) {
+                    return false
+                }
+            } else {
+                target.parentFile?.mkdirs()
+            }
+            target.writeBytes(bytes)
+            true
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed writing asset $assetPath to ${target.absolutePath}: ${error.message}")
+            false
+        }
     }
 
     private fun buildEnvironment(
