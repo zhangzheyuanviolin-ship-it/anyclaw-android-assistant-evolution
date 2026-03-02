@@ -24,6 +24,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class ModelManagerActivity : AppCompatActivity() {
+    companion object {
+        private const val REDACTED_SENTINEL = "__OPENCLAW_REDACTED__"
+    }
 
     private enum class AuthMode {
         TOKEN,
@@ -106,12 +109,18 @@ class ModelManagerActivity : AppCompatActivity() {
                 val configPayload = callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
                 configRaw = configPayload.optString("raw", "{}")
                 configBaseHash = configPayload.optString("hash", "")
+                val writableRoot = readWritableConfigRoot(configPayload)
+                val writableRaw = writableRoot.toString()
 
                 val defaultProvider = loadDefaultModelProvider()
-                currentModelId = normalizeCurrentModelId(extractCurrentModel(configPayload), defaultProvider)
+                val configuredPrimary = readPrimaryModelId(writableRoot)
+                currentModelId = normalizeCurrentModelId(
+                    configuredPrimary.ifEmpty { extractCurrentModel(configPayload) },
+                    defaultProvider,
+                )
                 tokenProviders = readTokenProviders()
-                rows = buildModelRows(configRaw, currentModelId, tokenProviders).toMutableList()
-                currentModelMode = resolveCurrentModelMode(JSONObject(configRaw), currentModelId, tokenProviders)
+                rows = buildModelRows(writableRaw, currentModelId, tokenProviders).toMutableList()
+                currentModelMode = resolveCurrentModelMode(writableRoot, currentModelId, tokenProviders)
 
                 runOnUiThread {
                     loading = false
@@ -196,6 +205,21 @@ class ModelManagerActivity : AppCompatActivity() {
             if (existing == null || (existing.mode == AuthMode.TOKEN && row.mode == AuthMode.API)) {
                 output[row.id] = row
             }
+        }
+
+        val orderedTokenProviders = tokenProvidersSet.toList().sorted()
+        for (providerName in orderedTokenProviders) {
+            val hasRow = output.values.any { it.provider == providerName }
+            if (hasRow) continue
+            val fallbackId = defaultTokenModelId(providerName) ?: continue
+            output[fallbackId] = ModelRow(
+                id = fallbackId,
+                name = humanizeModelName(fallbackId),
+                provider = providerName,
+                mode = AuthMode.TOKEN,
+                baseUrl = inferBaseUrlForProvider(providerName),
+                apiKeyPresent = false,
+            )
         }
 
         val providerNames = providers.keys().asSequence().toList().sorted()
@@ -501,14 +525,7 @@ class ModelManagerActivity : AppCompatActivity() {
     private fun openProviderConfigDialog(row: ModelRow) {
         if (row.mode != AuthMode.API) return
 
-        val providerConfig = try {
-            val root = JSONObject(configRaw)
-            root.optJSONObject("models")
-                ?.optJSONObject("providers")
-                ?.optJSONObject(row.provider)
-        } catch (_: Exception) {
-            null
-        }
+        val providerConfig = readProviderConfigFromLocalFile(row.provider)
 
         val baseUrlInput = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT
@@ -1257,6 +1274,13 @@ class ModelManagerActivity : AppCompatActivity() {
         return ProviderEntry(providerName, provider)
     }
 
+    private fun defaultTokenModelId(providerName: String): String? {
+        return when {
+            providerName.equals("openai-codex", ignoreCase = true) -> "openai-codex/gpt-5.3-codex"
+            else -> null
+        }
+    }
+
     private fun readPrimaryModelId(root: JSONObject): String {
         return root
             .optJSONObject("agents")
@@ -1323,7 +1347,11 @@ class ModelManagerActivity : AppCompatActivity() {
     }
 
     private fun normalizeApiKey(rawApiKey: String): String {
-        return rawApiKey.filterNot { it.isWhitespace() }.trim()
+        val normalized = rawApiKey.filterNot { it.isWhitespace() }.trim()
+        if (normalized.isEmpty()) return normalized
+        if (normalized.equals(REDACTED_SENTINEL, ignoreCase = true)) return ""
+        if (normalized.startsWith("__OPENCLAW_REDACTED", ignoreCase = true)) return ""
+        return normalized
     }
 
     private fun apiKeyTail(apiKey: String): String {
@@ -1336,7 +1364,43 @@ class ModelManagerActivity : AppCompatActivity() {
         val payload = callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
         configRaw = payload.optString("raw", configRaw.ifBlank { "{}" })
         configBaseHash = payload.optString("hash", configBaseHash)
+        return readWritableConfigRoot(payload)
+    }
+
+    private fun readWritableConfigRoot(payload: JSONObject): JSONObject {
+        val fromFile = runCatching {
+            val path = payload.optString("path", "").trim()
+            if (path.isNotEmpty()) {
+                val file = File(path)
+                if (file.exists()) {
+                    JSONObject(file.readText())
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        }.getOrNull()
+        if (fromFile != null) return fromFile
+
+        val fallback = File(BootstrapInstaller.getPaths(this).homeDir, ".openclaw/openclaw.json")
+        if (fallback.exists()) {
+            runCatching { JSONObject(fallback.readText()) }.getOrNull()?.let { return it }
+        }
+
         return JSONObject(configRaw.ifBlank { "{}" })
+    }
+
+    private fun readProviderConfigFromLocalFile(providerName: String): JSONObject? {
+        val root = runCatching {
+            val configFile = File(BootstrapInstaller.getPaths(this).homeDir, ".openclaw/openclaw.json")
+            if (!configFile.exists()) return@runCatching null
+            JSONObject(configFile.readText())
+        }.getOrNull() ?: return null
+        return root
+            .optJSONObject("models")
+            ?.optJSONObject("providers")
+            ?.optJSONObject(providerName)
     }
 
     private fun applyConfig(root: JSONObject, note: String) {
