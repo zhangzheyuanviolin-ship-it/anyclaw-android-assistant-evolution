@@ -100,6 +100,8 @@
     <string name="gateway_toggle_disconnected_toast">网关已断开。</string>
     <string name="gateway_toggle_connect_failed">网关重连失败。</string>
     <string name="gateway_toggle_disconnect_failed">网关断开失败。</string>
+    <string name="back_to_codex_button_text">返回聊天页</string>
+    <string name="back_to_codex_button_desc">返回 Codex 聊天主页面</string>
     <string name="prompt_add_button_text">新建提示词</string>
     <string name="prompt_clear_selected_button_text">取消当前选中</string>
     <string name="prompt_delete_selected_button_text">删除当前选中</string>

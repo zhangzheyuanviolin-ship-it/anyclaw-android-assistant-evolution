@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var conversationManagerButton: Button
     private lateinit var modelManagerButton: Button
     private lateinit var gatewayToggleButton: Button
+    private lateinit var backToCodexButton: Button
     private lateinit var serverManager: CodexServerManager
     private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
@@ -102,6 +103,7 @@ class MainActivity : AppCompatActivity() {
         conversationManagerButton = findViewById(R.id.btnConversationManager)
         modelManagerButton = findViewById(R.id.btnModelManager)
         gatewayToggleButton = findViewById(R.id.btnGatewayToggle)
+        backToCodexButton = findViewById(R.id.btnBackToCodex)
 
         serverManager = CodexServerManager(this)
 
@@ -119,6 +121,9 @@ class MainActivity : AppCompatActivity() {
         }
         gatewayToggleButton.setOnClickListener {
             onGatewayTogglePressed()
+        }
+        backToCodexButton.setOnClickListener {
+            webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
         }
 
         requestBatteryOptimizationExemption()
@@ -390,6 +395,7 @@ class MainActivity : AppCompatActivity() {
             conversationManagerButton.visibility = View.VISIBLE
             modelManagerButton.visibility = View.VISIBLE
             gatewayToggleButton.visibility = View.VISIBLE
+            backToCodexButton.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
             webView.loadUrl(consumeLaunchUrlOrDefault())
@@ -607,6 +613,7 @@ class MainActivity : AppCompatActivity() {
             conversationManagerButton.visibility = View.GONE
             modelManagerButton.visibility = View.GONE
             gatewayToggleButton.visibility = View.GONE
+            backToCodexButton.visibility = View.GONE
         }
     }
 
