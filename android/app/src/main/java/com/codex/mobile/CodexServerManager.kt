@@ -1105,29 +1105,78 @@ H3
               const http = require('http');
               const fs = require('fs');
               const path = require('path');
+              const { URL } = require('url');
               const root = '$controlUiRoot';
               const mimeTypes = {
                 '.html':'text/html','.js':'application/javascript',
                 '.css':'text/css','.json':'application/json',
                 '.svg':'image/svg+xml','.png':'image/png',
+                '.ico':'image/x-icon',
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
+              function injectBootstrap(html) {
+                const snippet = '<script>(function(){try{' +
+                  'var params=new URLSearchParams(location.search);' +
+                  'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
+                  'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
+                  'var nav=(navigator.language||\"\").toLowerCase();' +
+                  'var systemLocale=nav.indexOf(\"zh\")===0?\"zh-CN\":\"en\";' +
+                  'var locale=(pref===\"system\")?systemLocale:(pref===\"zh-CN\"?\"zh-CN\":\"en\");' +
+                  'localStorage.setItem(\"openclaw.i18n.locale\",locale);' +
+                  'var settingsKey=\"openclaw.control.settings.v1\";' +
+                  'var settings={};' +
+                  'try{settings=JSON.parse(localStorage.getItem(settingsKey)||\"{}\");}catch(_){}' +
+                  'if(!settings||typeof settings!==\"object\"){settings={};}' +
+                  'settings.chatFocusMode=true;' +
+                  'settings.navCollapsed=true;' +
+                  'settings.locale=locale;' +
+                  'settings.theme=settings.theme||\"system\";' +
+                  'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
+                  'var p=location.pathname||\"/\";' +
+                  'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
+                  '}catch(_){}})();</' + 'script>';
+                if (html.includes('</body>')) {
+                  return html.replace('</body>', snippet + '</body>');
+                }
+                return html + snippet;
+              }
+              function sendStatic(res, filePath, data) {
+                const ext = path.extname(filePath);
+                const contentType = mimeTypes[ext] || 'application/octet-stream';
+                if (contentType === 'text/html') {
+                  const html = injectBootstrap(data.toString('utf8'));
+                  res.writeHead(200, {'Content-Type':'text/html; charset=utf-8', 'Cache-Control':'no-store'});
+                  res.end(html);
+                  return;
+                }
+                res.writeHead(200, {'Content-Type': contentType});
+                res.end(data);
+              }
               http.createServer((req, res) => {
-                let url = req.url.split('?')[0];
-                if (url === '/') url = '/index.html';
-                const fp = path.join(root, url);
+                let pathname = '/';
+                try {
+                  const parsed = new URL(req.url || '/', 'http://127.0.0.1');
+                  pathname = decodeURIComponent(parsed.pathname || '/');
+                } catch (_) {
+                  pathname = '/';
+                }
+                if (pathname === '/') pathname = '/index.html';
+                const relativePath = pathname.startsWith('/') ? pathname.slice(1) : pathname;
+                const fp = path.join(root, relativePath);
                 if (!fp.startsWith(root)) { res.writeHead(403); return res.end(); }
                 fs.readFile(fp, (err, data) => {
                   if (err) {
                     fs.readFile(path.join(root,'index.html'), (e2, d2) => {
-                      res.writeHead(200, {'Content-Type':'text/html'});
-                      res.end(d2);
+                      if (e2 || !d2) {
+                        res.writeHead(404, {'Content-Type':'text/plain; charset=utf-8'});
+                        res.end('Not Found');
+                        return;
+                      }
+                      sendStatic(res, path.join(root,'index.html'), d2);
                     });
                     return;
                   }
-                  const ext = path.extname(fp);
-                  res.writeHead(200, {'Content-Type': mimeTypes[ext]||'application/octet-stream'});
-                  res.end(data);
+                  sendStatic(res, fp, data);
                 });
               }).listen($OPENCLAW_CONTROL_UI_PORT, '127.0.0.1', () => console.log('Control UI on port $OPENCLAW_CONTROL_UI_PORT'));
             " 2>&1

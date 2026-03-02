@@ -1,16 +1,16 @@
 <template>
   <div ref="menuRootRef" class="thread-type-menu-wrap">
-    <button class="thread-type-menu-trigger" type="button" title="thread_display_settings" @click="toggleOpen">
+    <button class="thread-type-menu-trigger" type="button" :title="t('menu_thread_display_settings')" @click="toggleOpen">
       <IconTablerSettings class="thread-type-menu-icon" />
     </button>
 
     <div v-if="isOpen" class="thread-type-menu-panel" @click.stop>
       <div class="thread-type-menu-actions">
-        <button class="thread-type-menu-action-button" type="button" @click="emit('show-all')">Show all</button>
-        <button class="thread-type-menu-action-button" type="button" @click="emit('hide-all')">Hide all</button>
+        <button class="thread-type-menu-action-button" type="button" @click="emit('show-all')">{{ t('menu_show_all') }}</button>
+        <button class="thread-type-menu-action-button" type="button" @click="emit('hide-all')">{{ t('menu_hide_all') }}</button>
       </div>
 
-      <p v-if="types.length === 0" class="thread-type-menu-empty">No types yet</p>
+      <p v-if="types.length === 0" class="thread-type-menu-empty">{{ t('menu_no_types') }}</p>
 
       <label v-for="type in types" :key="type" class="thread-type-menu-option">
         <input
@@ -29,6 +29,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
 import IconTablerSettings from '../icons/IconTablerSettings.vue'
+import { useUiI18n } from '../../composables/useUiI18n'
+
+const { t } = useUiI18n()
 
 defineProps<{
   types: string[]

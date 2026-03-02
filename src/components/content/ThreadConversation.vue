@@ -1,12 +1,12 @@
 <template>
   <section class="conversation-root">
-    <p v-if="isLoading" class="conversation-loading">Loading messages...</p>
+    <p v-if="isLoading" class="conversation-loading">{{ t('conversation_loading') }}</p>
 
     <p
       v-else-if="messages.length === 0 && pendingRequests.length === 0 && !liveOverlay"
       class="conversation-empty"
     >
-      No messages in this thread yet.
+      {{ t('conversation_empty') }}
     </p>
 
     <ul v-else ref="conversationListRef" class="conversation-list" @scroll="onConversationScroll">
@@ -24,17 +24,17 @@
               <p v-if="readRequestReason(request)" class="request-reason">{{ readRequestReason(request) }}</p>
 
               <section v-if="request.method === 'item/commandExecution/requestApproval'" class="request-actions">
-                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">Accept</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">Accept for Session</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">Decline</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'cancel')">Cancel</button>
+                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">{{ t('request_accept') }}</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">{{ t('request_accept_session') }}</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">{{ t('request_decline') }}</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'cancel')">{{ t('request_cancel') }}</button>
               </section>
 
               <section v-else-if="request.method === 'item/fileChange/requestApproval'" class="request-actions">
-                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">Accept</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">Accept for Session</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">Decline</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'cancel')">Cancel</button>
+                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">{{ t('request_accept') }}</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">{{ t('request_accept_session') }}</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">{{ t('request_decline') }}</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'cancel')">{{ t('request_cancel') }}</button>
               </section>
 
               <section v-else-if="request.method === 'item/tool/requestUserInput'" class="request-user-input">
@@ -59,24 +59,24 @@
                     class="request-input"
                     type="text"
                     :value="readQuestionOtherAnswer(request.id, question.id)"
-                    placeholder="Other answer"
+                    :placeholder="t('request_other_answer')"
                     @input="onQuestionOtherAnswerInput(request.id, question.id, $event)"
                   />
                 </div>
 
                 <button type="button" class="request-button request-button-primary" @click="onRespondToolRequestUserInput(request)">
-                  Submit Answers
+                  {{ t('request_submit_answers') }}
                 </button>
               </section>
 
               <section v-else-if="request.method === 'item/tool/call'" class="request-actions">
-                <button type="button" class="request-button request-button-primary" @click="onRespondToolCallFailure(request.id)">Fail Tool Call</button>
-                <button type="button" class="request-button" @click="onRespondToolCallSuccess(request.id)">Success (Empty)</button>
+                <button type="button" class="request-button request-button-primary" @click="onRespondToolCallFailure(request.id)">{{ t('request_fail_tool_call') }}</button>
+                <button type="button" class="request-button" @click="onRespondToolCallSuccess(request.id)">{{ t('request_success_empty') }}</button>
               </section>
 
               <section v-else class="request-actions">
-                <button type="button" class="request-button request-button-primary" @click="onRespondEmptyResult(request.id)">Return Empty Result</button>
-                <button type="button" class="request-button" @click="onRejectUnknownRequest(request.id)">Reject Request</button>
+                <button type="button" class="request-button request-button-primary" @click="onRespondEmptyResult(request.id)">{{ t('request_return_empty') }}</button>
+                <button type="button" class="request-button" @click="onRejectUnknownRequest(request.id)">{{ t('request_reject_unknown') }}</button>
               </section>
             </article>
           </div>
@@ -140,7 +140,7 @@
                     type="button"
                     @click="onCopyMessage(message.id)"
                   >
-                    Copy
+                    {{ t('message_action_copy') }}
                   </button>
                   <button
                     class="message-action-button"
@@ -148,7 +148,7 @@
                     :disabled="typeof message.turnIndex !== 'number'"
                     @click="onDeleteFromMessage(message.id)"
                   >
-                    Delete
+                    {{ t('message_action_delete') }}
                   </button>
                   <button
                     class="message-action-button"
@@ -156,14 +156,14 @@
                     :disabled="typeof message.turnIndex !== 'number'"
                     @click="onBranchFromMessage(message.id)"
                   >
-                    Branch
+                    {{ t('message_action_branch') }}
                   </button>
                   <button
                     class="message-action-button"
                     type="button"
                     @click="closeMessageActionMenu"
                   >
-                    Close
+                    {{ t('message_action_close') }}
                   </button>
                 </div>
               </article>
@@ -192,10 +192,10 @@
 
     <div v-if="modalImageUrl.length > 0" class="image-modal-backdrop" @click="closeImageModal">
       <div class="image-modal-content" @click.stop>
-        <button class="image-modal-close" type="button" aria-label="Close image preview" @click="closeImageModal">
+        <button class="image-modal-close" type="button" :aria-label="t('image_preview_close')" @click="closeImageModal">
           <IconTablerX class="icon-svg" />
         </button>
-        <img class="image-modal-image" :src="modalImageUrl" alt="Expanded message image" />
+        <img class="image-modal-image" :src="modalImageUrl" :alt="t('image_preview_close')" />
       </div>
     </div>
   </section>
@@ -205,6 +205,9 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ThreadScrollState, UiLiveOverlay, UiMessage, UiServerRequest } from '../../types/codex'
 import IconTablerX from '../icons/IconTablerX.vue'
+import { useUiI18n } from '../../composables/useUiI18n'
+
+const { t } = useUiI18n()
 
 const props = defineProps<{
   messages: UiMessage[]

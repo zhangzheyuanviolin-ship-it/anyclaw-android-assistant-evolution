@@ -15,7 +15,7 @@
           class="thread-composer-control"
           :model-value="selectedModel"
           :options="modelOptions"
-          placeholder="Model"
+          :placeholder="t('composer_model')"
           open-direction="up"
           :disabled="disabled || !activeThreadId || models.length === 0 || isTurnInProgress"
           @update:model-value="onModelSelect"
@@ -25,7 +25,7 @@
           class="thread-composer-control"
           :model-value="selectedReasoningEffort"
           :options="reasoningOptions"
-          placeholder="Thinking"
+          :placeholder="t('composer_thinking')"
           open-direction="up"
           :disabled="disabled || !activeThreadId || isTurnInProgress"
           @update:model-value="onReasoningEffortSelect"
@@ -35,7 +35,7 @@
           v-if="isTurnInProgress"
           class="thread-composer-stop"
           type="button"
-          aria-label="Стоп"
+          :aria-label="t('composer_stop')"
           :disabled="disabled || !activeThreadId || isInterruptingTurn"
           @click="onInterrupt"
         >
@@ -45,7 +45,7 @@
           v-else
           class="thread-composer-submit"
           type="submit"
-          aria-label="Send message"
+          :aria-label="t('composer_send_message')"
           :disabled="!canSubmit"
         >
           <IconTablerArrowUp class="thread-composer-submit-icon" />
@@ -61,6 +61,9 @@ import type { ReasoningEffort } from '../../types/codex'
 import IconTablerArrowUp from '../icons/IconTablerArrowUp.vue'
 import IconTablerPlayerStopFilled from '../icons/IconTablerPlayerStopFilled.vue'
 import ComposerDropdown from './ComposerDropdown.vue'
+import { useUiI18n } from '../../composables/useUiI18n'
+
+const { t } = useUiI18n()
 
 const props = defineProps<{
   activeThreadId: string
@@ -80,14 +83,14 @@ const emit = defineEmits<{
 }>()
 
 const draft = ref('')
-const reasoningOptions: Array<{ value: ReasoningEffort; label: string }> = [
-  { value: 'none', label: 'None' },
-  { value: 'minimal', label: 'Minimal' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra high' },
-]
+const reasoningOptions = computed<Array<{ value: ReasoningEffort; label: string }>>(() => [
+  { value: 'none', label: t('thinking_none') },
+  { value: 'minimal', label: t('thinking_minimal') },
+  { value: 'low', label: t('thinking_low') },
+  { value: 'medium', label: t('thinking_medium') },
+  { value: 'high', label: t('thinking_high') },
+  { value: 'xhigh', label: t('thinking_xhigh') },
+])
 const modelOptions = computed(() =>
   props.models.map((modelId) => ({ value: modelId, label: modelId })),
 )
@@ -100,7 +103,7 @@ const canSubmit = computed(() => {
 })
 
 const placeholderText = computed(() =>
-  props.activeThreadId ? 'Type a message...' : 'Select a thread to send a message',
+  props.activeThreadId ? t('composer_type_message') : t('composer_select_thread'),
 )
 
 function onSubmit(): void {

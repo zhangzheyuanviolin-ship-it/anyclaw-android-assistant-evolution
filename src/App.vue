@@ -8,6 +8,7 @@
           :is-sidebar-collapsed="isSidebarCollapsed"
           :is-auto-refresh-enabled="isAutoRefreshEnabled"
           :auto-refresh-button-label="autoRefreshButtonLabel"
+          :show-auto-refresh-button="false"
           :show-new-thread-button="true"
           @toggle-sidebar="setSidebarCollapsed(!isSidebarCollapsed)"
           @toggle-auto-refresh="onToggleAutoRefreshTimer"
@@ -17,8 +18,8 @@
             class="sidebar-search-toggle"
             type="button"
             :aria-pressed="isSidebarSearchVisible"
-            aria-label="Search threads"
-            title="Search threads"
+            :aria-label="t('sidebar_search_threads')"
+            :title="t('sidebar_search_threads')"
             @click="toggleSidebarSearch"
           >
             <IconTablerSearch class="sidebar-search-toggle-icon" />
@@ -32,14 +33,14 @@
             v-model="sidebarSearchQuery"
             class="sidebar-search-input"
             type="text"
-            placeholder="Filter threads..."
+            :placeholder="t('sidebar_filter_threads')"
             @keydown="onSidebarSearchKeydown"
           />
           <button
             v-if="sidebarSearchQuery.length > 0"
             class="sidebar-search-clear"
             type="button"
-            aria-label="Clear search"
+            :aria-label="t('sidebar_clear_search')"
             @click="clearSidebarSearch"
           >
             <IconTablerX class="sidebar-search-clear-icon" />
@@ -62,7 +63,7 @@
           rel="noopener noreferrer"
         >
           <IconTablerExternalLink class="openclaw-dashboard-icon" />
-          <span class="openclaw-dashboard-label">OpenClaw Dashboard</span>
+          <span class="openclaw-dashboard-label">{{ t('openclaw_dashboard_label') }}</span>
         </a>
       </section>
     </template>
@@ -77,11 +78,25 @@
               :is-sidebar-collapsed="isSidebarCollapsed"
               :is-auto-refresh-enabled="isAutoRefreshEnabled"
               :auto-refresh-button-label="autoRefreshButtonLabel"
+              :show-auto-refresh-button="false"
               :show-new-thread-button="true"
               @toggle-sidebar="setSidebarCollapsed(!isSidebarCollapsed)"
               @toggle-auto-refresh="onToggleAutoRefreshTimer"
               @start-new-thread="onStartNewThreadFromToolbar"
             />
+          </template>
+          <template #actions>
+            <label class="ui-locale-label" for="ui-locale-select">{{ t('app_language') }}</label>
+            <select
+              id="ui-locale-select"
+              class="ui-locale-select"
+              :value="localePreference"
+              @change="onLocalePreferenceChange"
+            >
+              <option value="system">{{ t('app_language_system') }}</option>
+              <option value="zh-CN">{{ t('app_language_zh_cn') }}</option>
+              <option value="en">{{ t('app_language_en') }}</option>
+            </select>
           </template>
         </ContentHeader>
 
@@ -89,10 +104,11 @@
           <template v-if="isHomeRoute">
             <div class="content-grid">
               <div class="new-thread-empty">
-                <p class="new-thread-hero">Let's build</p>
+                <p class="new-thread-hero">{{ t('home_hero') }}</p>
                 <ComposerDropdown class="new-thread-folder-dropdown" :model-value="newThreadCwd"
-                  :options="newThreadFolderOptions" placeholder="Choose folder"
+                  :options="newThreadFolderOptions" :placeholder="t('home_choose_folder')"
                   :disabled="newThreadFolderOptions.length === 0" @update:model-value="onSelectNewThreadFolder" />
+                <p class="new-thread-guide">{{ t('home_quick_guide') }}</p>
               </div>
 
               <ThreadComposer :active-thread-id="composerThreadContextId" :disabled="isSendingMessage"
@@ -144,11 +160,18 @@ import IconTablerSearch from './components/icons/IconTablerSearch.vue'
 import IconTablerX from './components/icons/IconTablerX.vue'
 import IconTablerExternalLink from './components/icons/IconTablerExternalLink.vue'
 import { useDesktopState } from './composables/useDesktopState'
+import { useUiI18n, type LocalePreference } from './composables/useUiI18n'
 import type { ReasoningEffort, ThreadScrollState } from './types/codex'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
+const { localePreference, setLocalePreference, t } = useUiI18n()
 const openClawDashboardUrl = computed(() => {
-  return `http://localhost:19001/?gatewayUrl=ws://localhost:18789`
+  const params = new URLSearchParams({
+    gatewayUrl: 'ws://localhost:18789',
+    localePref: localePreference.value,
+    simple: '1',
+  })
+  return `http://localhost:19001/chat?${params.toString()}`
 })
 
 const {
@@ -216,13 +239,13 @@ const knownThreadIdSet = computed(() => {
 
 const isHomeRoute = computed(() => route.name === 'home')
 const contentTitle = computed(() => {
-  if (isHomeRoute.value) return 'New thread'
-  return selectedThread.value?.title ?? 'Choose a thread'
+  if (isHomeRoute.value) return t('content_new_thread')
+  return selectedThread.value?.title ?? t('content_choose_thread')
 })
 const autoRefreshButtonLabel = computed(() =>
   isAutoRefreshEnabled.value
-    ? `Auto refresh in ${String(autoRefreshSecondsLeft.value)}s`
-    : 'Enable 4s refresh',
+    ? t('auto_refresh_in', { seconds: String(autoRefreshSecondsLeft.value) })
+    : t('auto_refresh_enable'),
 )
 const filteredMessages = computed(() =>
   messages.value.filter((message) => {
@@ -347,9 +370,7 @@ function onCopyMessage(messageId: string): void {
 
 function onDeleteFromMessage(messageId: string): void {
   if (typeof window !== 'undefined') {
-    const shouldContinue = window.confirm(
-      'This operation deletes the whole turn (user + assistant) from this point onward. Continue?',
-    )
+    const shouldContinue = window.confirm(t('delete_turn_confirm'))
     if (!shouldContinue) return
   }
   void (async () => {
@@ -357,7 +378,7 @@ function onDeleteFromMessage(messageId: string): void {
       await deleteFromMessage(messageId)
     } catch (error) {
       if (typeof window !== 'undefined') {
-        window.alert(error instanceof Error ? error.message : 'Failed to delete message')
+        window.alert(error instanceof Error ? error.message : t('delete_message_failed'))
       }
     }
   })()
@@ -369,10 +390,18 @@ function onBranchFromMessage(messageId: string): void {
       await forkFromMessage(messageId)
     } catch (error) {
       if (typeof window !== 'undefined') {
-        window.alert(error instanceof Error ? error.message : 'Failed to create branch')
+        window.alert(error instanceof Error ? error.message : t('branch_message_failed'))
       }
     }
   })()
+}
+
+function onLocalePreferenceChange(event: Event): void {
+  const target = event.target as HTMLSelectElement | null
+  const value = target?.value
+  if (value === 'system' || value === 'zh-CN' || value === 'en') {
+    setLocalePreference(value as LocalePreference)
+  }
 }
 
 function onToggleAutoRefreshTimer(): void {
@@ -420,7 +449,9 @@ function onInterruptTurn(): void {
 
 function loadSidebarCollapsed(): boolean {
   if (typeof window === 'undefined') return false
-  return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === '1'
+  const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)
+  if (stored === null) return true
+  return stored === '1'
 }
 
 function saveSidebarCollapsed(value: boolean): void {
@@ -631,6 +662,10 @@ async function submitFirstMessageForNewThread(text: string): Promise<void> {
   @apply h-5 w-5 mt-0;
 }
 
+.new-thread-guide {
+  @apply mt-3 max-w-xl text-center text-sm leading-6 text-zinc-500;
+}
+
 .openclaw-dashboard-link {
   @apply mt-auto mx-2 mb-1 flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-orange-700 bg-orange-50 border border-orange-200 transition no-underline hover:bg-orange-100 hover:border-orange-300;
 }
@@ -641,6 +676,14 @@ async function submitFirstMessageForNewThread(text: string): Promise<void> {
 
 .openclaw-dashboard-label {
   @apply truncate;
+}
+
+.ui-locale-label {
+  @apply text-xs text-zinc-500;
+}
+
+.ui-locale-select {
+  @apply h-8 rounded-md border border-zinc-200 bg-white px-2 text-xs text-zinc-700;
 }
 
 </style>

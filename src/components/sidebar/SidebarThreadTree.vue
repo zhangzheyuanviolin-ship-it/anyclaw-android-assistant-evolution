@@ -12,7 +12,7 @@
             <template #left>
               <span class="thread-left-stack">
                 <span v-if="thread.inProgress || thread.unread" class="thread-status-indicator" :data-state="getThreadState(thread)" />
-                <button class="thread-pin-button" type="button" title="pin" @click="togglePin(thread.id)">
+                <button class="thread-pin-button" type="button" :title="t('pin')" @click="togglePin(thread.id)">
                   <IconTablerPin class="thread-icon" />
                 </button>
               </span>
@@ -28,10 +28,10 @@
                 class="thread-archive-button"
                 :data-confirm="archiveConfirmThreadId === thread.id"
                 type="button"
-                title="archive_thread"
+                :title="t('archive_thread')"
                 @click="onArchiveClick(thread.id)"
               >
-                <span v-if="archiveConfirmThreadId === thread.id">confirm</span>
+                <span v-if="archiveConfirmThreadId === thread.id">{{ t('threads_confirm') }}</span>
                 <IconTablerArchive v-else class="thread-icon" />
               </button>
             </template>
@@ -41,12 +41,12 @@
     </section>
 
     <SidebarMenuRow as="header" class="thread-tree-header-row">
-      <span class="thread-tree-header">Threads</span>
+      <span class="thread-tree-header">{{ t('threads_header') }}</span>
     </SidebarMenuRow>
 
-    <p v-if="isSearchActive && filteredGroups.length === 0" class="thread-tree-no-results">No matching threads</p>
+    <p v-if="isSearchActive && filteredGroups.length === 0" class="thread-tree-no-results">{{ t('threads_no_match') }}</p>
 
-    <p v-else-if="isLoading && groups.length === 0" class="thread-tree-loading">Loading threads...</p>
+    <p v-else-if="isLoading && groups.length === 0" class="thread-tree-loading">{{ t('threads_loading') }}</p>
 
     <div v-else ref="groupsContainerRef" class="thread-tree-groups" :style="groupsContainerStyle">
       <article
@@ -103,18 +103,18 @@
                   <div v-if="isProjectMenuOpen(group.projectName)" class="project-menu-panel" @click.stop>
                     <template v-if="projectMenuMode === 'actions'">
                       <button class="project-menu-item" type="button" @click="openRenameProjectMenu(group.projectName)">
-                        Edit name
+                        {{ t('project_edit_name') }}
                       </button>
                       <button
                         class="project-menu-item project-menu-item-danger"
                         type="button"
                         @click="onRemoveProject(group.projectName)"
                       >
-                        Remove
+                        {{ t('project_remove') }}
                       </button>
                     </template>
                     <template v-else>
-                      <label class="project-menu-label">Project name</label>
+                      <label class="project-menu-label">{{ t('project_name') }}</label>
                       <input
                         v-model="projectRenameDraft"
                         class="project-menu-input"
@@ -153,7 +153,7 @@
                       class="thread-status-indicator"
                       :data-state="getThreadState(thread)"
                     />
-                    <button class="thread-pin-button" type="button" title="pin" @click="togglePin(thread.id)">
+                    <button class="thread-pin-button" type="button" :title="t('pin')" @click="togglePin(thread.id)">
                       <IconTablerPin class="thread-icon" />
                     </button>
                   </span>
@@ -169,10 +169,10 @@
                     class="thread-archive-button"
                     :data-confirm="archiveConfirmThreadId === thread.id"
                     type="button"
-                    title="archive_thread"
+                    :title="t('archive_thread')"
                     @click="onArchiveClick(thread.id)"
                   >
-                    <span v-if="archiveConfirmThreadId === thread.id">confirm</span>
+                    <span v-if="archiveConfirmThreadId === thread.id">{{ t('threads_confirm') }}</span>
                     <IconTablerArchive v-else class="thread-icon" />
                   </button>
                 </template>
@@ -184,7 +184,7 @@
             <template #left>
               <span class="project-empty-spacer" />
             </template>
-            <span class="project-empty">No threads</span>
+            <span class="project-empty">{{ t('threads_no_items') }}</span>
           </SidebarMenuRow>
 
           <SidebarMenuRow v-if="hasHiddenThreads(group)" class="thread-show-more-row">
@@ -192,7 +192,7 @@
               <span class="thread-show-more-spacer" />
             </template>
             <button class="thread-show-more-button" type="button" @click="toggleProjectExpansion(group.projectName)">
-              {{ isExpanded(group.projectName) ? 'Show less' : 'Show more' }}
+              {{ isExpanded(group.projectName) ? t('threads_show_less') : t('threads_show_more') }}
             </button>
           </SidebarMenuRow>
       </article>
@@ -213,6 +213,9 @@ import IconTablerFolder from '../icons/IconTablerFolder.vue'
 import IconTablerFolderOpen from '../icons/IconTablerFolderOpen.vue'
 import IconTablerPin from '../icons/IconTablerPin.vue'
 import SidebarMenuRow from './SidebarMenuRow.vue'
+import { useUiI18n } from '../../composables/useUiI18n'
+
+const { t } = useUiI18n()
 
 const props = defineProps<{
   groups: UiProjectGroup[]
@@ -413,10 +416,10 @@ const groupsContainerStyle = computed<Record<string, string>>(() => {
 
 function formatRelative(value: string): string {
   const timestamp = new Date(value).getTime()
-  if (Number.isNaN(timestamp)) return 'n/a'
+  if (Number.isNaN(timestamp)) return t('time_na')
 
   const diffMs = Math.abs(Date.now() - timestamp)
-  if (diffMs < 60000) return 'now'
+  if (diffMs < 60000) return t('time_now')
 
   const minutes = Math.floor(diffMs / 60000)
   if (minutes < 60) return `${minutes}m`
@@ -457,7 +460,7 @@ function onArchiveClick(threadId: string): void {
 }
 
 function getNewThreadButtonAriaLabel(projectName: string): string {
-  return `start new thread ${getProjectDisplayName(projectName)}`
+  return `${t('sidebar_start_new_thread')} ${getProjectDisplayName(projectName)}`
 }
 
 function onStartNewThread(projectName: string): void {

@@ -3,8 +3,8 @@
     <button
       class="sidebar-thread-controls-button"
       type="button"
-      :aria-label="isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
-      :title="isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+      :aria-label="isSidebarCollapsed ? t('sidebar_expand') : t('sidebar_collapse')"
+      :title="isSidebarCollapsed ? t('sidebar_expand') : t('sidebar_collapse')"
       @click="$emit('toggle-sidebar')"
     >
       <IconTablerLayoutSidebarFilled v-if="isSidebarCollapsed" class="sidebar-thread-controls-icon" />
@@ -12,6 +12,7 @@
     </button>
 
     <button
+      v-if="showAutoRefreshButton !== false"
       class="sidebar-thread-controls-button"
       type="button"
       :aria-pressed="isAutoRefreshEnabled"
@@ -28,8 +29,8 @@
       v-if="showNewThreadButton"
       class="sidebar-thread-controls-button"
       type="button"
-      aria-label="Start new thread"
-      title="Start new thread"
+      :aria-label="t('sidebar_start_new_thread')"
+      :title="t('sidebar_start_new_thread')"
       @click="$emit('start-new-thread')"
     >
       <IconTablerFilePencil class="sidebar-thread-controls-icon" />
@@ -42,11 +43,15 @@ import IconTablerFilePencil from '../icons/IconTablerFilePencil.vue'
 import IconTablerLayoutSidebar from '../icons/IconTablerLayoutSidebar.vue'
 import IconTablerLayoutSidebarFilled from '../icons/IconTablerLayoutSidebarFilled.vue'
 import IconTablerRefresh from '../icons/IconTablerRefresh.vue'
+import { useUiI18n } from '../../composables/useUiI18n'
+
+const { t } = useUiI18n()
 
 defineProps<{
   isSidebarCollapsed: boolean
   isAutoRefreshEnabled: boolean
   autoRefreshButtonLabel: string
+  showAutoRefreshButton?: boolean
   showNewThreadButton?: boolean
 }>()
 
