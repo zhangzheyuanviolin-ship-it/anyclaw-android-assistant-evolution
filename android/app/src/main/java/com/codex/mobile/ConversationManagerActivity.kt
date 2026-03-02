@@ -3,6 +3,7 @@ package com.codex.mobile
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
 import android.view.LayoutInflater
@@ -272,6 +273,9 @@ class ConversationManagerActivity : AppCompatActivity() {
                 rowView.findViewById<Button>(R.id.btnConversationRowExport).setOnClickListener {
                     exportConversation(row)
                 }
+                rowView.setOnClickListener {
+                    openConversation(row)
+                }
                 rowView.setOnLongClickListener {
                     openRenameDialog(row)
                     true
@@ -322,6 +326,28 @@ class ConversationManagerActivity : AppCompatActivity() {
                 }
             }
             .show()
+    }
+
+    private fun openConversation(row: ConversationRow) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            when (row.source) {
+                SourceType.CODEX -> {
+                    putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_CODEX_THREAD)
+                    putExtra(MainActivity.EXTRA_THREAD_ID, row.id)
+                }
+                SourceType.OPENCLAW -> {
+                    putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
+                    putExtra(MainActivity.EXTRA_SESSION_KEY, row.id)
+                }
+                SourceType.ALL -> Unit
+            }
+        }
+        if (!intent.hasExtra(MainActivity.EXTRA_OPEN_TARGET)) {
+            return
+        }
+        startActivity(intent)
+        Toast.makeText(this, getString(R.string.conversation_opening_toast), Toast.LENGTH_SHORT).show()
     }
 
     private fun renameConversation(row: ConversationRow, newTitle: String, onDone: () -> Unit) {

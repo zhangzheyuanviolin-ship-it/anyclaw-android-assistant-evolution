@@ -32,6 +32,11 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "CodexMainActivity"
+        const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
+        const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
+        const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.SESSION_KEY"
+        const val OPEN_TARGET_CODEX_THREAD = "codex_thread"
+        const val OPEN_TARGET_OPENCLAW_SESSION = "openclaw_session"
     }
 
     private lateinit var webView: WebView
@@ -54,6 +59,7 @@ class MainActivity : AppCompatActivity() {
     private var gatewayStatusMonitorStarted = false
     private var gatewayConnected = false
     private var gatewayStatusChecking = false
+    private var pendingLaunchUrl: String? = null
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -119,7 +125,19 @@ class MainActivity : AppCompatActivity() {
         startForegroundService()
         startShizukuBridgeServer()
         setupWebView()
+        pendingLaunchUrl = resolveLaunchUrlFromIntent(intent)
         ensureStorageAccessOrStartSetup()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val targetUrl = resolveLaunchUrlFromIntent(intent) ?: return
+        pendingLaunchUrl = targetUrl
+        if (setupStarted && webView.visibility == View.VISIBLE) {
+            webView.loadUrl(targetUrl)
+            pendingLaunchUrl = null
+        }
     }
 
     override fun onResume() {
@@ -135,6 +153,11 @@ class MainActivity : AppCompatActivity() {
         }
         if (setupStarted) {
             startGatewayStatusMonitor()
+            val targetUrl = pendingLaunchUrl
+            if (targetUrl != null && webView.visibility == View.VISIBLE) {
+                webView.loadUrl(targetUrl)
+                pendingLaunchUrl = null
+            }
         }
     }
 
@@ -369,7 +392,42 @@ class MainActivity : AppCompatActivity() {
             gatewayToggleButton.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
-            webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
+            webView.loadUrl(consumeLaunchUrlOrDefault())
+        }
+    }
+
+    private fun consumeLaunchUrlOrDefault(): String {
+        val target = pendingLaunchUrl
+        pendingLaunchUrl = null
+        return target ?: "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
+    }
+
+    private fun resolveLaunchUrlFromIntent(intent: Intent?): String? {
+        val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
+        if (target.isEmpty()) return null
+        return when (target) {
+            OPEN_TARGET_CODEX_THREAD -> {
+                val threadId = intent?.getStringExtra(EXTRA_THREAD_ID)?.trim().orEmpty()
+                if (threadId.isEmpty()) null
+                else "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/thread/${Uri.encode(threadId)}"
+            }
+            OPEN_TARGET_OPENCLAW_SESSION -> {
+                val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
+                if (sessionKey.isEmpty()) null
+                else {
+                    val query = Uri.Builder()
+                        .appendQueryParameter(
+                            "gatewayUrl",
+                            "ws://127.0.0.1:${CodexServerManager.OPENCLAW_GATEWAY_PORT}",
+                        )
+                        .appendQueryParameter("simple", "1")
+                        .appendQueryParameter("session", sessionKey)
+                        .build()
+                        .encodedQuery
+                    "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat?$query"
+                }
+            }
+            else -> null
         }
     }
 

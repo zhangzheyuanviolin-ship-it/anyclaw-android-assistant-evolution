@@ -25,7 +25,7 @@
     <string name="prompt_manager_button_text">提示词管理</string>
     <string name="prompt_manager_button_desc">打开提示词管理页面</string>
     <string name="conversation_manager_title">对话管理</string>
-    <string name="conversation_manager_subtitle">统一管理 Codex 与大龙虾会话。支持重命名、删除、复制、导出。</string>
+    <string name="conversation_manager_subtitle">统一管理 Codex 与大龙虾会话。支持重命名、删除、复制、导出，并可直接点按进入会话。</string>
     <string name="conversation_manager_button_text">对话管理</string>
     <string name="conversation_manager_button_desc">打开对话管理页面</string>
     <string name="conversation_source_all">全部会话</string>
@@ -42,6 +42,7 @@
     <string name="conversation_copied_toast">会话内容已复制到剪贴板。</string>
     <string name="conversation_renamed_toast">标题已更新。</string>
     <string name="conversation_deleted_toast">会话已删除。</string>
+    <string name="conversation_opening_toast">正在打开该会话…</string>
     <string name="conversation_delete_confirm_title">删除会话</string>
     <string name="conversation_delete_confirm_message">确定删除该会话吗？</string>
     <string name="conversation_empty">暂无会话记录。</string>
