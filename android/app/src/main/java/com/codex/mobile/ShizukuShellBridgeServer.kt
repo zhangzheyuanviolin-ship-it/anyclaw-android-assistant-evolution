@@ -34,7 +34,6 @@ class ShizukuShellBridgeServer(
                 session.method == Method.POST && session.uri == "/enable" -> handleEnable(true)
                 session.method == Method.POST && session.uri == "/disable" -> handleEnable(false)
                 session.method == Method.POST && session.uri == "/exec" -> handleExec(session)
-                session.method == Method.POST && session.uri == "/web/call" -> handleWebCall(session)
                 else -> jsonResponse(
                     Response.Status.NOT_FOUND,
                     JSONObject().put("ok", false).put("error", "Not found"),
@@ -123,26 +122,6 @@ class ShizukuShellBridgeServer(
 
         persistStatusSnapshot(currentStatusPayload())
         return jsonResponse(Response.Status.OK, body)
-    }
-
-    private fun handleWebCall(session: IHTTPSession): Response {
-        val files = HashMap<String, String>()
-        session.parseBody(files)
-        val raw = files["postData"] ?: ""
-        val payload = if (raw.isBlank()) JSONObject() else JSONObject(raw)
-        val method = payload.optString("method", "").trim()
-        val params = payload.optJSONObject("params") ?: JSONObject()
-        if (method.isEmpty()) {
-            return jsonResponse(
-                Response.Status.BAD_REQUEST,
-                JSONObject()
-                    .put("ok", false)
-                    .put("error", "missing_method"),
-            )
-        }
-
-        val result = WebAutomationManager.handleCall(context, method, params)
-        return jsonResponse(Response.Status.OK, result)
     }
 
     private fun jsonResponse(status: Response.Status, json: JSONObject): Response {

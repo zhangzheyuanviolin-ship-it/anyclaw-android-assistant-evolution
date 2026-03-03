@@ -271,10 +271,6 @@ class MainActivity : AppCompatActivity() {
         }
         updateStatus("proot ready")
 
-        // Step 1c: Prepare resilient package manager scripts/wrappers.
-        serverManager.ensurePackageRecoveryScripts()
-        serverManager.ensurePackageManagerWrappers()
-
         // Step 2: Install Node.js
         if (!serverManager.isNodeInstalled()) {
             updateStatus("Installing Node.js (first run)…", "This may take a few minutes")
@@ -367,14 +363,13 @@ class MainActivity : AppCompatActivity() {
             serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
 
             updateStatus("Configuring OpenClaw…")
+            serverManager.configureOpenClawAuth()
+
             updateStatus("Starting OpenClaw gateway…")
-            val openClawReady = serverManager.reconnectOpenClawGateway()
-            if (!openClawReady) {
-                updateStatus(
-                    "OpenClaw gateway unavailable",
-                    "Codex is still available. You can reconnect gateway from the gateway button.",
-                )
-            }
+            serverManager.startOpenClawGateway()
+
+            updateStatus("Starting OpenClaw Control UI…")
+            serverManager.startOpenClawControlUiServer()
         }
 
         // Step 8: Start web server

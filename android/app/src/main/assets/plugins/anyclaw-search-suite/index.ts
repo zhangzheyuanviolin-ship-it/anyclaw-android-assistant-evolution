@@ -1,6 +1,5 @@
 import { jsonResult, readNumberParam, readStringParam } from "openclaw/plugin-sdk";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -17,7 +16,6 @@ type RuntimeConfig = {
   maxResults: number;
   maxChars: number;
   userAgent: string;
-  webBridgeUrl: string;
   tavilyApiKey?: string;
   tavilyBaseUrl: string;
 };
@@ -59,20 +57,16 @@ type SearchRunOutput = {
   intentClass: IntentClass;
   finalQualityLabel: "good" | "mixed" | "noisy" | "challenge";
   resultDomainDiversity: number;
-  fallbackRouteUsed?: string;
-  challengeDetectedAt?: string;
-  providerDropReason?: string;
   error?: string;
 };
 
-const PARSER_VERSION = "v1.4.0";
+const PARSER_VERSION = "v1.3.0";
 const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_RESULTS = 6;
 const DEFAULT_MAX_CHARS = 12000;
 const MAX_RESULTS = 10;
-const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.4";
+const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.3";
 const DEFAULT_TAVILY_BASE_URL = "https://api.tavily.com/search";
-const DEFAULT_WEB_BRIDGE_URL = "http://127.0.0.1:18926/web/call";
 
 const SEARCH_ENGINES = {
   google: (query: string) => "https://www.google.com/search?q=" + encodeURIComponent(query) + "&hl=en",
@@ -637,18 +631,6 @@ function resolveQualityLabel(qualityScore: number, count: number, suspectedChall
   return "noisy";
 }
 
-function shouldFallbackScholar(status: number | undefined, suspected: boolean, count: number): boolean {
-  if (suspected) return true;
-  if (typeof status === "number" && status >= 400) return true;
-  return count === 0;
-}
-
-function scholarFallbackQuery(query: string): string {
-  const q = query.trim();
-  if (!q) return "latest paper arxiv";
-  return q + " paper arxiv";
-}
-
 async function fetchText(url: string, timeoutMs: number, userAgent: string): Promise<{ status: number; body: string }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -683,13 +665,7 @@ function withMeta(payload: Record<string, unknown>, meta: PluginRuntimeMeta): Re
   };
 }
 
-async function runSearchInternal(
-  engine: SearchEngineKey,
-  query: string,
-  limit: number,
-  runtime: RuntimeConfig,
-  allowScholarFallback = true
-): Promise<SearchRunOutput> {
+async function runSearchInternal(engine: SearchEngineKey, query: string, limit: number, runtime: RuntimeConfig): Promise<SearchRunOutput> {
   const requestUrl = SEARCH_ENGINES[engine](query);
   const startedAt = Date.now();
   const intentClass = classifyIntent(query);
@@ -702,49 +678,6 @@ async function runSearchInternal(
 
     const qualityScore = providerQualityScore(parsed.hits.length, parsed.filteredCount);
     const suspected = parsed.suspectedChallengePage || isLikelyChallengePage(page.body, page.status);
-    const challengeDetectedAt = suspected ? new Date().toISOString() : undefined;
-
-    if (engine === "google_scholar" && allowScholarFallback && shouldFallbackScholar(page.status, suspected, parsed.hits.length)) {
-      const fallback = await runSearchInternal("duckduckgo", scholarFallbackQuery(query), limit, runtime, false);
-      const fallbackHits = fallback.results
-        .filter((hit) => classifyNoise("duckduckgo", "academic", hit.title, hit.url) === null)
-        .slice(0, limit)
-        .map((hit) => ({
-          ...hit,
-          source: "google_scholar_fallback"
-        }));
-
-      const fallbackQuality = providerQualityScore(fallbackHits.length, parsed.filteredCount);
-      const fallbackLabel = resolveQualityLabel(fallbackQuality, fallbackHits.length, suspected);
-      const fallbackReason = suspected
-        ? "scholar_challenge"
-        : (typeof page.status === "number" && page.status >= 400
-          ? "scholar_http_" + String(page.status)
-          : "scholar_empty_results");
-
-      return {
-        ok: true,
-        engine,
-        query,
-        requestUrl,
-        status: page.status,
-        count: fallbackHits.length,
-        filteredCount: parsed.filteredCount,
-        noiseReasonsTopN: parsed.noiseReasonsTopN,
-        providerQualityScore: fallbackQuality,
-        suspectedChallengePage: suspected,
-        tookMs: Date.now() - startedAt,
-        results: fallbackHits,
-        text: renderHitsText(fallbackHits),
-        intentClass,
-        finalQualityLabel: fallbackLabel,
-        resultDomainDiversity: resultDomainDiversity(fallbackHits),
-        fallbackRouteUsed: "google_scholar->duckduckgo",
-        challengeDetectedAt,
-        providerDropReason: fallbackReason
-      };
-    }
-
     const finalQualityLabel = resolveQualityLabel(qualityScore, parsed.hits.length, suspected);
 
     return {
@@ -763,22 +696,9 @@ async function runSearchInternal(
       text: renderHitsText(parsed.hits),
       intentClass,
       finalQualityLabel,
-      resultDomainDiversity: resultDomainDiversity(parsed.hits),
-      challengeDetectedAt
+      resultDomainDiversity: resultDomainDiversity(parsed.hits)
     };
   } catch (error) {
-    if (engine === "google_scholar" && allowScholarFallback) {
-      const fallback = await runSearchInternal("duckduckgo", scholarFallbackQuery(query), limit, runtime, false);
-      return {
-        ...fallback,
-        engine: "google_scholar",
-        query,
-        requestUrl,
-        fallbackRouteUsed: "google_scholar->duckduckgo",
-        providerDropReason: "scholar_runtime_error"
-      };
-    }
-
     return {
       ok: false,
       engine,
@@ -795,7 +715,6 @@ async function runSearchInternal(
       intentClass,
       finalQualityLabel: "noisy",
       resultDomainDiversity: 0,
-      providerDropReason: "provider_error",
       error: String(error)
     };
   }
@@ -807,31 +726,15 @@ async function runMultiSearchInternal(query: string, limit: number, runtime: Run
   const intentClass = classifyIntent(query);
 
   const batches = await Promise.all(engines.map((engine) => runSearchInternal(engine, query, limit, runtime)));
-  const providers: SearchRunOutput[] = [...batches];
-  if (resolveTavilyApiKey(runtime)) {
-    const tavily = await runTavilySearchInternal(query, limit, "advanced", runtime);
-    providers.push(tavily);
-  }
 
-  const scoredProviders = providers.map((item) => {
+  const scoredProviders = batches.map((item) => {
     const key = item.engine as SearchEngineKey;
     const baseWeight = ENGINE_WEIGHTS[key] || 1;
-    let challengePenalty = item.suspectedChallengePage ? 0.25 : 1;
-    let providerDropReason = item.providerDropReason;
-
-    if (item.suspectedChallengePage && item.count === 0) {
-      challengePenalty = 0.05;
-      providerDropReason = providerDropReason || "challenge_zero_results";
-    } else if (item.providerQualityScore < 0.18) {
-      challengePenalty = challengePenalty * 0.45;
-      providerDropReason = providerDropReason || "low_quality";
-    }
-
+    const challengePenalty = item.suspectedChallengePage ? 0.5 : 1;
     const providerScore = Math.round(item.providerQualityScore * baseWeight * challengePenalty * 1000) / 1000;
     return {
       ...item,
-      providerScore,
-      providerDropReason
+      providerScore
     };
   });
 
@@ -839,8 +742,6 @@ async function runMultiSearchInternal(query: string, limit: number, runtime: Run
 
   const bestByUrl = new Map<string, SearchHit & { score: number }>();
   for (const provider of scoredProviders) {
-    if (provider.providerScore < 0.08) continue;
-
     for (let i = 0; i < provider.results.length; i += 1) {
       const result = provider.results[i];
       const normalizedUrl = normalizeUrlForDedupe(result.url);
@@ -879,14 +780,6 @@ async function runMultiSearchInternal(query: string, limit: number, runtime: Run
     : 0;
   const allChallenge = scoredProviders.length > 0 && scoredProviders.every((item) => item.suspectedChallengePage);
   const finalQualityLabel = resolveQualityLabel(avgQuality, merged.length, allChallenge);
-  const fallbackRoutes = Array.from(
-    new Set(
-      scoredProviders
-        .map((item) => item.fallbackRouteUsed)
-        .filter((value): value is string => typeof value === "string" && value.length > 0)
-    )
-  );
-  const challengeDetectedAt = scoredProviders.find((item) => item.challengeDetectedAt)?.challengeDetectedAt;
 
   return {
     ok: true,
@@ -904,8 +797,6 @@ async function runMultiSearchInternal(query: string, limit: number, runtime: Run
     intentClass,
     finalQualityLabel,
     resultDomainDiversity: resultDomainDiversity(merged),
-    fallbackRouteUsed: fallbackRoutes.length > 0 ? fallbackRoutes.join("|") : undefined,
-    challengeDetectedAt,
     providers: scoredProviders.map((item) => ({
       engine: item.engine,
       ok: item.ok,
@@ -917,9 +808,6 @@ async function runMultiSearchInternal(query: string, limit: number, runtime: Run
       suspectedChallengePage: item.suspectedChallengePage,
       finalQualityLabel: item.finalQualityLabel,
       resultDomainDiversity: item.resultDomainDiversity,
-      fallbackRouteUsed: item.fallbackRouteUsed,
-      challengeDetectedAt: item.challengeDetectedAt,
-      providerDropReason: item.providerDropReason,
       error: item.error
     }))
   };
@@ -1155,458 +1043,10 @@ function createHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   };
 }
 
-function isSafeHttpUrl(raw: string): boolean {
-  return /^https?:\/\//i.test(raw.trim());
-}
-
-async function runSystemShell(args: string[], timeoutMs: number): Promise<{ ok: boolean; code: number; stdout: string; stderr: string; error?: string }> {
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let done = false;
-
-    const child = spawn("system-shell", args, {
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-      resolve({
-        ok: false,
-        code: -1,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-        error: "system_shell_timeout"
-      });
-    }, Math.max(3000, timeoutMs));
-
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk || "");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk || "");
-    });
-    child.on("error", (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve({
-        ok: false,
-        code: -1,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-        error: String(error)
-      });
-    });
-    child.on("close", (code) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve({
-        ok: code === 0,
-        code: typeof code === "number" ? code : -1,
-        stdout: stdout.trim(),
-        stderr: stderr.trim()
-      });
-    });
-  });
-}
-
-function createOpenInSystemBrowserTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
-  return {
-    label: "AnyClaw Open In System Browser",
-    name: "anyclaw_open_in_system_browser",
-    description: "Open a URL in Android system browser via Shizuku-backed system-shell channel.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      required: ["url"],
-      properties: {
-        url: {
-          type: "string",
-          description: "Target URL, must start with http:// or https://"
-        },
-        packageName: {
-          type: "string",
-          description: "Optional browser package name"
-        }
-      }
-    },
-    execute: async (_toolCallId: string, input: unknown) => {
-      const args = asObject(input);
-      const url = readStringParam(args, "url", { required: true }).trim();
-      const packageName = (readStringParam(args, "packageName") || "").trim();
-      if (!isSafeHttpUrl(url)) {
-        return jsonResult(withMeta({
-          ok: false,
-          tool: "open_in_system_browser",
-          error: "invalid_url_scheme",
-          message: "url must start with http:// or https://"
-        }, meta));
-      }
-
-      const shellArgs = ["am", "start", "-a", "android.intent.action.VIEW", "-d", url];
-      if (packageName) {
-        shellArgs.push("-p", packageName);
-      }
-
-      const startedAt = Date.now();
-      const run = await runSystemShell(shellArgs, runtime.timeoutMs);
-      const result = {
-        ok: run.ok,
-        tool: "open_in_system_browser",
-        url,
-        packageName: packageName || undefined,
-        exitCode: run.code,
-        tookMs: Date.now() - startedAt,
-        stdout: run.stdout,
-        stderr: run.stderr,
-        error: run.error
-      };
-      return jsonResult(withMeta(result, meta));
-    }
-  };
-}
-
-async function callWebBridge(method: string, params: Record<string, unknown>, runtime: RuntimeConfig): Promise<Record<string, unknown>> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), runtime.timeoutMs);
-  try {
-    const response = await fetch(runtime.webBridgeUrl, {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": runtime.userAgent
-      },
-      body: JSON.stringify({
-        method,
-        params
-      })
-    });
-    const raw = await response.text();
-    if (!response.ok) {
-      return {
-        ok: false,
-        method,
-        error: "web_bridge_http_" + String(response.status),
-        detail: raw.slice(0, 800)
-      };
-    }
-    const parsed = JSON.parse(raw || "{}");
-    if (!parsed || typeof parsed !== "object") {
-      return {
-        ok: false,
-        method,
-        error: "web_bridge_invalid_json",
-        detail: String(raw).slice(0, 800)
-      };
-    }
-    return parsed as Record<string, unknown>;
-  } catch (error) {
-    return {
-      ok: false,
-      method,
-      error: String(error)
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function createStartWebTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
-  return {
-    label: "Web Start",
-    name: "start_web",
-    description: "Start a persistent web session.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        url: { type: "string" },
-        user_agent: { type: "string" },
-        session_name: { type: "string" },
-        headersJson: { type: "string" }
-      }
-    },
-    execute: async (_toolCallId: string, input: unknown) => {
-      const args = asObject(input);
-      const headersRaw = readStringParam(args, "headersJson");
-      let headers: Record<string, string> = {};
-      if (headersRaw && headersRaw.trim()) {
-        try {
-          const parsed = JSON.parse(headersRaw);
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            for (const [k, v] of Object.entries(parsed)) {
-              if (typeof v === "string") headers[k] = v;
-            }
-          }
-        } catch {
-          headers = {};
-        }
-      }
-      const result = await callWebBridge("start_web", {
-        url: readStringParam(args, "url"),
-        user_agent: readStringParam(args, "user_agent"),
-        session_name: readStringParam(args, "session_name"),
-        headers
-      }, runtime);
-      return jsonResult(withMeta(result, meta));
-    }
-  };
-}
-
-function createStopWebTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
-  return {
-    label: "Web Stop",
-    name: "stop_web",
-    description: "Stop one session or all web sessions.",
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        session_id: { type: "string" },
-        close_all: { type: "boolean" }
-      }
-    },
-    execute: async (_toolCallId: string, input: unknown) => {
-      const args = asObject(input);
-      const result = await callWebBridge("stop_web", {
-        session_id: readStringParam(args, "session_id"),
-        close_all: !!args.close_all
-      }, runtime);
-      return jsonResult(withMeta(result, meta));
-    }
-  };
-}
-
-function createWebBridgeSimpleTool(
-  name: string,
-  label: string,
-  description: string,
-  runtime: RuntimeConfig,
-  meta: PluginRuntimeMeta,
-  required: string[],
-  optional: string[]
-) {
-  const numberKeys = new Set(["timeout_ms", "max_chars"]);
-  const booleanKeys = new Set(["include_links", "include_images", "close_all"]);
-  const arrayKeys = new Set(["paths"]);
-  const allKeys = [...required, ...optional];
-  const properties = Object.fromEntries(
-    allKeys.map((key) => {
-      if (numberKeys.has(key)) return [key, { type: "number" }];
-      if (booleanKeys.has(key)) return [key, { type: "boolean" }];
-      if (arrayKeys.has(key)) return [key, { type: "array", items: { type: "string" } }];
-      return [key, { type: "string" }];
-    })
-  );
-
-  return {
-    label,
-    name,
-    description,
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      required,
-      properties
-    },
-    execute: async (_toolCallId: string, input: unknown) => {
-      const args = asObject(input);
-      const params: Record<string, unknown> = {};
-      for (const key of allKeys) {
-        const raw = (args as Record<string, unknown>)[key];
-        if (raw === undefined) continue;
-        if (numberKeys.has(key)) {
-          const n = readNumberParam(args, key, { integer: true });
-          if (n !== undefined) {
-            if (key === "max_chars") params[key] = clampNumber(n, 1000, 80000);
-            else params[key] = clampNumber(n, 1000, 60000);
-          }
-          continue;
-        }
-        if (booleanKeys.has(key)) {
-          const text = String(raw ?? "").toLowerCase().trim();
-          params[key] = raw === true || text === "true" || text === "1" || text === "yes";
-          continue;
-        }
-        if (arrayKeys.has(key)) {
-          if (Array.isArray(raw)) {
-            params[key] = raw.map((item) => String(item));
-          } else if (typeof raw === "string" && raw.trim()) {
-            try {
-              const parsed = JSON.parse(raw);
-              if (Array.isArray(parsed)) {
-                params[key] = parsed.map((item) => String(item));
-              }
-            } catch {
-              // ignore invalid array payload
-            }
-          }
-          continue;
-        }
-        const value = readStringParam(args, key, { required: false, allowEmpty: true });
-        if (value !== undefined) params[key] = value;
-      }
-      const result = await callWebBridge(name, params, runtime);
-      return jsonResult(withMeta(result, meta));
-    }
-  };
-}
-
 function resolveTavilyApiKey(config: RuntimeConfig): string | null {
   const key = (config.tavilyApiKey || process.env.TAVILY_API_KEY || "").trim();
   if (!key) return null;
   return key;
-}
-
-async function runTavilySearchInternal(
-  query: string,
-  maxResults: number,
-  searchDepth: "basic" | "advanced",
-  runtime: RuntimeConfig
-): Promise<SearchRunOutput & Record<string, unknown>> {
-  const startedAt = Date.now();
-  const intentClass = classifyIntent(query);
-  const apiKey = resolveTavilyApiKey(runtime);
-
-  if (!apiKey) {
-    return {
-      ok: false,
-      engine: "tavily",
-      query,
-      requestUrl: runtime.tavilyBaseUrl,
-      count: 0,
-      filteredCount: 0,
-      noiseReasonsTopN: [],
-      providerQualityScore: 0,
-      suspectedChallengePage: false,
-      tookMs: Date.now() - startedAt,
-      results: [],
-      text: "",
-      intentClass,
-      finalQualityLabel: "noisy",
-      resultDomainDiversity: 0,
-      error: "missing_tavily_api_key",
-      message: "Missing Tavily API key. Configure plugins.entries.anyclaw-search-suite.config.tavilyApiKey or env TAVILY_API_KEY."
-    };
-  }
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), runtime.timeoutMs);
-  try {
-    const response = await fetch(runtime.tavilyBaseUrl, {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": runtime.userAgent
-      },
-      body: JSON.stringify({
-        api_key: apiKey,
-        query,
-        search_depth: searchDepth,
-        max_results: maxResults,
-        include_answer: true,
-        include_images: false,
-        include_raw_content: false
-      })
-    });
-
-    const rawText = await response.text();
-    if (!response.ok) {
-      return {
-        ok: false,
-        engine: "tavily",
-        query,
-        requestUrl: runtime.tavilyBaseUrl,
-        count: 0,
-        filteredCount: 0,
-        noiseReasonsTopN: [],
-        providerQualityScore: 0,
-        suspectedChallengePage: false,
-        tookMs: Date.now() - startedAt,
-        results: [],
-        text: "",
-        intentClass,
-        finalQualityLabel: "noisy",
-        resultDomainDiversity: 0,
-        providerDropReason: "tavily_http_" + String(response.status),
-        error: "tavily_http_" + String(response.status),
-        detail: rawText.slice(0, 800)
-      };
-    }
-
-    const payload = JSON.parse(rawText || "{}");
-    const rows = Array.isArray(payload.results) ? payload.results : [];
-    const hits: SearchHit[] = [];
-
-    for (let i = 0; i < rows.length && hits.length < maxResults; i += 1) {
-      const row = rows[i] && typeof rows[i] === "object" ? (rows[i] as Record<string, unknown>) : {};
-      const title = typeof row.title === "string" ? row.title.trim() : "";
-      const url = typeof row.url === "string" ? normalizeUrlForDedupe(row.url.trim()) : "";
-      const snippet = typeof row.content === "string" ? row.content.trim() : "";
-      const scoreRaw = typeof row.score === "number" ? row.score : 0.8;
-      const confidence = Math.max(0.2, Math.min(0.99, scoreRaw));
-
-      if (!title || !url) continue;
-      hits.push({
-        title,
-        url,
-        snippet,
-        source: "tavily",
-        confidence
-      });
-    }
-
-    return {
-      ok: true,
-      engine: "tavily",
-      query,
-      requestUrl: runtime.tavilyBaseUrl,
-      count: hits.length,
-      filteredCount: 0,
-      noiseReasonsTopN: [],
-      providerQualityScore: hits.length > 0 ? 0.95 : 0,
-      suspectedChallengePage: false,
-      tookMs: Date.now() - startedAt,
-      results: hits,
-      text: renderHitsText(hits),
-      answer: typeof payload.answer === "string" ? payload.answer : "",
-      intentClass,
-      finalQualityLabel: hits.length >= 3 ? "good" : hits.length > 0 ? "mixed" : "noisy",
-      resultDomainDiversity: resultDomainDiversity(hits)
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      engine: "tavily",
-      query,
-      requestUrl: runtime.tavilyBaseUrl,
-      count: 0,
-      filteredCount: 0,
-      noiseReasonsTopN: [],
-      providerQualityScore: 0,
-      suspectedChallengePage: false,
-      tookMs: Date.now() - startedAt,
-      results: [],
-      text: "",
-      intentClass,
-      finalQualityLabel: "noisy",
-      resultDomainDiversity: 0,
-      providerDropReason: "tavily_runtime_error",
-      error: String(error)
-    };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function createTavilySearchTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
@@ -1645,8 +1085,144 @@ function createTavilySearchTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta)
       );
       const searchDepthRaw = (readStringParam(args, "searchDepth") || "advanced").toLowerCase();
       const searchDepth = searchDepthRaw === "basic" ? "basic" : "advanced";
-      const result = await runTavilySearchInternal(query, maxResults, searchDepth, runtime);
-      return jsonResult(withMeta(result as unknown as Record<string, unknown>, meta));
+      const startedAt = Date.now();
+      const intentClass = classifyIntent(query);
+
+      const apiKey = resolveTavilyApiKey(runtime);
+      if (!apiKey) {
+        const result = {
+          ok: false,
+          engine: "tavily",
+          query,
+          requestUrl: runtime.tavilyBaseUrl,
+          count: 0,
+          filteredCount: 0,
+          noiseReasonsTopN: [],
+          providerQualityScore: 0,
+          suspectedChallengePage: false,
+          tookMs: Date.now() - startedAt,
+          results: [],
+          text: "",
+          intentClass,
+          finalQualityLabel: "noisy",
+          resultDomainDiversity: 0,
+          error: "missing_tavily_api_key",
+          message: "Missing Tavily API key. Configure plugins.entries.anyclaw-search-suite.config.tavilyApiKey or env TAVILY_API_KEY."
+        };
+        return jsonResult(withMeta(result as unknown as Record<string, unknown>, meta));
+      }
+
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), runtime.timeoutMs);
+      try {
+        const response = await fetch(runtime.tavilyBaseUrl, {
+          method: "POST",
+          signal: ctrl.signal,
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": runtime.userAgent
+          },
+          body: JSON.stringify({
+            api_key: apiKey,
+            query,
+            search_depth: searchDepth,
+            max_results: maxResults,
+            include_answer: true,
+            include_images: false,
+            include_raw_content: false
+          })
+        });
+
+        const rawText = await response.text();
+        if (!response.ok) {
+          const result = {
+            ok: false,
+            engine: "tavily",
+            query,
+            requestUrl: runtime.tavilyBaseUrl,
+            count: 0,
+            filteredCount: 0,
+            noiseReasonsTopN: [],
+            providerQualityScore: 0,
+            suspectedChallengePage: false,
+            tookMs: Date.now() - startedAt,
+            results: [],
+            text: "",
+            intentClass,
+            finalQualityLabel: "noisy",
+            resultDomainDiversity: 0,
+            error: "tavily_http_" + String(response.status),
+            detail: rawText.slice(0, 800)
+          };
+          return jsonResult(withMeta(result as unknown as Record<string, unknown>, meta));
+        }
+
+        const payload = JSON.parse(rawText || "{}");
+        const rows = Array.isArray(payload.results) ? payload.results : [];
+        const hits: SearchHit[] = [];
+
+        for (let i = 0; i < rows.length && hits.length < maxResults; i += 1) {
+          const row = rows[i] && typeof rows[i] === "object" ? (rows[i] as Record<string, unknown>) : {};
+          const title = typeof row.title === "string" ? row.title.trim() : "";
+          const url = typeof row.url === "string" ? normalizeUrlForDedupe(row.url.trim()) : "";
+          const snippet = typeof row.content === "string" ? row.content.trim() : "";
+          const scoreRaw = typeof row.score === "number" ? row.score : 0.8;
+          const confidence = Math.max(0.2, Math.min(0.99, scoreRaw));
+
+          if (!title || !url) continue;
+          hits.push({
+            title,
+            url,
+            snippet,
+            source: "tavily",
+            confidence
+          });
+        }
+
+        const quality = hits.length > 0 ? 0.95 : 0;
+        const result = {
+          ok: true,
+          engine: "tavily",
+          query,
+          requestUrl: runtime.tavilyBaseUrl,
+          count: hits.length,
+          filteredCount: 0,
+          noiseReasonsTopN: [],
+          providerQualityScore: quality,
+          suspectedChallengePage: false,
+          tookMs: Date.now() - startedAt,
+          results: hits,
+          text: renderHitsText(hits),
+          answer: typeof payload.answer === "string" ? payload.answer : "",
+          intentClass,
+          finalQualityLabel: hits.length >= 3 ? "good" : hits.length > 0 ? "mixed" : "noisy",
+          resultDomainDiversity: resultDomainDiversity(hits)
+        };
+
+        return jsonResult(withMeta(result as unknown as Record<string, unknown>, meta));
+      } catch (error) {
+        const result = {
+          ok: false,
+          engine: "tavily",
+          query,
+          requestUrl: runtime.tavilyBaseUrl,
+          count: 0,
+          filteredCount: 0,
+          noiseReasonsTopN: [],
+          providerQualityScore: 0,
+          suspectedChallengePage: false,
+          tookMs: Date.now() - startedAt,
+          results: [],
+          text: "",
+          intentClass,
+          finalQualityLabel: "noisy",
+          resultDomainDiversity: 0,
+          error: String(error)
+        };
+        return jsonResult(withMeta(result as unknown as Record<string, unknown>, meta));
+      } finally {
+        clearTimeout(timer);
+      }
     }
   };
 }
@@ -1667,10 +1243,6 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     ? cfg.userAgent.trim()
     : DEFAULT_USER_AGENT;
 
-  const webBridgeUrl = typeof cfg.webBridgeUrl === "string" && cfg.webBridgeUrl.trim()
-    ? cfg.webBridgeUrl.trim()
-    : DEFAULT_WEB_BRIDGE_URL;
-
   const tavilyApiKey = typeof cfg.tavilyApiKey === "string" && cfg.tavilyApiKey.trim()
     ? cfg.tavilyApiKey.trim()
     : undefined;
@@ -1684,7 +1256,6 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     maxResults,
     maxChars,
     userAgent,
-    webBridgeUrl,
     tavilyApiKey,
     tavilyBaseUrl
   };
@@ -1745,97 +1316,6 @@ export default {
     api.registerTool(createMultiSearchTool(runtime, runtimeMeta));
     api.registerTool(createVisitTool(runtime, runtimeMeta));
     api.registerTool(createHttpTool(runtime, runtimeMeta));
-    api.registerTool(createStartWebTool(runtime, runtimeMeta));
-    api.registerTool(createStopWebTool(runtime, runtimeMeta));
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_navigate",
-        "Web Navigate",
-        "Navigate web session to a URL.",
-        runtime,
-        runtimeMeta,
-        ["url"],
-        ["session_id"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_eval",
-        "Web Eval",
-        "Run JavaScript in a web session.",
-        runtime,
-        runtimeMeta,
-        ["script"],
-        ["session_id", "timeout_ms"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_click",
-        "Web Click",
-        "Click an element by ref from web_snapshot output.",
-        runtime,
-        runtimeMeta,
-        ["ref"],
-        ["session_id"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_fill",
-        "Web Fill",
-        "Fill an input by CSS selector.",
-        runtime,
-        runtimeMeta,
-        ["selector", "value"],
-        ["session_id"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_wait_for",
-        "Web Wait For",
-        "Wait until page ready or selector appears.",
-        runtime,
-        runtimeMeta,
-        [],
-        ["session_id", "selector", "timeout_ms"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_snapshot",
-        "Web Snapshot",
-        "Capture page snapshot with refs/text/links/images.",
-        runtime,
-        runtimeMeta,
-        [],
-        ["session_id", "include_links", "include_images", "max_chars"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_content",
-        "Web Content",
-        "Extract primary page content and links.",
-        runtime,
-        runtimeMeta,
-        [],
-        ["session_id", "include_links", "include_images", "max_chars"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_file_upload",
-        "Web File Upload",
-        "Upload files for web file chooser (bridge reserved).",
-        runtime,
-        runtimeMeta,
-        [],
-        ["session_id", "paths"]
-      )
-    );
-    api.registerTool(createOpenInSystemBrowserTool(runtime, runtimeMeta));
     api.registerTool(createTavilySearchTool(runtime, runtimeMeta));
   }
 };

@@ -5,7 +5,6 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.TimeUnit
@@ -28,7 +27,6 @@ class CodexServerManager(private val context: Context) {
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
-        private const val OPENCLAW_RUNTIME_VERSION = "2026.2.26"
     }
 
     private var serverProcess: Process? = null
@@ -85,61 +83,6 @@ class CodexServerManager(private val context: Context) {
         val sb = StringBuilder()
         runInPrefix(command) { sb.appendLine(it) }
         return sb.toString().trim()
-    }
-
-    private fun attachProcessLogger(
-        proc: Process,
-        logPrefix: String,
-        processLabel: String,
-    ) {
-        Thread {
-            try {
-                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
-                    var line = reader.readLine()
-                    while (line != null) {
-                        Log.d(TAG, "[$logPrefix] $line")
-                        line = reader.readLine()
-                    }
-                }
-            } catch (_: InterruptedIOException) {
-                Log.i(TAG, "$processLabel log stream interrupted")
-            } catch (e: Exception) {
-                Log.w(TAG, "$processLabel log stream stopped: ${e.message}")
-            } finally {
-                val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
-                Log.i(TAG, "$processLabel exited with code: $exitCode")
-            }
-        }.start()
-    }
-
-    private fun waitForLoopbackHttp(url: String, timeoutMs: Long): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.connectTimeout = 1200
-                conn.readTimeout = 1200
-                conn.requestMethod = "GET"
-                val code = conn.responseCode
-                conn.disconnect()
-                if (code in 200..399) return true
-            } catch (_: Exception) {
-                // keep polling
-            }
-            Thread.sleep(300)
-        }
-        return false
-    }
-
-    private fun waitForOpenClawGateway(timeoutMs: Long): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (isOpenClawGatewayResponsive()) {
-                return true
-            }
-            Thread.sleep(350)
-        }
-        return false
     }
 
     // ── Install checks ─────────────────────────────────────────────────────
@@ -922,7 +865,7 @@ H3
         }
 
         val meta = ensureObject(root, "meta")
-        meta.put("lastTouchedVersion", OPENCLAW_RUNTIME_VERSION)
+        meta.put("lastTouchedVersion", "2026.3.3")
         meta.put("lastTouchedAt", java.time.Instant.now().toString())
 
         val commands = ensureObject(root, "commands")
@@ -986,11 +929,10 @@ H3
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
-        if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:18926/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
-            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.4")
+            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.3")
         }
 
         val allow = plugins.optJSONArray("allow")
@@ -1144,16 +1086,17 @@ H3
         val proc = pb.start()
         openClawGatewayProcess = proc
 
-        attachProcessLogger(proc, "openclaw-gw", "OpenClaw gateway")
-        if (!waitForOpenClawGateway(timeoutMs = 12_000L)) {
-            Log.e(TAG, "OpenClaw gateway failed readiness check")
-            runCatching { proc.destroy() }
-            if (!proc.waitFor(1200, TimeUnit.MILLISECONDS)) {
-                runCatching { proc.destroyForcibly() }
+        Thread {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            var line = reader.readLine()
+            while (line != null) {
+                Log.d(TAG, "[openclaw-gw] $line")
+                line = reader.readLine()
             }
-            openClawGatewayProcess = null
-            return false
-        }
+            Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
+        }.start()
+
+        Thread.sleep(5000)
         Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
         return true
     }
@@ -1178,24 +1121,6 @@ H3
         val env = buildEnvironment(paths)
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
-
-        // Kill orphaned Control UI processes from previous app runs so we do not
-        // accidentally keep serving stale injected HTML on the same port.
-        runInPrefix(
-            """
-            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
-                if echo "${'$'}cmdline" | grep -q "dist/control-ui" && echo "${'$'}cmdline" | grep -q "node"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q "Control UI on port $OPENCLAW_CONTROL_UI_PORT"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q -- "--port $OPENCLAW_CONTROL_UI_PORT"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                fi
-            done
-            sleep 1
-            """.trimIndent(),
-        ) { Log.d(TAG, "[openclaw-ui] $it") }
 
         if (!File(controlUiRoot).exists()) {
             Log.w(TAG, "OpenClaw control-ui directory not found at $controlUiRoot")
@@ -1237,7 +1162,7 @@ H3
                   'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
                   'var isZh=locale===\"zh-CN\";' +
                   'function replaceFirstTextNode(el,next){if(!el){return;}for(var i=0;i<el.childNodes.length;i++){var n=el.childNodes[i];if(n&&n.nodeType===3){n.nodeValue=\" \"+next+\" \";return;}}if(!el.children||el.children.length===0){el.textContent=next;}}' +
-                  'function normalizeSpace(text){var s=(text||\"\");s=s.replace(/\\s+/g,\" \");return s.trim();}' +
+                  'function normalizeSpace(text){var s=(text||\"\").replaceAll(\"\\n\",\" \").replaceAll(\"\\t\",\" \");while(s.indexOf(\"  \")>=0){s=s.replaceAll(\"  \",\" \");}return s.trim();}' +
                   'function localizeStatic(){if(!isZh){return;}var map={\"New session\":\"新建会话\",\"Send\":\"发送\",\"Queue\":\"排队发送\",\"Stop\":\"停止\",\"Connect\":\"连接\",\"Refresh\":\"刷新\",\"Exit focus mode\":\"退出专注模式\"};document.querySelectorAll(\"button\").forEach(function(btn){var raw=normalizeSpace(btn.textContent||\"\");if(map[raw]){replaceFirstTextNode(btn,map[raw]);}var aria=normalizeSpace(btn.getAttribute(\"aria-label\")||\"\");if(map[aria]){btn.setAttribute(\"aria-label\",map[aria]);}if(aria===\"Remove queued message\"){btn.setAttribute(\"aria-label\",\"移除排队消息\");}var title=normalizeSpace(btn.getAttribute(\"title\")||\"\");if(map[title]){btn.setAttribute(\"title\",map[title]);}});document.querySelectorAll(\"textarea\").forEach(function(el){var p=normalizeSpace(el.getAttribute(\"placeholder\")||\"\");if(p.indexOf(\"Message\")===0){el.setAttribute(\"placeholder\",\"输入消息（回车发送，Shift+回车换行，可粘贴图片）\");}});document.querySelectorAll(\".muted\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t===\"Loading chat…\"){el.textContent=\"正在加载聊天…\";}});document.querySelectorAll(\".chat-queue__title\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Queued (\")===0&&t.endsWith(\")\")){el.textContent=\"排队（\"+t.slice(8,t.length-1)+\"）\";}});document.querySelectorAll(\".chat-new-messages\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"New messages\")===0){el.textContent=\"新消息\";}});}' +
                   'function makeSessionKey(current){var now=Date.now().toString(36);var key=(current||\"main\").trim();if(key.indexOf(\"agent:\")===0){var parts=key.split(\":\");var agent=(parts.length>1&&parts[1])?parts[1]:\"main\";return \"agent:\"+agent+\":mobile-\"+now;}return \"mobile-\"+now;}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
@@ -1304,16 +1229,17 @@ H3
         val proc = pb.start()
         openClawControlUiProcess = proc
 
-        attachProcessLogger(proc, "openclaw-ui", "OpenClaw Control UI server")
-        if (!waitForLoopbackHttp("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT/chat", timeoutMs = 8_000L)) {
-            Log.e(TAG, "OpenClaw Control UI failed readiness check")
-            runCatching { proc.destroy() }
-            if (!proc.waitFor(800, TimeUnit.MILLISECONDS)) {
-                runCatching { proc.destroyForcibly() }
+        Thread {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            var line = reader.readLine()
+            while (line != null) {
+                Log.d(TAG, "[openclaw-ui] $line")
+                line = reader.readLine()
             }
-            openClawControlUiProcess = null
-            return false
-        }
+            Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
+        }.start()
+
+        Thread.sleep(1000)
         Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
         return true
     }
@@ -1357,8 +1283,8 @@ H3
         configureOpenClawAuth()
         val gatewayOk = startOpenClawGateway()
         if (!gatewayOk) return false
-        val uiOk = startOpenClawControlUiServer()
-        if (!uiOk) return false
+        startOpenClawControlUiServer()
+        Thread.sleep(800)
         return isOpenClawGatewayResponsive()
     }
 
@@ -1523,7 +1449,15 @@ WEOF
         val proc = pb.start()
         proxyProcess = proc
 
-        attachProcessLogger(proc, "proxy", "CONNECT proxy")
+        Thread {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            var line = reader.readLine()
+            while (line != null) {
+                Log.d(TAG, "[proxy] $line")
+                line = reader.readLine()
+            }
+            Log.i(TAG, "Proxy exited with code: ${proc.waitFor()}")
+        }.start()
 
         Thread.sleep(800)
         Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$PROXY_PORT")
@@ -1712,21 +1646,6 @@ WEOF
             return false
         }
 
-        // Kill orphaned codex-web-local servers to avoid EADDRINUSE and stale code.
-        runInPrefix(
-            """
-            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
-                if echo "${'$'}cmdline" | grep -q "codex-web-local/dist-cli/index.js"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q -- "--port $SERVER_PORT"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                fi
-            done
-            sleep 1
-            """.trimIndent(),
-        ) { Log.d(TAG, "[server] $it") }
-
         val shell = "${paths.prefixDir}/bin/sh"
         val command = "exec node $serverScript --port $SERVER_PORT --no-password"
 
@@ -1741,7 +1660,15 @@ WEOF
         val proc = pb.start()
         serverProcess = proc
 
-        attachProcessLogger(proc, "server", "codex-web-local server")
+        Thread {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            var line = reader.readLine()
+            while (line != null) {
+                Log.d(TAG, "[server] $line")
+                line = reader.readLine()
+            }
+            Log.i(TAG, "Server process exited with code: ${proc.waitFor()}")
+        }.start()
 
         return true
     }
@@ -1850,200 +1777,6 @@ WEOF
             Log.i(TAG, "Shared-storage bridge initialized")
         } else {
             Log.w(TAG, "Shared-storage bridge init returned code $code")
-        }
-    }
-
-    fun ensurePackageRecoveryScripts() {
-        val paths = BootstrapInstaller.getPaths(context)
-        val cmd = """
-            workspace="${paths.homeDir}/.openclaw/workspace"
-            scripts="${paths.homeDir}/.openclaw/workspace/scripts"
-            mkdir -p "${'$'}workspace" "${'$'}scripts" "${paths.prefixDir}/tmp" 2>/dev/null || true
-
-            cat > "${'$'}scripts/manual-deb-install.py" <<'EOF'
-#!/system/bin/sh
-exec python3 - "${'$'}@" <<'PY'
-import glob
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
-
-PREFIX = os.environ.get("PREFIX") or "/data/user/0/com.codex.mobile.beta/files/usr"
-WORK = os.path.join(os.environ.get("HOME") or "/data/user/0/com.codex.mobile.beta/files/home", ".openclaw", "workspace", ".tmp_deb")
-os.makedirs(WORK, exist_ok=True)
-
-if len(sys.argv) < 2:
-    print("Usage: manual-deb-install.py <pkg1> [pkg2 ...]")
-    sys.exit(1)
-
-failed = []
-
-for pkg in sys.argv[1:]:
-    debs = sorted(glob.glob(os.path.join(WORK, f"{pkg}_*.deb")))
-    if not debs:
-        code = subprocess.call(["apt", "download", pkg], cwd=WORK)
-        if code != 0:
-            failed.append(pkg)
-            continue
-        debs = sorted(glob.glob(os.path.join(WORK, f"{pkg}_*.deb")))
-    if not debs:
-        failed.append(pkg)
-        continue
-
-    deb = debs[-1]
-    td = tempfile.mkdtemp(prefix="deb_", dir=WORK)
-    try:
-        if subprocess.call(["ar", "x", deb], cwd=td) != 0:
-            failed.append(pkg)
-            continue
-        data = None
-        for candidate in ("data.tar.zst", "data.tar.xz", "data.tar.gz", "data.tar.bz2", "data.tar"):
-            path = os.path.join(td, candidate)
-            if os.path.exists(path):
-                data = path
-                break
-        if not data:
-            failed.append(pkg)
-            continue
-        code = subprocess.call(["tar", "-xf", data, "--strip-components=6", "-C", PREFIX])
-        if code != 0:
-            failed.append(pkg)
-            continue
-        print("[OK]", os.path.basename(deb))
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-
-if failed:
-    print("[FAIL]", " ".join(failed))
-    sys.exit(2)
-
-print("manual_deb_install_ok")
-PY
-EOF
-
-            cat > "${'$'}scripts/repair-termux-prefix.sh" <<'EOF'
-#!/system/bin/sh
-set -e
-PREFIX="${paths.prefixDir}"
-HOME_DIR="${paths.homeDir}"
-OLD='/data/data/com.termux'
-NEW='/data/user/0/com.codex.mobile.beta'
-
-python3 - <<'PY'
-import os
-OLD='/data/data/com.termux'
-NEW='/data/user/0/com.codex.mobile.beta'
-roots=['/data/user/0/com.codex.mobile.beta/files/usr/bin','/data/user/0/com.codex.mobile.beta/files/usr/libexec']
-changed=0
-for root in roots:
-    for dp, _, files in os.walk(root):
-        for name in files:
-            p = os.path.join(dp, name)
-            try:
-                b = open(p, 'rb').read()
-            except Exception:
-                continue
-            if OLD.encode() in b and (b.startswith(b'#!') or b'com.termux/files/usr' in b[:4096]):
-                nb = b.replace(OLD.encode(), NEW.encode())
-                if nb != b:
-                    open(p, 'wb').write(nb)
-                    changed += 1
-print('patched_files', changed)
-PY
-
-pkg help >/dev/null 2>&1 || true
-apt-key list >/dev/null 2>&1 || true
-echo "repair_termux_prefix_done"
-EOF
-
-            chmod 700 "${'$'}scripts/manual-deb-install.py" "${'$'}scripts/repair-termux-prefix.sh" 2>/dev/null || true
-            echo "package-recovery-scripts-ready"
-        """.trimIndent()
-
-        val code = runInPrefix(cmd)
-        if (code == 0) {
-            Log.i(TAG, "Package recovery scripts are ready")
-        } else {
-            Log.w(TAG, "Package recovery script install returned $code")
-        }
-    }
-
-    fun ensurePackageManagerWrappers() {
-        val paths = BootstrapInstaller.getPaths(context)
-        val cmd = """
-            set -e
-            prefix="${paths.prefixDir}"
-            home_dir="${paths.homeDir}"
-
-            make_wrapper() {
-              tool="${'$'}1"
-              target="${'$'}prefix/bin/${'$'}tool"
-              real="${'$'}prefix/bin/${'$'}tool.real"
-
-              if [ ! -f "${'$'}real" ] && [ -f "${'$'}target" ]; then
-                mv "${'$'}target" "${'$'}real"
-              fi
-              if [ ! -f "${'$'}real" ]; then
-                return 0
-              fi
-
-              cat > "${'$'}target" <<'EOF'
-#!/system/bin/sh
-PREFIX="__PREFIX__"
-HOME_DIR="__HOME__"
-TERMUX_PREFIX="/data/data/com.termux/files/usr"
-TOOL="__TOOL__"
-REAL="__D__{PREFIX}/bin/__D__{TOOL}.real"
-PROOT="__D__{PREFIX}/bin/proot"
-
-if [ ! -x "__D__{REAL}" ]; then
-  echo "Missing real command: __D__{REAL}" >&2
-  exit 127
-fi
-
-if [ ! -x "__D__{PROOT}" ]; then
-  exec "__D__{REAL}" "__D__{@}"
-fi
-
-escape_arg() {
-  printf "%s" "__D__{1}" | sed "s/'/'\"'\"'/g"
-}
-
-quoted=""
-for arg in "__D__{@}"; do
-  q=__D__(escape_arg "__D__{arg}")
-  quoted="__D__{quoted} '__D__{q}'"
-done
-
-export PROOT_NO_SECCOMP=1
-exec "__D__{PROOT}" \
-  -b "__D__{PREFIX}:__D__{TERMUX_PREFIX}" \
-  -b /system -b /vendor -b /product -b /apex -b /dev -b /proc -b /sys -b /sdcard \
-  -w "__D__{HOME_DIR}" \
-  /system/bin/sh -lc "export PREFIX='__D__{TERMUX_PREFIX}'; export HOME='__D__{HOME_DIR}'; export PATH='__D__{TERMUX_PREFIX}/bin:/system/bin'; export LD_LIBRARY_PATH='__D__{TERMUX_PREFIX}/lib'; export TMPDIR='__D__{PREFIX}/tmp'; export APT_CONFIG='__D__{TERMUX_PREFIX}/etc/apt/apt.conf'; export DPKG_ADMINDIR='__D__{TERMUX_PREFIX}/var/lib/dpkg'; '__D__{TERMUX_PREFIX}/bin/__D__{TOOL}.real'__D__{quoted}"
-EOF
-
-              sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}target"
-              sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}target"
-              sed -i "s#__TOOL__#${'$'}tool#g" "${'$'}target"
-              sed -i 's#__D__#${'$'}#g' "${'$'}target"
-              chmod 700 "${'$'}target"
-            }
-
-            make_wrapper apt
-            make_wrapper apt-get
-            make_wrapper dpkg
-            make_wrapper pkg
-            echo "package-manager-wrappers-ready"
-        """.trimIndent()
-
-        val code = runInPrefix(cmd)
-        if (code == 0) {
-            Log.i(TAG, "Package manager wrappers are ready")
-        } else {
-            Log.w(TAG, "Package manager wrapper install returned $code")
         }
     }
 
