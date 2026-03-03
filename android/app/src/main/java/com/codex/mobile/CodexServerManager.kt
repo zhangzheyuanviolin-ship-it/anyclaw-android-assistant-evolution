@@ -1197,6 +1197,21 @@ H3
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
 
+        // Clear orphaned Control UI servers so readiness probes do not hit stale code.
+        runInPrefix(
+            """
+            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
+                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
+                if echo "${'$'}cmdline" | grep -q "dist/control-ui" && echo "${'$'}cmdline" | grep -q "node"; then
+                    kill -9 ${'$'}pid 2>/dev/null
+                elif echo "${'$'}cmdline" | grep -q -- "$OPENCLAW_CONTROL_UI_PORT"; then
+                    kill -9 ${'$'}pid 2>/dev/null
+                fi
+            done
+            sleep 1
+            """.trimIndent(),
+        ) { Log.d(TAG, "[openclaw-ui] $it") }
+
         if (!File(controlUiRoot).exists()) {
             Log.w(TAG, "OpenClaw control-ui directory not found at $controlUiRoot")
             return false
@@ -1237,7 +1252,7 @@ H3
                   'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
                   'var isZh=locale===\"zh-CN\";' +
                   'function replaceFirstTextNode(el,next){if(!el){return;}for(var i=0;i<el.childNodes.length;i++){var n=el.childNodes[i];if(n&&n.nodeType===3){n.nodeValue=\" \"+next+\" \";return;}}if(!el.children||el.children.length===0){el.textContent=next;}}' +
-                  'function normalizeSpace(text){var s=(text||\"\").replaceAll(\"\\n\",\" \").replaceAll(\"\\t\",\" \");while(s.indexOf(\"  \")>=0){s=s.replaceAll(\"  \",\" \");}return s.trim();}' +
+                  'function normalizeSpace(text){var s=(text||\"\");s=s.replace(/\\s+/g,\" \");return s.trim();}' +
                   'function localizeStatic(){if(!isZh){return;}var map={\"New session\":\"新建会话\",\"Send\":\"发送\",\"Queue\":\"排队发送\",\"Stop\":\"停止\",\"Connect\":\"连接\",\"Refresh\":\"刷新\",\"Exit focus mode\":\"退出专注模式\"};document.querySelectorAll(\"button\").forEach(function(btn){var raw=normalizeSpace(btn.textContent||\"\");if(map[raw]){replaceFirstTextNode(btn,map[raw]);}var aria=normalizeSpace(btn.getAttribute(\"aria-label\")||\"\");if(map[aria]){btn.setAttribute(\"aria-label\",map[aria]);}if(aria===\"Remove queued message\"){btn.setAttribute(\"aria-label\",\"移除排队消息\");}var title=normalizeSpace(btn.getAttribute(\"title\")||\"\");if(map[title]){btn.setAttribute(\"title\",map[title]);}});document.querySelectorAll(\"textarea\").forEach(function(el){var p=normalizeSpace(el.getAttribute(\"placeholder\")||\"\");if(p.indexOf(\"Message\")===0){el.setAttribute(\"placeholder\",\"输入消息（回车发送，Shift+回车换行，可粘贴图片）\");}});document.querySelectorAll(\".muted\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t===\"Loading chat…\"){el.textContent=\"正在加载聊天…\";}});document.querySelectorAll(\".chat-queue__title\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Queued (\")===0&&t.endsWith(\")\")){el.textContent=\"排队（\"+t.slice(8,t.length-1)+\"）\";}});document.querySelectorAll(\".chat-new-messages\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"New messages\")===0){el.textContent=\"新消息\";}});}' +
                   'function makeSessionKey(current){var now=Date.now().toString(36);var key=(current||\"main\").trim();if(key.indexOf(\"agent:\")===0){var parts=key.split(\":\");var agent=(parts.length>1&&parts[1])?parts[1]:\"main\";return \"agent:\"+agent+\":mobile-\"+now;}return \"mobile-\"+now;}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
@@ -1720,6 +1735,21 @@ WEOF
             return false
         }
 
+        // Clear orphaned codex-web-local servers to avoid serving stale JS or EADDRINUSE.
+        runInPrefix(
+            """
+            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
+                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
+                if echo "${'$'}cmdline" | grep -q "codex-web-local/dist-cli/index.js"; then
+                    kill -9 ${'$'}pid 2>/dev/null
+                elif echo "${'$'}cmdline" | grep -q -- "--port $SERVER_PORT"; then
+                    kill -9 ${'$'}pid 2>/dev/null
+                fi
+            done
+            sleep 1
+            """.trimIndent(),
+        ) { Log.d(TAG, "[server] $it") }
+
         val shell = "${paths.prefixDir}/bin/sh"
         val command = "exec node $serverScript --port $SERVER_PORT --no-password"
 
@@ -1734,15 +1764,7 @@ WEOF
         val proc = pb.start()
         serverProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[server] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "Server process exited with code: ${proc.waitFor()}")
-        }.start()
+        attachProcessLogger(proc, "server", "codex-web-local server")
 
         return true
     }
