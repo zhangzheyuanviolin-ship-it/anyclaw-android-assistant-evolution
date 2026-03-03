@@ -1233,7 +1233,7 @@ H3
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
               function injectBootstrap(html) {
-                const snippet = '<script>(function(){try{' +
+                const snippetBody = '(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
                   'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
                   'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
@@ -1245,6 +1245,10 @@ H3
                   'var settings={};' +
                   'try{settings=JSON.parse(localStorage.getItem(settingsKey)||\"{}\");}catch(_){}' +
                   'if(!settings||typeof settings!==\"object\"){settings={};}' +
+                  'if(typeof settings.gatewayUrl!==\"string\"||!settings.gatewayUrl.trim()){settings.gatewayUrl=(location.protocol===\"https:\"?\"wss\":\"ws\")+\"://127.0.0.1:$OPENCLAW_GATEWAY_PORT\";}' +
+                  'if(typeof settings.token!==\"string\"){settings.token=\"\";}' +
+                  'if(typeof settings.sessionKey!==\"string\"||!settings.sessionKey.trim()){settings.sessionKey=\"main\";}' +
+                  'if(typeof settings.lastActiveSessionKey!==\"string\"||!settings.lastActiveSessionKey.trim()){settings.lastActiveSessionKey=settings.sessionKey;}' +
                   'if(typeof settings.chatFocusMode!==\"boolean\"){settings.chatFocusMode=true;}' +
                   'if(typeof settings.navCollapsed!==\"boolean\"){settings.navCollapsed=true;}' +
                   'settings.locale=locale;' +
@@ -1262,7 +1266,20 @@ H3
                   'runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches);var mo=new MutationObserver(function(){runPatches();});mo.observe(document.documentElement,{childList:true,subtree:true});' +
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
-                  '}catch(_){}})();</' + 'script>';
+                  '}catch(_){}})();';
+                let snippet = '';
+                try {
+                  new Function(snippetBody);
+                  snippet = '<script>' + snippetBody + '</' + 'script>';
+                } catch (snippetError) {
+                  console.error(
+                    'AnyClaw bootstrap disabled:',
+                    snippetError && snippetError.message ? snippetError.message : snippetError,
+                  );
+                }
+                if (!snippet) {
+                  return html;
+                }
                 if (html.includes('</body>')) {
                   return html.replace('</body>', snippet + '</body>');
                 }
