@@ -865,7 +865,7 @@ H3
         }
 
         val meta = ensureObject(root, "meta")
-        meta.put("lastTouchedVersion", "2026.3.4")
+        meta.put("lastTouchedVersion", "2026.3.5")
         meta.put("lastTouchedAt", java.time.Instant.now().toString())
 
         val commands = ensureObject(root, "commands")
@@ -929,10 +929,11 @@ H3
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
+        if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:18926/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
-            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.3.1")
+            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.4")
         }
 
         val allow = plugins.optJSONArray("allow")

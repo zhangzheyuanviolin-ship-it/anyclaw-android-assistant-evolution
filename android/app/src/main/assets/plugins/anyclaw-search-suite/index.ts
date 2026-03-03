@@ -17,6 +17,7 @@ type RuntimeConfig = {
   maxResults: number;
   maxChars: number;
   userAgent: string;
+  webBridgeUrl: string;
   tavilyApiKey?: string;
   tavilyBaseUrl: string;
 };
@@ -64,13 +65,14 @@ type SearchRunOutput = {
   error?: string;
 };
 
-const PARSER_VERSION = "v1.3.1";
+const PARSER_VERSION = "v1.4.0";
 const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_RESULTS = 6;
 const DEFAULT_MAX_CHARS = 12000;
 const MAX_RESULTS = 10;
-const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.3.1";
+const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.4";
 const DEFAULT_TAVILY_BASE_URL = "https://api.tavily.com/search";
+const DEFAULT_WEB_BRIDGE_URL = "http://127.0.0.1:18926/web/call";
 
 const SEARCH_ENGINES = {
   google: (query: string) => "https://www.google.com/search?q=" + encodeURIComponent(query) + "&hl=en",
@@ -1272,6 +1274,193 @@ function createOpenInSystemBrowserTool(runtime: RuntimeConfig, meta: PluginRunti
   };
 }
 
+async function callWebBridge(method: string, params: Record<string, unknown>, runtime: RuntimeConfig): Promise<Record<string, unknown>> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), runtime.timeoutMs);
+  try {
+    const response = await fetch(runtime.webBridgeUrl, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": runtime.userAgent
+      },
+      body: JSON.stringify({
+        method,
+        params
+      })
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        method,
+        error: "web_bridge_http_" + String(response.status),
+        detail: raw.slice(0, 800)
+      };
+    }
+    const parsed = JSON.parse(raw || "{}");
+    if (!parsed || typeof parsed !== "object") {
+      return {
+        ok: false,
+        method,
+        error: "web_bridge_invalid_json",
+        detail: String(raw).slice(0, 800)
+      };
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    return {
+      ok: false,
+      method,
+      error: String(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function createStartWebTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
+  return {
+    label: "Web Start",
+    name: "start_web",
+    description: "Start a persistent web session.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        url: { type: "string" },
+        user_agent: { type: "string" },
+        session_name: { type: "string" },
+        headersJson: { type: "string" }
+      }
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const headersRaw = readStringParam(args, "headersJson");
+      let headers: Record<string, string> = {};
+      if (headersRaw && headersRaw.trim()) {
+        try {
+          const parsed = JSON.parse(headersRaw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            for (const [k, v] of Object.entries(parsed)) {
+              if (typeof v === "string") headers[k] = v;
+            }
+          }
+        } catch {
+          headers = {};
+        }
+      }
+      const result = await callWebBridge("start_web", {
+        url: readStringParam(args, "url"),
+        user_agent: readStringParam(args, "user_agent"),
+        session_name: readStringParam(args, "session_name"),
+        headers
+      }, runtime);
+      return jsonResult(withMeta(result, meta));
+    }
+  };
+}
+
+function createStopWebTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
+  return {
+    label: "Web Stop",
+    name: "stop_web",
+    description: "Stop one session or all web sessions.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        session_id: { type: "string" },
+        close_all: { type: "boolean" }
+      }
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const result = await callWebBridge("stop_web", {
+        session_id: readStringParam(args, "session_id"),
+        close_all: !!args.close_all
+      }, runtime);
+      return jsonResult(withMeta(result, meta));
+    }
+  };
+}
+
+function createWebBridgeSimpleTool(
+  name: string,
+  label: string,
+  description: string,
+  runtime: RuntimeConfig,
+  meta: PluginRuntimeMeta,
+  required: string[],
+  optional: string[]
+) {
+  const numberKeys = new Set(["timeout_ms", "max_chars"]);
+  const booleanKeys = new Set(["include_links", "include_images", "close_all"]);
+  const arrayKeys = new Set(["paths"]);
+  const allKeys = [...required, ...optional];
+  const properties = Object.fromEntries(
+    allKeys.map((key) => {
+      if (numberKeys.has(key)) return [key, { type: "number" }];
+      if (booleanKeys.has(key)) return [key, { type: "boolean" }];
+      if (arrayKeys.has(key)) return [key, { type: "array", items: { type: "string" } }];
+      return [key, { type: "string" }];
+    })
+  );
+
+  return {
+    label,
+    name,
+    description,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required,
+      properties
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const params: Record<string, unknown> = {};
+      for (const key of allKeys) {
+        const raw = (args as Record<string, unknown>)[key];
+        if (raw === undefined) continue;
+        if (numberKeys.has(key)) {
+          const n = readNumberParam(args, key, { integer: true });
+          if (n !== undefined) {
+            if (key === "max_chars") params[key] = clampNumber(n, 1000, 80000);
+            else params[key] = clampNumber(n, 1000, 60000);
+          }
+          continue;
+        }
+        if (booleanKeys.has(key)) {
+          const text = String(raw ?? "").toLowerCase().trim();
+          params[key] = raw === true || text === "true" || text === "1" || text === "yes";
+          continue;
+        }
+        if (arrayKeys.has(key)) {
+          if (Array.isArray(raw)) {
+            params[key] = raw.map((item) => String(item));
+          } else if (typeof raw === "string" && raw.trim()) {
+            try {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) {
+                params[key] = parsed.map((item) => String(item));
+              }
+            } catch {
+              // ignore invalid array payload
+            }
+          }
+          continue;
+        }
+        const value = readStringParam(args, key, { required: false, allowEmpty: true });
+        if (value !== undefined) params[key] = value;
+      }
+      const result = await callWebBridge(name, params, runtime);
+      return jsonResult(withMeta(result, meta));
+    }
+  };
+}
+
 function resolveTavilyApiKey(config: RuntimeConfig): string | null {
   const key = (config.tavilyApiKey || process.env.TAVILY_API_KEY || "").trim();
   if (!key) return null;
@@ -1478,6 +1667,10 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     ? cfg.userAgent.trim()
     : DEFAULT_USER_AGENT;
 
+  const webBridgeUrl = typeof cfg.webBridgeUrl === "string" && cfg.webBridgeUrl.trim()
+    ? cfg.webBridgeUrl.trim()
+    : DEFAULT_WEB_BRIDGE_URL;
+
   const tavilyApiKey = typeof cfg.tavilyApiKey === "string" && cfg.tavilyApiKey.trim()
     ? cfg.tavilyApiKey.trim()
     : undefined;
@@ -1491,6 +1684,7 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     maxResults,
     maxChars,
     userAgent,
+    webBridgeUrl,
     tavilyApiKey,
     tavilyBaseUrl
   };
@@ -1551,6 +1745,96 @@ export default {
     api.registerTool(createMultiSearchTool(runtime, runtimeMeta));
     api.registerTool(createVisitTool(runtime, runtimeMeta));
     api.registerTool(createHttpTool(runtime, runtimeMeta));
+    api.registerTool(createStartWebTool(runtime, runtimeMeta));
+    api.registerTool(createStopWebTool(runtime, runtimeMeta));
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_navigate",
+        "Web Navigate",
+        "Navigate web session to a URL.",
+        runtime,
+        runtimeMeta,
+        ["url"],
+        ["session_id"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_eval",
+        "Web Eval",
+        "Run JavaScript in a web session.",
+        runtime,
+        runtimeMeta,
+        ["script"],
+        ["session_id", "timeout_ms"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_click",
+        "Web Click",
+        "Click an element by ref from web_snapshot output.",
+        runtime,
+        runtimeMeta,
+        ["ref"],
+        ["session_id"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_fill",
+        "Web Fill",
+        "Fill an input by CSS selector.",
+        runtime,
+        runtimeMeta,
+        ["selector", "value"],
+        ["session_id"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_wait_for",
+        "Web Wait For",
+        "Wait until page ready or selector appears.",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "selector", "timeout_ms"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_snapshot",
+        "Web Snapshot",
+        "Capture page snapshot with refs/text/links/images.",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "include_links", "include_images", "max_chars"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_content",
+        "Web Content",
+        "Extract primary page content and links.",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "include_links", "include_images", "max_chars"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_file_upload",
+        "Web File Upload",
+        "Upload files for web file chooser (bridge reserved).",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "paths"]
+      )
+    );
     api.registerTool(createOpenInSystemBrowserTool(runtime, runtimeMeta));
     api.registerTool(createTavilySearchTool(runtime, runtimeMeta));
   }
