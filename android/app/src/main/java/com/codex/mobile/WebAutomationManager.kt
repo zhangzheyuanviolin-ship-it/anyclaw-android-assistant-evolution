@@ -142,7 +142,7 @@ object WebAutomationManager {
 
         destroySession(session.id)
         if (activeSessionId == session.id) {
-            activeSessionId = sessions.keys().firstOrNull()
+            activeSessionId = sessions.keys.firstOrNull()
         }
         return JSONObject()
             .put("ok", true)
@@ -527,4 +527,3 @@ object WebAutomationManager {
         error.get()?.let { throw it }
     }
 }
-
