@@ -1044,7 +1044,7 @@ function createHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
 }
 
 function resolveTavilyApiKey(config: RuntimeConfig): string | null {
-  const key = (config.tavilyApiKey || process.env.TAVILY_API_KEY || "").trim();
+  const key = (config.tavilyApiKey || "").trim();
   if (!key) return null;
   return key;
 }

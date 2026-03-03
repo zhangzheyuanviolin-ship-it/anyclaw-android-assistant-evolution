@@ -7,6 +7,7 @@ import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
@@ -27,6 +28,7 @@ class CodexServerManager(private val context: Context) {
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
+        private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
     }
 
     private var serverProcess: Process? = null
@@ -664,7 +666,7 @@ H3
 
         onProgress("Installing OpenClaw (npm)…")
         val installCode = runInPrefix(
-            "node $npmCli install -g --ignore-scripts openclaw@latest 2>&1",
+            "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
             onOutput = { onProgress(it) },
         )
         if (installCode != 0) {
@@ -688,6 +690,41 @@ H3
         onProgress("Patching gateway for Android…")
         patchGatewayForAndroid()
 
+        return isOpenClawInstalled()
+    }
+
+    fun ensureOpenClawVersion(onProgress: (String) -> Unit): Boolean {
+        if (!isOpenClawInstalled()) return true
+
+        val installed = getInstalledOpenClawVersion()
+        if (installed == OPENCLAW_TARGET_VERSION) {
+            onProgress("OpenClaw version already aligned: $installed")
+            return true
+        }
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+
+        onProgress("Aligning OpenClaw to stable version $OPENCLAW_TARGET_VERSION…")
+        val code = runInPrefix(
+            "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+            onOutput = { onProgress(it) },
+        )
+        if (code != 0) {
+            Log.e(TAG, "OpenClaw version alignment failed with code $code")
+            return false
+        }
+
+        onProgress("Rebuilding native dependencies after OpenClaw upgrade…")
+        val koffiBuilt = buildKoffi(prefix, paths.homeDir, onProgress)
+        if (!koffiBuilt) {
+            Log.w(TAG, "koffi rebuild failed after OpenClaw alignment")
+        }
+
+        onProgress("Re-applying OpenClaw Android patches…")
+        patchOpenClawPaths()
+        patchGatewayForAndroid()
         return isOpenClawInstalled()
     }
 
@@ -840,13 +877,10 @@ H3
     }
 
     /**
-     * Write openclaw.json (gateway auth=none + dangerouslyDisableDeviceAuth)
-     * and auth-profiles.json (OpenAI token from existing Codex login).
-     * auth.mode is "none" because the Control UI's device-token
-     * negotiation can fail on fresh installs when no device token is
-     * stored, causing token_missing rejections.  The combination of
-     * auth=none + dangerouslyDisableDeviceAuth + allowInsecureAuth
-     * lets any local client connect without authentication.
+     * Write openclaw.json with loopback + gateway token auth defaults, and
+     * auth-profiles.json (OpenAI token from existing Codex login). We keep
+     * allowInsecureAuth=true for local loopback ergonomics, but do not disable
+     * device auth globally.
      */
     fun configureOpenClawAuth() {
         val paths = BootstrapInstaller.getPaths(context)
@@ -865,7 +899,7 @@ H3
         }
 
         val meta = ensureObject(root, "meta")
-        meta.put("lastTouchedVersion", "2026.3.3")
+        meta.put("lastTouchedVersion", getInstalledOpenClawVersion() ?: OPENCLAW_TARGET_VERSION)
         meta.put("lastTouchedAt", java.time.Instant.now().toString())
 
         val commands = ensureObject(root, "commands")
@@ -876,6 +910,7 @@ H3
 
         val gateway = ensureObject(root, "gateway")
         gateway.put("mode", "local")
+        gateway.put("bind", "loopback")
         val controlUi = ensureObject(gateway, "controlUi")
         controlUi.put("enabled", true)
         controlUi.put(
@@ -885,9 +920,11 @@ H3
                 .put("http://localhost:$OPENCLAW_CONTROL_UI_PORT"),
         )
         controlUi.put("allowInsecureAuth", true)
-        controlUi.put("dangerouslyDisableDeviceAuth", true)
+        controlUi.put("dangerouslyDisableDeviceAuth", false)
         val auth = ensureObject(gateway, "auth")
-        auth.put("mode", "none")
+        auth.put("mode", "token")
+        val gatewayToken = auth.optString("token", "").trim().ifEmpty { generateGatewayToken() }
+        auth.put("token", gatewayToken)
 
         val agents = ensureObject(root, "agents")
         val defaults = ensureObject(agents, "defaults")
@@ -913,11 +950,10 @@ H3
         }
         val store = ensureObject(memorySearch, "store")
         val vector = ensureObject(store, "vector")
-        vector.put("enabled", true)
-        vector.put(
-            "extensionPath",
-            "$prefix/lib/node_modules/openclaw/node_modules/sqlite-vec-linux-arm64/vec0",
-        )
+        vector.put("enabled", false)
+        if (vector.has("extensionPath")) {
+            vector.remove("extensionPath")
+        }
 
         ensureAnyClawSearchPlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
@@ -942,6 +978,7 @@ H3
 
         configFile.writeText(root.toString(2))
         Log.i(TAG, "Updated OpenClaw config at $configFile")
+        ensureMainSessionIndexHealthy()
 
         // Copy the Codex access_token into OpenClaw's auth-profiles.json.
         // The profile needs: version=1, type="token", provider="openai-codex",
@@ -1022,13 +1059,11 @@ H3
      *
      * Before starting:
      * 1. Kill any orphaned gateway process (scanning /proc, PID files).
-     * 2. Reset device tokens via `openclaw gateway token reset` so stale
-     *    device identities from previous devices/browsers are wiped.
-     * 3. Clear lock/pid files and client-side device-auth state.
+     * 2. Clear lock/pid files and stale plugin transpile caches.
      *
-     * Combined with `dangerouslyDisableDeviceAuth: true` and
-     * `allowInsecureAuth: true` in openclaw.json, this ensures any
-     * device can connect without "device token mismatch" errors.
+     * Uses gateway token auth and persistent local state. We intentionally
+     * avoid deleting identity/session state on every startup because that can
+     * cause recurrent "Loading chat" failures after upgrades.
      */
     fun startOpenClawGateway(): Boolean {
         if (openClawGatewayProcess != null) {
@@ -1064,12 +1099,7 @@ H3
             # Clear plugin transpile/runtime caches so updated extensions are always reloaded
             rm -rf ${paths.homeDir}/.cache/jiti 2>/dev/null
             rm -rf ${paths.homeDir}/.openclaw/.cache/jiti ${paths.homeDir}/.openclaw/.cache/plugins 2>/dev/null
-            # Clear device-auth state (identity keypair, device-auth tokens)
-            rm -rf ${paths.homeDir}/.local/state/openclaw/identity 2>/dev/null
-            rm -f ${paths.homeDir}/.local/state/openclaw/device-auth.json 2>/dev/null
             sleep 1
-            # Reset all device tokens so no stale tokens remain
-            openclaw gateway token reset 2>&1 || echo "token reset skipped (gateway not running)"
             echo "Gateway state cleaned"
         """.trimIndent()) { Log.d(TAG, "[openclaw-gw] $it") }
 
@@ -1121,6 +1151,7 @@ H3
         val env = buildEnvironment(paths)
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
+        val forcedGatewayUrlLiteral = JSONObject.quote("ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT")
 
         if (!File(controlUiRoot).exists()) {
             Log.w(TAG, "OpenClaw control-ui directory not found at $controlUiRoot")
@@ -1135,6 +1166,14 @@ H3
               const path = require('path');
               const { URL } = require('url');
               const root = '$controlUiRoot';
+              const gatewayConfigPath = path.join(process.env.HOME || '', '.openclaw', 'openclaw.json');
+              let gatewayToken = '';
+              try {
+                const parsed = JSON.parse(fs.readFileSync(gatewayConfigPath, 'utf8'));
+                gatewayToken = (((parsed || {}).gateway || {}).auth || {}).token || '';
+              } catch (_) {
+                gatewayToken = '';
+              }
               const mimeTypes = {
                 '.html':'text/html','.js':'application/javascript',
                 '.css':'text/css','.json':'application/json',
@@ -1146,6 +1185,8 @@ H3
                 const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
                   'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
+                  'var forcedGatewayUrl=$forcedGatewayUrlLiteral;' +
+                  'var forcedGatewayToken=' + JSON.stringify(gatewayToken || '') + ';' +
                   'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
                   'var nav=(navigator.language||\"\").toLowerCase();' +
                   'var systemLocale=nav.indexOf(\"zh\")===0?\"zh-CN\":\"en\";' +
@@ -1157,6 +1198,10 @@ H3
                   'if(!settings||typeof settings!==\"object\"){settings={};}' +
                   'if(typeof settings.chatFocusMode!==\"boolean\"){settings.chatFocusMode=true;}' +
                   'if(typeof settings.navCollapsed!==\"boolean\"){settings.navCollapsed=true;}' +
+                  'settings.gatewayUrl=forcedGatewayUrl;' +
+                  'if(forcedGatewayToken){settings.token=forcedGatewayToken;}' +
+                  'var sessionFromUrl=params.get(\"session\");' +
+                  'if(sessionFromUrl&&sessionFromUrl.trim()){settings.sessionKey=sessionFromUrl.trim();settings.lastActiveSessionKey=sessionFromUrl.trim();}' +
                   'settings.locale=locale;' +
                   'settings.theme=settings.theme||\"system\";' +
                   'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
@@ -2041,6 +2086,98 @@ EOF
         val created = JSONObject()
         parent.put(key, created)
         return created
+    }
+
+    private fun getInstalledOpenClawVersion(): String? {
+        val paths = BootstrapInstaller.getPaths(context)
+        val pkgFile = File(paths.prefixDir, "lib/node_modules/openclaw/package.json")
+        if (!pkgFile.exists()) return null
+        return runCatching {
+            JSONObject(pkgFile.readText()).optString("version", "").trim().ifEmpty { null }
+        }.getOrNull()
+    }
+
+    private fun generateGatewayToken(): String {
+        val bytes = ByteArray(24)
+        SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun ensureMainSessionIndexHealthy() {
+        val repairScript = """
+            node - <<'NODE'
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const home = process.env.HOME;
+            const sessionsDir = path.join(home, '.openclaw', 'agents', 'main', 'sessions');
+            const indexPath = path.join(sessionsDir, 'sessions.json');
+            fs.mkdirSync(sessionsDir, { recursive: true });
+
+            let index = {};
+            let dirty = false;
+            if (fs.existsSync(indexPath)) {
+              try {
+                const raw = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+                if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+                  index = raw;
+                } else {
+                  dirty = true;
+                }
+              } catch {
+                dirty = true;
+              }
+            }
+
+            const key = 'agent:main:main';
+            const existing = index[key] && typeof index[key] === 'object' ? index[key] : {};
+            let sessionId = typeof existing.sessionId === 'string' ? existing.sessionId.trim() : '';
+            const candidates = fs.readdirSync(sessionsDir)
+              .filter((name) => name.endsWith('.jsonl') && !name.includes('.deleted.') && !name.includes('.reset.'))
+              .map((name) => name.replace(/\.jsonl$/, ''))
+              .filter(Boolean);
+
+            if (!sessionId) {
+              sessionId = candidates[candidates.length - 1] || crypto.randomUUID();
+              dirty = true;
+            }
+
+            const sessionFile = path.join(sessionsDir, sessionId + '.jsonl');
+            if (!fs.existsSync(sessionFile)) {
+              fs.writeFileSync(sessionFile, '', 'utf8');
+              dirty = true;
+            }
+
+            const now = Date.now();
+            const merged = {
+              ...existing,
+              sessionId,
+              sessionFile,
+              updatedAt: typeof existing.updatedAt === 'number' ? existing.updatedAt : now,
+              chatType: typeof existing.chatType === 'string' ? existing.chatType : 'direct',
+              deliveryContext: existing.deliveryContext && typeof existing.deliveryContext === 'object' ? existing.deliveryContext : { channel: 'webchat' },
+              lastChannel: typeof existing.lastChannel === 'string' ? existing.lastChannel : 'webchat',
+              origin: existing.origin && typeof existing.origin === 'object' ? existing.origin : { provider: 'webchat', surface: 'webchat', chatType: 'direct' }
+            };
+
+            if (JSON.stringify(existing) !== JSON.stringify(merged)) dirty = true;
+            index[key] = merged;
+
+            if (dirty) {
+              try {
+                if (fs.existsSync(indexPath)) {
+                  const backup = indexPath + '.bak.' + new Date().toISOString().replace(/[:]/g, '-');
+                  fs.copyFileSync(indexPath, backup);
+                }
+              } catch {}
+              fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8');
+              console.log('OpenClaw session index repaired');
+            } else {
+              console.log('OpenClaw session index healthy');
+            }
+            NODE
+        """.trimIndent()
+        runInPrefix(repairScript) { Log.d(TAG, "[openclaw-session] $it") }
     }
 
     private fun jsonArrayContains(array: JSONArray, value: String): Boolean {

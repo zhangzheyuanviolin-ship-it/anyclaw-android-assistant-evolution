@@ -307,6 +307,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        if (serverManager.isOpenClawInstalled()) {
+            updateStatus("Checking OpenClaw version…")
+            val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
+            if (!versionOk) {
+                Log.w(TAG, "OpenClaw version alignment failed — continuing with current install")
+            }
+        }
+
         // Step 3: Install Codex CLI
         if (!serverManager.isCodexInstalled()) {
             updateStatus("Installing Codex CLI…", "This may take a few minutes")
