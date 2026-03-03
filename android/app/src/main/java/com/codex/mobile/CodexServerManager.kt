@@ -865,7 +865,7 @@ H3
         }
 
         val meta = ensureObject(root, "meta")
-        meta.put("lastTouchedVersion", "2026.3.3")
+        meta.put("lastTouchedVersion", "2026.3.4")
         meta.put("lastTouchedAt", java.time.Instant.now().toString())
 
         val commands = ensureObject(root, "commands")
@@ -932,7 +932,7 @@ H3
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
-            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.3")
+            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.3.1")
         }
 
         val allow = plugins.optJSONArray("allow")
@@ -1777,6 +1777,200 @@ WEOF
             Log.i(TAG, "Shared-storage bridge initialized")
         } else {
             Log.w(TAG, "Shared-storage bridge init returned code $code")
+        }
+    }
+
+    fun ensurePackageRecoveryScripts() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd = """
+            workspace="${paths.homeDir}/.openclaw/workspace"
+            scripts="${paths.homeDir}/.openclaw/workspace/scripts"
+            mkdir -p "${'$'}workspace" "${'$'}scripts" "${paths.prefixDir}/tmp" 2>/dev/null || true
+
+            cat > "${'$'}scripts/manual-deb-install.py" <<'EOF'
+#!/system/bin/sh
+exec python3 - "${'$'}@" <<'PY'
+import glob
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+PREFIX = os.environ.get("PREFIX") or "/data/user/0/com.codex.mobile.beta/files/usr"
+WORK = os.path.join(os.environ.get("HOME") or "/data/user/0/com.codex.mobile.beta/files/home", ".openclaw", "workspace", ".tmp_deb")
+os.makedirs(WORK, exist_ok=True)
+
+if len(sys.argv) < 2:
+    print("Usage: manual-deb-install.py <pkg1> [pkg2 ...]")
+    sys.exit(1)
+
+failed = []
+
+for pkg in sys.argv[1:]:
+    debs = sorted(glob.glob(os.path.join(WORK, f"{pkg}_*.deb")))
+    if not debs:
+        code = subprocess.call(["apt", "download", pkg], cwd=WORK)
+        if code != 0:
+            failed.append(pkg)
+            continue
+        debs = sorted(glob.glob(os.path.join(WORK, f"{pkg}_*.deb")))
+    if not debs:
+        failed.append(pkg)
+        continue
+
+    deb = debs[-1]
+    td = tempfile.mkdtemp(prefix="deb_", dir=WORK)
+    try:
+        if subprocess.call(["ar", "x", deb], cwd=td) != 0:
+            failed.append(pkg)
+            continue
+        data = None
+        for candidate in ("data.tar.zst", "data.tar.xz", "data.tar.gz", "data.tar.bz2", "data.tar"):
+            path = os.path.join(td, candidate)
+            if os.path.exists(path):
+                data = path
+                break
+        if not data:
+            failed.append(pkg)
+            continue
+        code = subprocess.call(["tar", "-xf", data, "--strip-components=6", "-C", PREFIX])
+        if code != 0:
+            failed.append(pkg)
+            continue
+        print("[OK]", os.path.basename(deb))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+if failed:
+    print("[FAIL]", " ".join(failed))
+    sys.exit(2)
+
+print("manual_deb_install_ok")
+PY
+EOF
+
+            cat > "${'$'}scripts/repair-termux-prefix.sh" <<'EOF'
+#!/system/bin/sh
+set -e
+PREFIX="${paths.prefixDir}"
+HOME_DIR="${paths.homeDir}"
+OLD='/data/data/com.termux'
+NEW='/data/user/0/com.codex.mobile.beta'
+
+python3 - <<'PY'
+import os
+OLD='/data/data/com.termux'
+NEW='/data/user/0/com.codex.mobile.beta'
+roots=['/data/user/0/com.codex.mobile.beta/files/usr/bin','/data/user/0/com.codex.mobile.beta/files/usr/libexec']
+changed=0
+for root in roots:
+    for dp, _, files in os.walk(root):
+        for name in files:
+            p = os.path.join(dp, name)
+            try:
+                b = open(p, 'rb').read()
+            except Exception:
+                continue
+            if OLD.encode() in b and (b.startswith(b'#!') or b'com.termux/files/usr' in b[:4096]):
+                nb = b.replace(OLD.encode(), NEW.encode())
+                if nb != b:
+                    open(p, 'wb').write(nb)
+                    changed += 1
+print('patched_files', changed)
+PY
+
+pkg help >/dev/null 2>&1 || true
+apt-key list >/dev/null 2>&1 || true
+echo "repair_termux_prefix_done"
+EOF
+
+            chmod 700 "${'$'}scripts/manual-deb-install.py" "${'$'}scripts/repair-termux-prefix.sh" 2>/dev/null || true
+            echo "package-recovery-scripts-ready"
+        """.trimIndent()
+
+        val code = runInPrefix(cmd)
+        if (code == 0) {
+            Log.i(TAG, "Package recovery scripts are ready")
+        } else {
+            Log.w(TAG, "Package recovery script install returned $code")
+        }
+    }
+
+    fun ensurePackageManagerWrappers() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd = """
+            set -e
+            prefix="${paths.prefixDir}"
+            home_dir="${paths.homeDir}"
+
+            make_wrapper() {
+              tool="${'$'}1"
+              target="${'$'}prefix/bin/${'$'}tool"
+              real="${'$'}prefix/bin/${'$'}tool.real"
+
+              if [ ! -f "${'$'}real" ] && [ -f "${'$'}target" ]; then
+                mv "${'$'}target" "${'$'}real"
+              fi
+              if [ ! -f "${'$'}real" ]; then
+                return 0
+              fi
+
+              cat > "${'$'}target" <<'EOF'
+#!/system/bin/sh
+PREFIX="__PREFIX__"
+HOME_DIR="__HOME__"
+TERMUX_PREFIX="/data/data/com.termux/files/usr"
+TOOL="__TOOL__"
+REAL="__D__{PREFIX}/bin/__D__{TOOL}.real"
+PROOT="__D__{PREFIX}/bin/proot"
+
+if [ ! -x "__D__{REAL}" ]; then
+  echo "Missing real command: __D__{REAL}" >&2
+  exit 127
+fi
+
+if [ ! -x "__D__{PROOT}" ]; then
+  exec "__D__{REAL}" "__D__{@}"
+fi
+
+escape_arg() {
+  printf "%s" "__D__{1}" | sed "s/'/'\"'\"'/g"
+}
+
+quoted=""
+for arg in "__D__{@}"; do
+  q=__D__(escape_arg "__D__{arg}")
+  quoted="__D__{quoted} '__D__{q}'"
+done
+
+export PROOT_NO_SECCOMP=1
+exec "__D__{PROOT}" \
+  -b "__D__{PREFIX}:__D__{TERMUX_PREFIX}" \
+  -b /system -b /vendor -b /product -b /apex -b /dev -b /proc -b /sys -b /sdcard \
+  -w "__D__{HOME_DIR}" \
+  /system/bin/sh -lc "export PREFIX='__D__{TERMUX_PREFIX}'; export HOME='__D__{HOME_DIR}'; export PATH='__D__{TERMUX_PREFIX}/bin:/system/bin'; export LD_LIBRARY_PATH='__D__{TERMUX_PREFIX}/lib'; export TMPDIR='__D__{PREFIX}/tmp'; export APT_CONFIG='__D__{TERMUX_PREFIX}/etc/apt/apt.conf'; export DPKG_ADMINDIR='__D__{TERMUX_PREFIX}/var/lib/dpkg'; '__D__{TERMUX_PREFIX}/bin/__D__{TOOL}.real'__D__{quoted}"
+EOF
+
+              sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}target"
+              sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}target"
+              sed -i "s#__TOOL__#${'$'}tool#g" "${'$'}target"
+              sed -i 's#__D__#${'$'}#g' "${'$'}target"
+              chmod 700 "${'$'}target"
+            }
+
+            make_wrapper apt
+            make_wrapper apt-get
+            make_wrapper dpkg
+            make_wrapper pkg
+            echo "package-manager-wrappers-ready"
+        """.trimIndent()
+
+        val code = runInPrefix(cmd)
+        if (code == 0) {
+            Log.i(TAG, "Package manager wrappers are ready")
+        } else {
+            Log.w(TAG, "Package manager wrapper install returned $code")
         }
     }
 

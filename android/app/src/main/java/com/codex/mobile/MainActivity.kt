@@ -271,6 +271,10 @@ class MainActivity : AppCompatActivity() {
         }
         updateStatus("proot ready")
 
+        // Step 1c: Prepare resilient package manager scripts/wrappers.
+        serverManager.ensurePackageRecoveryScripts()
+        serverManager.ensurePackageManagerWrappers()
+
         // Step 2: Install Node.js
         if (!serverManager.isNodeInstalled()) {
             updateStatus("Installing Node.js (first run)…", "This may take a few minutes")
