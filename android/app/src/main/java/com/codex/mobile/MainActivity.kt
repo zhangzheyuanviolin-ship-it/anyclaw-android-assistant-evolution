@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private var gatewayConnected = false
     private var gatewayStatusChecking = false
     private var pendingLaunchUrl: String? = null
+    private val openClawCacheBust: String = System.currentTimeMillis().toString()
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -452,7 +453,7 @@ class MainActivity : AppCompatActivity() {
                 changed = true
             }
             if (uri.getQueryParameter("anyclawBuild").isNullOrBlank()) {
-                builder.appendQueryParameter("anyclawBuild", BuildConfig.VERSION_CODE.toString())
+                builder.appendQueryParameter("anyclawBuild", openClawCacheBust)
                 changed = true
             }
             if (changed) builder.build().toString() else null
