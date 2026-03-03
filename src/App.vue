@@ -167,11 +167,11 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const { localePreference, setLocalePreference, t } = useUiI18n()
 const openClawDashboardUrl = computed(() => {
   const params = new URLSearchParams({
-    gatewayUrl: 'ws://localhost:18789',
+    gatewayUrl: 'ws://127.0.0.1:18789',
     localePref: localePreference.value,
     simple: '1',
   })
-  return `http://localhost:19001/chat?${params.toString()}`
+  return `http://127.0.0.1:19001/chat?${params.toString()}`
 })
 
 const {

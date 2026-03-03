@@ -5,6 +5,7 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.TimeUnit
@@ -27,6 +28,7 @@ class CodexServerManager(private val context: Context) {
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
+        private const val OPENCLAW_RUNTIME_VERSION = "2026.2.26"
     }
 
     private var serverProcess: Process? = null
@@ -83,6 +85,61 @@ class CodexServerManager(private val context: Context) {
         val sb = StringBuilder()
         runInPrefix(command) { sb.appendLine(it) }
         return sb.toString().trim()
+    }
+
+    private fun attachProcessLogger(
+        proc: Process,
+        logPrefix: String,
+        processLabel: String,
+    ) {
+        Thread {
+            try {
+                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                    var line = reader.readLine()
+                    while (line != null) {
+                        Log.d(TAG, "[$logPrefix] $line")
+                        line = reader.readLine()
+                    }
+                }
+            } catch (_: InterruptedIOException) {
+                Log.i(TAG, "$processLabel log stream interrupted")
+            } catch (e: Exception) {
+                Log.w(TAG, "$processLabel log stream stopped: ${e.message}")
+            } finally {
+                val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
+                Log.i(TAG, "$processLabel exited with code: $exitCode")
+            }
+        }.start()
+    }
+
+    private fun waitForLoopbackHttp(url: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 1200
+                conn.readTimeout = 1200
+                conn.requestMethod = "GET"
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code in 200..399) return true
+            } catch (_: Exception) {
+                // keep polling
+            }
+            Thread.sleep(300)
+        }
+        return false
+    }
+
+    private fun waitForOpenClawGateway(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (isOpenClawGatewayResponsive()) {
+                return true
+            }
+            Thread.sleep(350)
+        }
+        return false
     }
 
     // ── Install checks ─────────────────────────────────────────────────────
@@ -865,7 +922,7 @@ H3
         }
 
         val meta = ensureObject(root, "meta")
-        meta.put("lastTouchedVersion", "2026.3.5")
+        meta.put("lastTouchedVersion", OPENCLAW_RUNTIME_VERSION)
         meta.put("lastTouchedAt", java.time.Instant.now().toString())
 
         val commands = ensureObject(root, "commands")
@@ -1087,17 +1144,16 @@ H3
         val proc = pb.start()
         openClawGatewayProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-gw] $line")
-                line = reader.readLine()
+        attachProcessLogger(proc, "openclaw-gw", "OpenClaw gateway")
+        if (!waitForOpenClawGateway(timeoutMs = 12_000L)) {
+            Log.e(TAG, "OpenClaw gateway failed readiness check")
+            runCatching { proc.destroy() }
+            if (!proc.waitFor(1200, TimeUnit.MILLISECONDS)) {
+                runCatching { proc.destroyForcibly() }
             }
-            Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
-        }.start()
-
-        Thread.sleep(5000)
+            openClawGatewayProcess = null
+            return false
+        }
         Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
         return true
     }
@@ -1230,17 +1286,16 @@ H3
         val proc = pb.start()
         openClawControlUiProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-ui] $line")
-                line = reader.readLine()
+        attachProcessLogger(proc, "openclaw-ui", "OpenClaw Control UI server")
+        if (!waitForLoopbackHttp("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT/chat", timeoutMs = 8_000L)) {
+            Log.e(TAG, "OpenClaw Control UI failed readiness check")
+            runCatching { proc.destroy() }
+            if (!proc.waitFor(800, TimeUnit.MILLISECONDS)) {
+                runCatching { proc.destroyForcibly() }
             }
-            Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
-        }.start()
-
-        Thread.sleep(1000)
+            openClawControlUiProcess = null
+            return false
+        }
         Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
         return true
     }
@@ -1284,8 +1339,8 @@ H3
         configureOpenClawAuth()
         val gatewayOk = startOpenClawGateway()
         if (!gatewayOk) return false
-        startOpenClawControlUiServer()
-        Thread.sleep(800)
+        val uiOk = startOpenClawControlUiServer()
+        if (!uiOk) return false
         return isOpenClawGatewayResponsive()
     }
 
@@ -1450,15 +1505,7 @@ WEOF
         val proc = pb.start()
         proxyProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[proxy] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "Proxy exited with code: ${proc.waitFor()}")
-        }.start()
+        attachProcessLogger(proc, "proxy", "CONNECT proxy")
 
         Thread.sleep(800)
         Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$PROXY_PORT")
@@ -1661,15 +1708,7 @@ WEOF
         val proc = pb.start()
         serverProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[server] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "Server process exited with code: ${proc.waitFor()}")
-        }.start()
+        attachProcessLogger(proc, "server", "codex-web-local server")
 
         return true
     }
