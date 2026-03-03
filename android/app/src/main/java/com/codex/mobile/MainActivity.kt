@@ -15,7 +15,6 @@ import android.util.Log
 import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -62,7 +61,6 @@ class MainActivity : AppCompatActivity() {
     private var gatewayConnected = false
     private var gatewayStatusChecking = false
     private var pendingLaunchUrl: String? = null
-    private val openClawCacheBust: String = System.currentTimeMillis().toString()
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -219,7 +217,6 @@ class MainActivity : AppCompatActivity() {
             domStorageEnabled = true
             databaseEnabled = true
             allowFileAccess = false
-            cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
             setSupportZoom(false)
         }
 
@@ -227,26 +224,7 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 url: String,
-            ): Boolean {
-                val normalized = normalizeOpenClawUrl(url)
-                if (normalized != null && normalized != url) {
-                    view.loadUrl(normalized)
-                    return true
-                }
-                return false
-            }
-
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest,
-            ): Boolean {
-                val normalized = normalizeOpenClawUrl(request.url.toString())
-                if (normalized != null && normalized != request.url.toString()) {
-                    view.loadUrl(normalized)
-                    return true
-                }
-                return false
-            }
+            ): Boolean = false
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -384,14 +362,14 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Running OpenClaw preflight…")
             serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
 
+            updateStatus("Configuring OpenClaw…")
+            serverManager.configureOpenClawAuth()
+
             updateStatus("Starting OpenClaw gateway…")
-            val openClawReady = serverManager.reconnectOpenClawGateway()
-            if (!openClawReady) {
-                updateStatus(
-                    "OpenClaw gateway unavailable",
-                    "Codex is still available. You can reconnect gateway from the gateway button.",
-                )
-            }
+            serverManager.startOpenClawGateway()
+
+            updateStatus("Starting OpenClaw Control UI…")
+            serverManager.startOpenClawControlUiServer()
         }
 
         // Step 8: Start web server
@@ -420,46 +398,7 @@ class MainActivity : AppCompatActivity() {
             backToCodexButton.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
-            val launchUrl = consumeLaunchUrlOrDefault()
-            val normalized = normalizeOpenClawUrl(launchUrl) ?: launchUrl
-            webView.clearCache(true)
-            webView.loadUrl(normalized)
-        }
-    }
-
-    private fun normalizeOpenClawUrl(rawUrl: String): String? {
-        return try {
-            val uri = Uri.parse(rawUrl)
-            val host = uri.host?.lowercase() ?: return null
-            val isLoopback = host == "127.0.0.1" || host == "localhost"
-            if (!isLoopback || uri.port != CodexServerManager.OPENCLAW_CONTROL_UI_PORT) {
-                return null
-            }
-            val path = uri.path ?: return null
-            if (!path.startsWith("/chat")) {
-                return null
-            }
-            var changed = false
-            val builder = uri.buildUpon()
-            if (uri.getQueryParameter("gatewayUrl").isNullOrBlank()) {
-                builder.appendQueryParameter(
-                    "gatewayUrl",
-                    "ws://127.0.0.1:${CodexServerManager.OPENCLAW_GATEWAY_PORT}",
-                )
-                changed = true
-            }
-            if (uri.getQueryParameter("simple").isNullOrBlank()) {
-                builder.appendQueryParameter("simple", "1")
-                changed = true
-            }
-            if (uri.getQueryParameter("anyclawBuild").isNullOrBlank()) {
-                builder.appendQueryParameter("anyclawBuild", openClawCacheBust)
-                changed = true
-            }
-            if (changed) builder.build().toString() else null
-        } catch (error: Exception) {
-            Log.w(TAG, "Failed to normalize OpenClaw URL: ${error.message}")
-            null
+            webView.loadUrl(consumeLaunchUrlOrDefault())
         }
     }
 

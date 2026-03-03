@@ -5,7 +5,6 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.TimeUnit
@@ -84,61 +83,6 @@ class CodexServerManager(private val context: Context) {
         val sb = StringBuilder()
         runInPrefix(command) { sb.appendLine(it) }
         return sb.toString().trim()
-    }
-
-    private fun attachProcessLogger(
-        proc: Process,
-        logPrefix: String,
-        processLabel: String,
-    ) {
-        Thread {
-            try {
-                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
-                    var line = reader.readLine()
-                    while (line != null) {
-                        Log.d(TAG, "[$logPrefix] $line")
-                        line = reader.readLine()
-                    }
-                }
-            } catch (_: InterruptedIOException) {
-                Log.i(TAG, "$processLabel log stream interrupted")
-            } catch (e: Exception) {
-                Log.w(TAG, "$processLabel log stream stopped: ${e.message}")
-            } finally {
-                val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
-                Log.i(TAG, "$processLabel exited with code: $exitCode")
-            }
-        }.start()
-    }
-
-    private fun waitForLoopbackHttp(url: String, timeoutMs: Long): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.connectTimeout = 1200
-                conn.readTimeout = 1200
-                conn.requestMethod = "GET"
-                val code = conn.responseCode
-                conn.disconnect()
-                if (code in 200..399) return true
-            } catch (_: Exception) {
-                // keep polling
-            }
-            Thread.sleep(300)
-        }
-        return false
-    }
-
-    private fun waitForOpenClawGateway(timeoutMs: Long): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (isOpenClawGatewayResponsive()) {
-                return true
-            }
-            Thread.sleep(350)
-        }
-        return false
     }
 
     // ── Install checks ─────────────────────────────────────────────────────
@@ -982,26 +926,6 @@ H3
         val searchSuiteEntry = ensureObject(entries, ANYCLAW_SEARCH_PLUGIN_ID)
         searchSuiteEntry.put("enabled", true)
         val searchSuiteConfig = ensureObject(searchSuiteEntry, "config")
-        val allowedSearchConfigKeys = setOf(
-            "timeoutSeconds",
-            "maxResults",
-            "maxChars",
-            "userAgent",
-            "tavilyBaseUrl",
-            "tavilyApiKey",
-        )
-        val staleKeys = mutableListOf<String>()
-        val keyIterator = searchSuiteConfig.keys()
-        while (keyIterator.hasNext()) {
-            val key = keyIterator.next()
-            if (!allowedSearchConfigKeys.contains(key)) {
-                staleKeys.add(key)
-            }
-        }
-        for (key in staleKeys) {
-            searchSuiteConfig.remove(key)
-            Log.i(TAG, "Removed incompatible plugin config key: $ANYCLAW_SEARCH_PLUGIN_ID.$key")
-        }
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
@@ -1162,16 +1086,17 @@ H3
         val proc = pb.start()
         openClawGatewayProcess = proc
 
-        attachProcessLogger(proc, "openclaw-gw", "OpenClaw gateway")
-        if (!waitForOpenClawGateway(timeoutMs = 12_000L)) {
-            Log.e(TAG, "OpenClaw gateway failed readiness check")
-            runCatching { proc.destroy() }
-            if (!proc.waitFor(1200, TimeUnit.MILLISECONDS)) {
-                runCatching { proc.destroyForcibly() }
+        Thread {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            var line = reader.readLine()
+            while (line != null) {
+                Log.d(TAG, "[openclaw-gw] $line")
+                line = reader.readLine()
             }
-            openClawGatewayProcess = null
-            return false
-        }
+            Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
+        }.start()
+
+        Thread.sleep(5000)
         Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
         return true
     }
@@ -1197,21 +1122,6 @@ H3
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
 
-        // Clear orphaned Control UI servers so readiness probes do not hit stale code.
-        runInPrefix(
-            """
-            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
-                if echo "${'$'}cmdline" | grep -q "dist/control-ui" && echo "${'$'}cmdline" | grep -q "node"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q -- "$OPENCLAW_CONTROL_UI_PORT"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                fi
-            done
-            sleep 1
-            """.trimIndent(),
-        ) { Log.d(TAG, "[openclaw-ui] $it") }
-
         if (!File(controlUiRoot).exists()) {
             Log.w(TAG, "OpenClaw control-ui directory not found at $controlUiRoot")
             return false
@@ -1233,7 +1143,7 @@ H3
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
               function injectBootstrap(html) {
-                const snippetBody = '(function(){try{' +
+                const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
                   'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
                   'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
@@ -1245,10 +1155,6 @@ H3
                   'var settings={};' +
                   'try{settings=JSON.parse(localStorage.getItem(settingsKey)||\"{}\");}catch(_){}' +
                   'if(!settings||typeof settings!==\"object\"){settings={};}' +
-                  'if(typeof settings.gatewayUrl!==\"string\"||!settings.gatewayUrl.trim()){settings.gatewayUrl=(location.protocol===\"https:\"?\"wss\":\"ws\")+\"://127.0.0.1:$OPENCLAW_GATEWAY_PORT\";}' +
-                  'if(typeof settings.token!==\"string\"){settings.token=\"\";}' +
-                  'if(typeof settings.sessionKey!==\"string\"||!settings.sessionKey.trim()){settings.sessionKey=\"main\";}' +
-                  'if(typeof settings.lastActiveSessionKey!==\"string\"||!settings.lastActiveSessionKey.trim()){settings.lastActiveSessionKey=settings.sessionKey;}' +
                   'if(typeof settings.chatFocusMode!==\"boolean\"){settings.chatFocusMode=true;}' +
                   'if(typeof settings.navCollapsed!==\"boolean\"){settings.navCollapsed=true;}' +
                   'settings.locale=locale;' +
@@ -1256,7 +1162,7 @@ H3
                   'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
                   'var isZh=locale===\"zh-CN\";' +
                   'function replaceFirstTextNode(el,next){if(!el){return;}for(var i=0;i<el.childNodes.length;i++){var n=el.childNodes[i];if(n&&n.nodeType===3){n.nodeValue=\" \"+next+\" \";return;}}if(!el.children||el.children.length===0){el.textContent=next;}}' +
-                  'function normalizeSpace(text){var s=(text||\"\");s=s.replace(/\\s+/g,\" \");return s.trim();}' +
+                  'function normalizeSpace(text){var s=(text||\"\").replaceAll(\"\\n\",\" \").replaceAll(\"\\t\",\" \");while(s.indexOf(\"  \")>=0){s=s.replaceAll(\"  \",\" \");}return s.trim();}' +
                   'function localizeStatic(){if(!isZh){return;}var map={\"New session\":\"新建会话\",\"Send\":\"发送\",\"Queue\":\"排队发送\",\"Stop\":\"停止\",\"Connect\":\"连接\",\"Refresh\":\"刷新\",\"Exit focus mode\":\"退出专注模式\"};document.querySelectorAll(\"button\").forEach(function(btn){var raw=normalizeSpace(btn.textContent||\"\");if(map[raw]){replaceFirstTextNode(btn,map[raw]);}var aria=normalizeSpace(btn.getAttribute(\"aria-label\")||\"\");if(map[aria]){btn.setAttribute(\"aria-label\",map[aria]);}if(aria===\"Remove queued message\"){btn.setAttribute(\"aria-label\",\"移除排队消息\");}var title=normalizeSpace(btn.getAttribute(\"title\")||\"\");if(map[title]){btn.setAttribute(\"title\",map[title]);}});document.querySelectorAll(\"textarea\").forEach(function(el){var p=normalizeSpace(el.getAttribute(\"placeholder\")||\"\");if(p.indexOf(\"Message\")===0){el.setAttribute(\"placeholder\",\"输入消息（回车发送，Shift+回车换行，可粘贴图片）\");}});document.querySelectorAll(\".muted\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t===\"Loading chat…\"){el.textContent=\"正在加载聊天…\";}});document.querySelectorAll(\".chat-queue__title\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Queued (\")===0&&t.endsWith(\")\")){el.textContent=\"排队（\"+t.slice(8,t.length-1)+\"）\";}});document.querySelectorAll(\".chat-new-messages\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"New messages\")===0){el.textContent=\"新消息\";}});}' +
                   'function makeSessionKey(current){var now=Date.now().toString(36);var key=(current||\"main\").trim();if(key.indexOf(\"agent:\")===0){var parts=key.split(\":\");var agent=(parts.length>1&&parts[1])?parts[1]:\"main\";return \"agent:\"+agent+\":mobile-\"+now;}return \"mobile-\"+now;}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
@@ -1266,20 +1172,7 @@ H3
                   'runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches);var mo=new MutationObserver(function(){runPatches();});mo.observe(document.documentElement,{childList:true,subtree:true});' +
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
-                  '}catch(_){}})();';
-                let snippet = '';
-                try {
-                  new Function(snippetBody);
-                  snippet = '<script>' + snippetBody + '</' + 'script>';
-                } catch (snippetError) {
-                  console.error(
-                    'AnyClaw bootstrap disabled:',
-                    snippetError && snippetError.message ? snippetError.message : snippetError,
-                  );
-                }
-                if (!snippet) {
-                  return html;
-                }
+                  '}catch(_){}})();</' + 'script>';
                 if (html.includes('</body>')) {
                   return html.replace('</body>', snippet + '</body>');
                 }
@@ -1336,16 +1229,17 @@ H3
         val proc = pb.start()
         openClawControlUiProcess = proc
 
-        attachProcessLogger(proc, "openclaw-ui", "OpenClaw Control UI server")
-        if (!waitForLoopbackHttp("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT/chat", timeoutMs = 8_000L)) {
-            Log.e(TAG, "OpenClaw Control UI failed readiness check")
-            runCatching { proc.destroy() }
-            if (!proc.waitFor(800, TimeUnit.MILLISECONDS)) {
-                runCatching { proc.destroyForcibly() }
+        Thread {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            var line = reader.readLine()
+            while (line != null) {
+                Log.d(TAG, "[openclaw-ui] $line")
+                line = reader.readLine()
             }
-            openClawControlUiProcess = null
-            return false
-        }
+            Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
+        }.start()
+
+        Thread.sleep(1000)
         Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
         return true
     }
@@ -1389,8 +1283,8 @@ H3
         configureOpenClawAuth()
         val gatewayOk = startOpenClawGateway()
         if (!gatewayOk) return false
-        val uiOk = startOpenClawControlUiServer()
-        if (!uiOk) return false
+        startOpenClawControlUiServer()
+        Thread.sleep(800)
         return isOpenClawGatewayResponsive()
     }
 
@@ -1752,21 +1646,6 @@ WEOF
             return false
         }
 
-        // Clear orphaned codex-web-local servers to avoid serving stale JS or EADDRINUSE.
-        runInPrefix(
-            """
-            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
-                if echo "${'$'}cmdline" | grep -q "codex-web-local/dist-cli/index.js"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q -- "--port $SERVER_PORT"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                fi
-            done
-            sleep 1
-            """.trimIndent(),
-        ) { Log.d(TAG, "[server] $it") }
-
         val shell = "${paths.prefixDir}/bin/sh"
         val command = "exec node $serverScript --port $SERVER_PORT --no-password"
 
@@ -1781,7 +1660,15 @@ WEOF
         val proc = pb.start()
         serverProcess = proc
 
-        attachProcessLogger(proc, "server", "codex-web-local server")
+        Thread {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            var line = reader.readLine()
+            while (line != null) {
+                Log.d(TAG, "[server] $line")
+                line = reader.readLine()
+            }
+            Log.i(TAG, "Server process exited with code: ${proc.waitFor()}")
+        }.start()
 
         return true
     }
