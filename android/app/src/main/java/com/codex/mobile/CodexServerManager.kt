@@ -1182,6 +1182,30 @@ H3
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
               function injectBootstrap(html) {
+                const earlySnippet = '<script>(function(){try{' +
+                  'var params=new URLSearchParams(location.search);' +
+                  'var forcedGatewayUrl=$forcedGatewayUrlLiteral;' +
+                  'var forcedGatewayToken=' + JSON.stringify(gatewayToken || '') + ';' +
+                  'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
+                  'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
+                  'var nav=(navigator.language||\"\").toLowerCase();' +
+                  'var systemLocale=nav.indexOf(\"zh\")===0?\"zh-CN\":\"en\";' +
+                  'var locale=(pref===\"system\")?systemLocale:(pref===\"zh-CN\"?\"zh-CN\":\"en\");' +
+                  'localStorage.setItem(\"openclaw.i18n.locale\",locale);' +
+                  'var settingsKey=\"openclaw.control.settings.v1\";' +
+                  'var settings={};' +
+                  'try{settings=JSON.parse(localStorage.getItem(settingsKey)||\"{}\");}catch(_){}' +
+                  'if(!settings||typeof settings!==\"object\"){settings={};}' +
+                  'settings.gatewayUrl=forcedGatewayUrl;' +
+                  'if(forcedGatewayToken){settings.token=forcedGatewayToken;}' +
+                  'var sessionFromUrl=params.get(\"session\");' +
+                  'if(sessionFromUrl&&sessionFromUrl.trim()){settings.sessionKey=sessionFromUrl.trim();settings.lastActiveSessionKey=sessionFromUrl.trim();}' +
+                  'if(typeof settings.chatFocusMode!==\"boolean\"){settings.chatFocusMode=true;}' +
+                  'if(typeof settings.navCollapsed!==\"boolean\"){settings.navCollapsed=true;}' +
+                  'settings.locale=locale;' +
+                  'settings.theme=settings.theme||\"system\";' +
+                  'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
+                  '}catch(_){}})();</' + 'script>';
                 const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
                   'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
@@ -1218,10 +1242,18 @@ H3
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
                   '}catch(_){}})();</' + 'script>';
-                if (html.includes('</body>')) {
-                  return html.replace('</body>', snippet + '</body>');
+                let patchedHtml = html;
+                if (patchedHtml.includes('<script type=\"module\"')) {
+                  patchedHtml = patchedHtml.replace('<script type=\"module\"', earlySnippet + '<script type=\"module\"');
+                } else if (patchedHtml.includes('</head>')) {
+                  patchedHtml = patchedHtml.replace('</head>', earlySnippet + '</head>');
+                } else {
+                  patchedHtml = earlySnippet + patchedHtml;
                 }
-                return html + snippet;
+                if (patchedHtml.includes('</body>')) {
+                  return patchedHtml.replace('</body>', snippet + '</body>');
+                }
+                return patchedHtml + snippet;
               }
               function sendStatic(res, filePath, data) {
                 const ext = path.extname(filePath);

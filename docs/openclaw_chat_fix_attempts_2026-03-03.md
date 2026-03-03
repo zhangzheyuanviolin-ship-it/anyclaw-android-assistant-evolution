@@ -52,3 +52,15 @@
 - 验证结果：待用户安装新包验证。
 - 结论：该方案同时覆盖“版本层+持久化状态层”两条根因路径。
 - 可复用：是（后续版本统一沿用）。
+
+## Attempt 6
+- 时间：2026-03-04
+- 假设：`unauthorized: gateway token missing` 的主因是 Control UI token 注入时机晚于主模块脚本启动，触发首连竞态；并非用户手动配置错误。
+- 改动：
+  - 将 gateway token/session/gatewayUrl 的注入新增为“前置 early snippet”，并在 `<script type="module">` 之前写入 localStorage，避免首连时 token 为空。
+  - 保留原有后置补丁脚本作为兜底与中文化逻辑，不改变用户操作入口。
+  - 修正文案，移除插件提示中的 `env TAVILY_API_KEY` 误导描述。
+  - 上调版本号以便系统侧明确区分新旧包。
+- 验证结果：待云端构建后安装验证。
+- 结论：该方案可在保持 token 鉴权的同时避免手动粘贴 token。
+- 可复用：是（可作为后续 gateway 鉴权默认注入策略）。

@@ -1107,7 +1107,7 @@ function createTavilySearchTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta)
           finalQualityLabel: "noisy",
           resultDomainDiversity: 0,
           error: "missing_tavily_api_key",
-          message: "Missing Tavily API key. Configure plugins.entries.anyclaw-search-suite.config.tavilyApiKey or env TAVILY_API_KEY."
+          message: "Missing Tavily API key. Configure plugins.entries.anyclaw-search-suite.config.tavilyApiKey."
         };
         return jsonResult(withMeta(result as unknown as Record<string, unknown>, meta));
       }
