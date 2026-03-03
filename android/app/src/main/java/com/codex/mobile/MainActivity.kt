@@ -362,14 +362,14 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Running OpenClaw preflight…")
             serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
 
-            updateStatus("Configuring OpenClaw…")
-            serverManager.configureOpenClawAuth()
-
             updateStatus("Starting OpenClaw gateway…")
-            serverManager.startOpenClawGateway()
-
-            updateStatus("Starting OpenClaw Control UI…")
-            serverManager.startOpenClawControlUiServer()
+            val openClawReady = serverManager.reconnectOpenClawGateway()
+            if (!openClawReady) {
+                updateStatus(
+                    "OpenClaw gateway unavailable",
+                    "Codex is still available. You can reconnect gateway from the gateway button.",
+                )
+            }
         }
 
         // Step 8: Start web server

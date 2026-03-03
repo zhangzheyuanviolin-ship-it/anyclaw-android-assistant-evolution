@@ -5,6 +5,7 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.TimeUnit
@@ -83,6 +84,61 @@ class CodexServerManager(private val context: Context) {
         val sb = StringBuilder()
         runInPrefix(command) { sb.appendLine(it) }
         return sb.toString().trim()
+    }
+
+    private fun attachProcessLogger(
+        proc: Process,
+        logPrefix: String,
+        processLabel: String,
+    ) {
+        Thread {
+            try {
+                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                    var line = reader.readLine()
+                    while (line != null) {
+                        Log.d(TAG, "[$logPrefix] $line")
+                        line = reader.readLine()
+                    }
+                }
+            } catch (_: InterruptedIOException) {
+                Log.i(TAG, "$processLabel log stream interrupted")
+            } catch (e: Exception) {
+                Log.w(TAG, "$processLabel log stream stopped: ${e.message}")
+            } finally {
+                val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
+                Log.i(TAG, "$processLabel exited with code: $exitCode")
+            }
+        }.start()
+    }
+
+    private fun waitForLoopbackHttp(url: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 1200
+                conn.readTimeout = 1200
+                conn.requestMethod = "GET"
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code in 200..399) return true
+            } catch (_: Exception) {
+                // keep polling
+            }
+            Thread.sleep(300)
+        }
+        return false
+    }
+
+    private fun waitForOpenClawGateway(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (isOpenClawGatewayResponsive()) {
+                return true
+            }
+            Thread.sleep(350)
+        }
+        return false
     }
 
     // ── Install checks ─────────────────────────────────────────────────────
@@ -926,6 +982,26 @@ H3
         val searchSuiteEntry = ensureObject(entries, ANYCLAW_SEARCH_PLUGIN_ID)
         searchSuiteEntry.put("enabled", true)
         val searchSuiteConfig = ensureObject(searchSuiteEntry, "config")
+        val allowedSearchConfigKeys = setOf(
+            "timeoutSeconds",
+            "maxResults",
+            "maxChars",
+            "userAgent",
+            "tavilyBaseUrl",
+            "tavilyApiKey",
+        )
+        val staleKeys = mutableListOf<String>()
+        val keyIterator = searchSuiteConfig.keys()
+        while (keyIterator.hasNext()) {
+            val key = keyIterator.next()
+            if (!allowedSearchConfigKeys.contains(key)) {
+                staleKeys.add(key)
+            }
+        }
+        for (key in staleKeys) {
+            searchSuiteConfig.remove(key)
+            Log.i(TAG, "Removed incompatible plugin config key: $ANYCLAW_SEARCH_PLUGIN_ID.$key")
+        }
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
@@ -1086,17 +1162,16 @@ H3
         val proc = pb.start()
         openClawGatewayProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-gw] $line")
-                line = reader.readLine()
+        attachProcessLogger(proc, "openclaw-gw", "OpenClaw gateway")
+        if (!waitForOpenClawGateway(timeoutMs = 12_000L)) {
+            Log.e(TAG, "OpenClaw gateway failed readiness check")
+            runCatching { proc.destroy() }
+            if (!proc.waitFor(1200, TimeUnit.MILLISECONDS)) {
+                runCatching { proc.destroyForcibly() }
             }
-            Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
-        }.start()
-
-        Thread.sleep(5000)
+            openClawGatewayProcess = null
+            return false
+        }
         Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
         return true
     }
@@ -1229,17 +1304,16 @@ H3
         val proc = pb.start()
         openClawControlUiProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-ui] $line")
-                line = reader.readLine()
+        attachProcessLogger(proc, "openclaw-ui", "OpenClaw Control UI server")
+        if (!waitForLoopbackHttp("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT/chat", timeoutMs = 8_000L)) {
+            Log.e(TAG, "OpenClaw Control UI failed readiness check")
+            runCatching { proc.destroy() }
+            if (!proc.waitFor(800, TimeUnit.MILLISECONDS)) {
+                runCatching { proc.destroyForcibly() }
             }
-            Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
-        }.start()
-
-        Thread.sleep(1000)
+            openClawControlUiProcess = null
+            return false
+        }
         Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
         return true
     }
@@ -1283,8 +1357,8 @@ H3
         configureOpenClawAuth()
         val gatewayOk = startOpenClawGateway()
         if (!gatewayOk) return false
-        startOpenClawControlUiServer()
-        Thread.sleep(800)
+        val uiOk = startOpenClawControlUiServer()
+        if (!uiOk) return false
         return isOpenClawGatewayResponsive()
     }
 
