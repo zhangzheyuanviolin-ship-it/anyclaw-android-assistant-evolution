@@ -58,7 +58,7 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
   const inputImePriority = Array.isArray(cfg.inputImePriority)
     ? cfg.inputImePriority.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim())
     : DEFAULT_INPUT_IME_PRIORITY.slice();
-  const inputVerifyReadback = cfg.inputVerifyReadback === true;
+  const inputVerifyReadback = cfg.inputVerifyReadback !== false;
   return {
     timeoutMs,
     screenshotDir,
@@ -570,21 +570,38 @@ async function setInputMethod(imeId: string, runtime: RuntimeConfig): Promise<bo
   return run.ok;
 }
 
-async function verifyTextReadback(textRaw: string, runtime: RuntimeConfig): Promise<boolean | null> {
-  if (!runtime.inputVerifyReadback) return null;
+async function verifyTextReadback(textRaw: string, runtime: RuntimeConfig): Promise<boolean> {
+  if (!runtime.inputVerifyReadback) return true;
   const dumpPath = runtime.uiDumpPath;
   const dumpDir = dumpPath.substring(0, dumpPath.lastIndexOf("/")) || "/sdcard/Download";
-  await runSystemShell(["mkdir", "-p", dumpDir], runtime.timeoutMs);
-  const dumpRun = await runSystemShell(["uiautomator", "dump", dumpPath], runtime.timeoutMs);
-  const catRun = await runSystemShell(["cat", dumpPath], runtime.timeoutMs);
-  if (!dumpRun.ok || !catRun.ok) return null;
-
-  const xml = catRun.stdout || "";
-  if (!xml) return null;
   const needle = normalizeCompareText(textRaw);
-  if (!needle) return null;
-  const haystack = normalizeCompareText(xml);
-  return haystack.includes(needle);
+  if (!needle) return false;
+
+  for (let i = 0; i < 3; i += 1) {
+    await runSystemShell(["mkdir", "-p", dumpDir], runtime.timeoutMs);
+    const dumpRun = await runSystemShell(["uiautomator", "dump", dumpPath], runtime.timeoutMs);
+    const catRun = await runSystemShell(["cat", dumpPath], runtime.timeoutMs);
+    if (!dumpRun.ok || !catRun.ok) {
+      await sleep(140);
+      continue;
+    }
+    const xml = catRun.stdout || "";
+    if (!xml) {
+      await sleep(140);
+      continue;
+    }
+    const haystack = normalizeCompareText(xml);
+    if (haystack.includes(needle)) return true;
+    await sleep(140);
+  }
+  return false;
+}
+
+async function restoreInputMethodSafely(originalIme: string, runtime: RuntimeConfig): Promise<boolean> {
+  if (!originalIme) return true;
+  const current = await getCurrentInputMethod(runtime);
+  if (!current || current === originalIme) return true;
+  return setInputMethod(originalIme, runtime);
 }
 
 async function tryAdbKeyboardInject(textRaw: string, runtime: RuntimeConfig): Promise<{ ok: boolean; detail: string }> {
@@ -623,11 +640,12 @@ async function tryAutoGlmInject(textRaw: string, runtime: RuntimeConfig): Promis
 async function tryUnicodeInputWithIme(
   textRaw: string,
   imeId: string,
+  originalIme: string,
   runtime: RuntimeConfig
-): Promise<{ ok: boolean; detail: string; verify: boolean | null }> {
+): Promise<{ ok: boolean; detail: string; verify: boolean }> {
   const setOk = await setInputMethod(imeId, runtime);
   if (!setOk) {
-    return { ok: false, detail: `ime_set_failed:${imeId}`, verify: null };
+    return { ok: false, detail: `ime_set_failed:${imeId}`, verify: false };
   }
 
   await sleep(240);
@@ -641,16 +659,13 @@ async function tryUnicodeInputWithIme(
     inject = await tryAdbKeyboardInject(textRaw, runtime);
   }
 
-  if (!inject.ok) {
-    return { ok: false, detail: inject.detail, verify: null };
-  }
+  const verify = inject.ok ? await verifyTextReadback(textRaw, runtime) : false;
+  const restored = await restoreInputMethodSafely(originalIme, runtime);
 
-  await sleep(180);
-  const verify = await verifyTextReadback(textRaw, runtime);
-  if (verify === false) {
-    return { ok: false, detail: `${inject.detail}:verify_mismatch`, verify };
-  }
-  return { ok: true, detail: inject.detail, verify };
+  if (!restored) return { ok: false, detail: `${inject.detail}:restore_default_ime_failed`, verify: false };
+  if (!inject.ok) return { ok: false, detail: inject.detail, verify: false };
+  if (!verify) return { ok: false, detail: `${inject.detail}:verify_mismatch`, verify: false };
+  return { ok: true, detail: inject.detail, verify: true };
 }
 
 function createDeviceInputTextTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
@@ -684,7 +699,6 @@ function createDeviceInputTextTool(runtime: RuntimeConfig, meta: PluginRuntimeMe
       let strategy = "shell_input_text";
       let run = { ok: false, code: -1, stdout: "", stderr: "", error: "" as string | undefined };
       let verify: boolean | null = null;
-      let activeIme = originalIme;
 
       if (hasNonAscii(textRaw)) {
         const candidates = runtime.inputImePriority.filter((ime) => enabledImes.includes(ime));
@@ -693,12 +707,11 @@ function createDeviceInputTextTool(runtime: RuntimeConfig, meta: PluginRuntimeMe
         }
         for (const candidate of candidates) {
           tried.push(candidate);
-          const attempt = await tryUnicodeInputWithIme(textRaw, candidate, runtime);
+          const attempt = await tryUnicodeInputWithIme(textRaw, candidate, originalIme, runtime);
           if (attempt.ok) {
             strategy = attempt.detail;
             verify = attempt.verify;
             run = { ok: true, code: 0, stdout: "", stderr: "", error: undefined };
-            activeIme = candidate;
             break;
           }
         }
@@ -707,10 +720,27 @@ function createDeviceInputTextTool(runtime: RuntimeConfig, meta: PluginRuntimeMe
       if (!run.ok) {
         const text = normalizeInputText(textRaw);
         run = await runSystemShell(["input", "text", text], runtime.timeoutMs);
-      }
-
-      if (originalIme && activeIme && originalIme !== activeIme) {
-        await setInputMethod(originalIme, runtime);
+        const restored = await restoreInputMethodSafely(originalIme, runtime);
+        if (!restored) {
+          run = {
+            ok: false,
+            code: 1,
+            stdout: run.stdout,
+            stderr: "restore_default_ime_failed",
+            error: undefined
+          };
+        } else {
+          verify = await verifyTextReadback(textRaw, runtime);
+          if (!verify) {
+            run = {
+              ok: false,
+              code: 1,
+              stdout: run.stdout,
+              stderr: "verify_mismatch",
+              error: undefined
+            };
+          }
+        }
       }
 
       return jsonResult(withMeta({

@@ -1264,9 +1264,12 @@ H3
             Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
         }.start()
 
+        // Heartbeat bootstrap must not depend on a short fixed gateway warmup window.
+        // Run it asynchronously with retries so slow startups still get cron/task registration.
+        ensureHeartbeatBootstrapAsync(paths.homeDir)
+
         Thread.sleep(1200)
         if (isOpenClawGatewayResponsive()) {
-            ensureHeartbeatBootstrap()
             Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
             return true
         }
@@ -1544,23 +1547,17 @@ EOF
             done
 
             node <<'NODE'
-            const { execSync } = require('child_process');
+            const { spawnSync } = require('child_process');
             const fs = require('fs');
             const path = require('path');
-            function run(cmd) {
-              try {
-                const out = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-                return { ok: true, out: String(out || '').trim(), err: '', code: 0 };
-              } catch (error) {
-                const stdout = error && error.stdout ? String(error.stdout) : '';
-                const stderr = error && error.stderr ? String(error.stderr) : '';
-                return {
-                  ok: false,
-                  out: stdout.trim(),
-                  err: stderr.trim(),
-                  code: typeof error?.status === 'number' ? error.status : 1
-                };
-              }
+            function runOpenClaw(args) {
+              const res = spawnSync('openclaw', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              return {
+                ok: (res.status || 0) === 0,
+                out: String(res.stdout || '').trim(),
+                err: String(res.stderr || '').trim(),
+                code: typeof res.status === 'number' ? res.status : 1
+              };
             }
             const stateDir = path.join(process.env.HOME || '', '.openclaw-android', 'state');
             fs.mkdirSync(stateDir, { recursive: true });
@@ -1600,12 +1597,12 @@ EOF
 
             summary.attempts.push({ step: 'heartbeat_config_sanitize', result: sanitizeConfig() });
 
-            let hbEnable = run('openclaw system heartbeat enable --json');
+            let hbEnable = runOpenClaw(['system', 'heartbeat', 'enable', '--json']);
             summary.attempts.push({ step: 'heartbeat_enable', result: hbEnable });
             const hbErr = ((hbEnable.err || '') + '\n' + (hbEnable.out || '')).toLowerCase();
             if (!hbEnable.ok && hbErr.includes('unrecognized key') && hbErr.includes('heartbeat') && hbErr.includes('enabled')) {
               summary.attempts.push({ step: 'heartbeat_config_sanitize_retry', result: sanitizeConfig() });
-              hbEnable = run('openclaw system heartbeat enable --json');
+              hbEnable = runOpenClaw(['system', 'heartbeat', 'enable', '--json']);
               summary.attempts.push({ step: 'heartbeat_enable_retry', result: hbEnable });
             }
 
@@ -1622,17 +1619,19 @@ EOF
               return jobs.find((j) => j && j.name === NAME);
             }
 
-            let jobsRaw = run('openclaw cron list --json');
+            let jobsRaw = runOpenClaw(['cron', 'list', '--json']);
             let jobs = parseJobs(jobsRaw);
             let job = findByName(jobs);
             if (!job) {
-              summary.attempts.push({
-                step: 'cron_add',
-                result: run('openclaw cron add --name ' + NAME + ' --every ' + EVERY + ' --system-event ' + JSON.stringify(PROMPT) + ' --wake now --json')
-              });
-              jobsRaw = run('openclaw cron list --json');
-              jobs = parseJobs(jobsRaw);
-              job = findByName(jobs);
+              for (let i = 0; i < 3 && !job; i += 1) {
+                summary.attempts.push({
+                  step: 'cron_add_attempt_' + (i + 1),
+                  result: runOpenClaw(['cron', 'add', '--name', NAME, '--every', EVERY, '--system-event', PROMPT, '--wake', 'now', '--json'])
+                });
+                jobsRaw = runOpenClaw(['cron', 'list', '--json']);
+                jobs = parseJobs(jobsRaw);
+                job = findByName(jobs);
+              }
             }
 
             if (job) {
@@ -1640,15 +1639,15 @@ EOF
               if (id) {
                 summary.attempts.push({
                   step: 'cron_edit',
-                  result: run('openclaw cron edit ' + id + ' --every ' + EVERY + ' --system-event ' + JSON.stringify(PROMPT) + ' --enable --wake now')
+                  result: runOpenClaw(['cron', 'edit', String(id), '--every', EVERY, '--system-event', PROMPT, '--enable', '--wake', 'now'])
                 });
               }
             }
 
-            const cronList = run('openclaw cron list --json');
-            const cronStatus = run('openclaw cron status --json');
-            const hbLast = run('openclaw system heartbeat last --json');
-            const health = run('openclaw gateway call health --json --params ' + JSON.stringify({}));
+            const cronList = runOpenClaw(['cron', 'list', '--json']);
+            const cronStatus = runOpenClaw(['cron', 'status', '--json']);
+            const hbLast = runOpenClaw(['system', 'heartbeat', 'last', '--json']);
+            const health = runOpenClaw(['gateway', 'call', 'health', '--json', '--params', '{}']);
 
             summary.final = {
               cronListOk: cronList.ok,
@@ -1657,14 +1656,61 @@ EOF
               healthOk: health.ok
             };
 
-            fs.writeFileSync(path.join(stateDir, 'cron-jobs.json'), (cronList.out || '{}') + '\n', 'utf8');
-            fs.writeFileSync(path.join(stateDir, 'cron-status.json'), (cronStatus.out || '{}') + '\n', 'utf8');
-            fs.writeFileSync(path.join(stateDir, 'heartbeat-last.json'), (hbLast.out || '{}') + '\n', 'utf8');
+            function outputOrFallback(runRes, kind) {
+              if ((runRes.out || '').trim()) return runRes.out + '\n';
+              return JSON.stringify({
+                ok: false,
+                kind,
+                code: runRes.code,
+                error: runRes.err || 'empty_output'
+              }, null, 2) + '\n';
+            }
+
+            fs.writeFileSync(path.join(stateDir, 'cron-jobs.json'), outputOrFallback(cronList, 'cron_list'), 'utf8');
+            fs.writeFileSync(path.join(stateDir, 'cron-status.json'), outputOrFallback(cronStatus, 'cron_status'), 'utf8');
+            fs.writeFileSync(path.join(stateDir, 'heartbeat-last.json'), outputOrFallback(hbLast, 'heartbeat_last'), 'utf8');
             fs.writeFileSync(path.join(stateDir, 'heartbeat-bootstrap.json'), JSON.stringify(summary, null, 2) + '\n', 'utf8');
             console.log(JSON.stringify(summary));
             NODE
             """.trimIndent()
         runInPrefix(script) { Log.d(TAG, "[openclaw-heartbeat] $it") }
+    }
+
+    private fun isHeartbeatBootstrapHealthy(homeDir: String): Boolean {
+        val stateDir = File(homeDir, ".openclaw-android/state")
+        val cronStatusFile = File(stateDir, "cron-status.json")
+        val hbLastFile = File(stateDir, "heartbeat-last.json")
+        if (!cronStatusFile.exists() || !hbLastFile.exists()) return false
+
+        return try {
+            val cron = JSONObject(cronStatusFile.readText())
+            val jobs = cron.optInt("jobs", 0)
+            val hb = JSONObject(hbLastFile.readText())
+            val hbHasData = hb.length() > 0
+            jobs > 0 && hbHasData
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun ensureHeartbeatBootstrapAsync(homeDir: String) {
+        Thread {
+            for (attempt in 1..3) {
+                try {
+                    ensureHeartbeatBootstrap()
+                    if (isHeartbeatBootstrapHealthy(homeDir)) {
+                        Log.i(TAG, "OpenClaw heartbeat bootstrap healthy on attempt $attempt")
+                        break
+                    }
+                    Log.w(TAG, "OpenClaw heartbeat bootstrap incomplete on attempt $attempt")
+                } catch (error: Exception) {
+                    Log.w(TAG, "OpenClaw heartbeat bootstrap attempt $attempt failed: ${error.message}")
+                }
+                if (attempt < 3) {
+                    Thread.sleep((7000L * attempt).coerceAtMost(20000L))
+                }
+            }
+        }.start()
     }
 
     fun installCodex(onProgress: (String) -> Unit): Boolean {

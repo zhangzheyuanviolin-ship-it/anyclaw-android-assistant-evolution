@@ -220,7 +220,10 @@ function createRuntimeHealthTool(runtime: RuntimeConfig) {
             "echo dpkg=$(command -v dpkg || true)",
             "echo pkg=$(command -v pkg || true)",
             "echo prefix=${PREFIX:-}",
-            "echo home=${HOME:-}"
+            "echo home=${HOME:-}",
+            "residual=$(grep -RIl '/data/data/com.termux/files/usr' \"${HOME:-}/.openclaw\" \"${PREFIX:-}/bin\" 2>/dev/null | head -n 20 || true)",
+            "count=$(printf '%s\\n' \"$residual\" | sed '/^$/d' | wc -l | tr -d ' ')",
+            "echo termux_residual_count=$count"
           ].join("; ")
         ],
         runtime.timeoutMs
