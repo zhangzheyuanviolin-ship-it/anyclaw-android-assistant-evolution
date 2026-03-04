@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 60
-        versionName = "0.3.10-beta-residual-fixes-github-suite-p1"
+        versionCode = 61
+        versionName = "0.3.11-beta-shizuku-device-heartbeat-p1"
     }
 
     signingConfigs {

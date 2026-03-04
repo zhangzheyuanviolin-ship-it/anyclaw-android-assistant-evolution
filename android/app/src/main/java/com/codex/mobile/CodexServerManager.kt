@@ -29,6 +29,7 @@ class CodexServerManager(private val context: Context) {
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
+        private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
     }
 
@@ -958,6 +959,7 @@ H3
 
         ensureAnyClawSearchPlugin(paths.homeDir)
         ensureAnyClawGithubPlugin(paths.homeDir)
+        ensureAnyClawDevicePlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
@@ -971,7 +973,7 @@ H3
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
-            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.3")
+            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.4")
         }
 
         val githubSuiteEntry = ensureObject(entries, ANYCLAW_GITHUB_PLUGIN_ID)
@@ -987,6 +989,14 @@ H3
             githubSuiteConfig.put("userAgent", "AnyClawGithubSuite/1.0")
         }
 
+        val deviceSuiteEntry = ensureObject(entries, ANYCLAW_DEVICE_PLUGIN_ID)
+        deviceSuiteEntry.put("enabled", true)
+        val deviceSuiteConfig = ensureObject(deviceSuiteEntry, "config")
+        if (!deviceSuiteConfig.has("timeoutSeconds")) deviceSuiteConfig.put("timeoutSeconds", 20)
+        if (!deviceSuiteConfig.has("screenshotDir")) deviceSuiteConfig.put("screenshotDir", "/sdcard/Download/AnyClawShots")
+        if (!deviceSuiteConfig.has("uiDumpPath")) deviceSuiteConfig.put("uiDumpPath", "/sdcard/Download/AnyClawShots/ui_dump.xml")
+        if (!deviceSuiteConfig.has("maxUiNodes")) deviceSuiteConfig.put("maxUiNodes", 180)
+
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0) {
             if (!jsonArrayContains(allow, ANYCLAW_SEARCH_PLUGIN_ID)) {
@@ -994,6 +1004,9 @@ H3
             }
             if (!jsonArrayContains(allow, ANYCLAW_GITHUB_PLUGIN_ID)) {
                 allow.put(ANYCLAW_GITHUB_PLUGIN_ID)
+            }
+            if (!jsonArrayContains(allow, ANYCLAW_DEVICE_PLUGIN_ID)) {
+                allow.put(ANYCLAW_DEVICE_PLUGIN_ID)
             }
         }
 
@@ -1148,6 +1161,7 @@ H3
         }.start()
 
         Thread.sleep(5000)
+        ensureHeartbeatBootstrap()
         Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
         return true
     }
@@ -1383,6 +1397,72 @@ H3
         startOpenClawControlUiServer()
         Thread.sleep(800)
         return isOpenClawGatewayResponsive()
+    }
+
+    private fun ensureHeartbeatBootstrap() {
+        val script =
+            """
+            set +e
+            mkdir -p "${'$'}HOME/.openclaw/workspace" "${'$'}HOME/.openclaw-android/state"
+            HB_FILE="${'$'}HOME/.openclaw/workspace/HEARTBEAT.md"
+            DEFAULT_PROMPT="Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."
+
+            if [ ! -f "${'$'}HB_FILE" ] || [ -z "${'$'}(grep -Ev '^[[:space:]]*(#|$)' "${'$'}HB_FILE" 2>/dev/null)" ]; then
+              cat > "${'$'}HB_FILE" <<'EOF'
+# HEARTBEAT.md
+# AnyClaw auto-bootstrap tasks (safe defaults)
+1) Check whether gateway and core tools are healthy.
+2) If there is no pending task, reply HEARTBEAT_OK.
+3) If a blocking failure appears, summarize root cause in one short paragraph.
+EOF
+            fi
+
+            for i in 1 2 3 4; do
+              openclaw gateway call health --json --params '{}' >/dev/null 2>&1 && break
+              sleep 1
+            done
+
+            node <<'NODE'
+            const { execSync } = require('child_process');
+            function run(cmd) {
+              try {
+                return execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              } catch (_) {
+                return null;
+              }
+            }
+            const NAME = 'anyclaw-heartbeat-main';
+            const PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.';
+
+            run('openclaw system heartbeat enable --json');
+
+            let jobs = [];
+            try {
+              const listRaw = run('openclaw cron list --json') || '{}';
+              const parsed = JSON.parse(listRaw);
+              jobs = Array.isArray(parsed.jobs) ? parsed.jobs : [];
+            } catch (_) {
+              jobs = [];
+            }
+
+            const existing = jobs.find((j) => j && j.name === NAME);
+            if (!existing) {
+              run(`openclaw cron add --name ${NAME} --every 20m --system-event ${JSON.stringify(PROMPT)} --wake now --json`);
+            } else {
+              const id = existing.id || existing.jobId || existing.key;
+              if (id) {
+                run(`openclaw cron edit ${id} --every 20m --system-event ${JSON.stringify(PROMPT)} --enable --wake now`);
+              }
+            }
+
+            run('openclaw cron status --json');
+            NODE
+
+            openclaw cron list --json > "${'$'}HOME/.openclaw-android/state/cron-jobs.json" 2>/dev/null
+            openclaw cron status --json > "${'$'}HOME/.openclaw-android/state/cron-status.json" 2>/dev/null
+            openclaw system heartbeat last --json > "${'$'}HOME/.openclaw-android/state/heartbeat-last.json" 2>/dev/null
+            """.trimIndent()
+        runInPrefix(script) { Log.d(TAG, "[openclaw-heartbeat] $it") }
     }
 
     fun installCodex(onProgress: (String) -> Unit): Boolean {
@@ -2686,6 +2766,23 @@ EOF
         val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_GITHUB_PLUGIN_ID/index.ts", indexFile)
         if (manifestChanged || indexChanged) {
             Log.i(TAG, "Installed/updated plugin $ANYCLAW_GITHUB_PLUGIN_ID at $pluginRoot")
+        }
+    }
+
+    private fun ensureAnyClawDevicePlugin(homeDir: String) {
+        val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_DEVICE_PLUGIN_ID")
+        if (!pluginRoot.exists()) {
+            pluginRoot.mkdirs()
+        }
+        val manifestFile = File(pluginRoot, "openclaw.plugin.json")
+        val indexFile = File(pluginRoot, "index.ts")
+        val manifestChanged = writeAssetIfChanged(
+            "plugins/$ANYCLAW_DEVICE_PLUGIN_ID/openclaw.plugin.json",
+            manifestFile,
+        )
+        val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_DEVICE_PLUGIN_ID/index.ts", indexFile)
+        if (manifestChanged || indexChanged) {
+            Log.i(TAG, "Installed/updated plugin $ANYCLAW_DEVICE_PLUGIN_ID at $pluginRoot")
         }
     }
 

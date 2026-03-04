@@ -2,6 +2,7 @@ import { jsonResult, readNumberParam, readStringParam } from "openclaw/plugin-sd
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 type SearchHit = {
@@ -62,12 +63,12 @@ type SearchRunOutput = {
   error?: string;
 };
 
-const PARSER_VERSION = "v1.3.0";
+const PARSER_VERSION = "v1.4.0";
 const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_RESULTS = 6;
 const DEFAULT_MAX_CHARS = 12000;
 const MAX_RESULTS = 10;
-const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.3";
+const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.4";
 const DEFAULT_WEB_BRIDGE_URL = "http://127.0.0.1:18926/web/call";
 const DEFAULT_TAVILY_BASE_URL = "https://api.tavily.com/search";
 
@@ -1046,6 +1047,171 @@ function createHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   };
 }
 
+function createMultipartHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
+  return {
+    label: "AnyClaw Multipart HTTP",
+    name: "anyclaw_multipart_request",
+    description: "Send multipart/form-data requests with optional file uploads.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["url"],
+      properties: {
+        url: {
+          type: "string",
+          description: "Request URL"
+        },
+        method: {
+          type: "string",
+          description: "HTTP method, defaults to POST"
+        },
+        headersJson: {
+          type: "string",
+          description: "Optional JSON object string for request headers"
+        },
+        formDataJson: {
+          type: "string",
+          description: "Optional JSON object string for form fields"
+        },
+        filesJson: {
+          type: "string",
+          description: "Optional JSON array string: [{field,path,filename?,contentType?}]"
+        },
+        maxChars: {
+          type: "number",
+          minimum: 1000,
+          maximum: 80000,
+          description: "Maximum response characters"
+        }
+      }
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const url = readStringParam(args, "url", { required: true });
+      const method = normalizeMethod(readStringParam(args, "method") ?? "POST");
+      const maxChars = clampNumber(
+        readNumberParam(args, "maxChars", { integer: true }) ?? runtime.maxChars,
+        1000,
+        80000
+      );
+
+      const headersRaw = readStringParam(args, "headersJson");
+      const formDataRaw = readStringParam(args, "formDataJson");
+      const filesRaw = readStringParam(args, "filesJson");
+
+      let headers: Record<string, string> = {};
+      if (headersRaw && headersRaw.trim()) {
+        try {
+          const parsed = JSON.parse(headersRaw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            for (const [key, value] of Object.entries(parsed)) {
+              if (typeof value === "string") headers[key] = value;
+            }
+          }
+        } catch {
+          headers = {};
+        }
+      }
+
+      if (!headers["User-Agent"]) {
+        headers["User-Agent"] = runtime.userAgent;
+      }
+      // Let fetch compute multipart boundary.
+      delete headers["Content-Type"];
+      delete headers["content-type"];
+
+      const form = new FormData();
+      if (formDataRaw && formDataRaw.trim()) {
+        try {
+          const parsed = JSON.parse(formDataRaw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            for (const [key, value] of Object.entries(parsed)) {
+              if (value !== undefined && value !== null) {
+                form.append(String(key), String(value));
+              }
+            }
+          }
+        } catch {
+          // keep empty form fields on invalid JSON
+        }
+      }
+
+      const acceptedFiles: Array<{ field: string; path: string; filename: string }> = [];
+      const rejectedFiles: Array<{ path: string; error: string }> = [];
+      if (filesRaw && filesRaw.trim()) {
+        try {
+          const parsed = JSON.parse(filesRaw);
+          if (Array.isArray(parsed)) {
+            for (const entry of parsed) {
+              const row = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null;
+              const filePath = typeof row?.path === "string" ? row.path.trim() : "";
+              if (!filePath) {
+                rejectedFiles.push({ path: "", error: "missing_path" });
+                continue;
+              }
+              if (!fs.existsSync(filePath)) {
+                rejectedFiles.push({ path: filePath, error: "file_not_found" });
+                continue;
+              }
+              const stat = fs.statSync(filePath);
+              if (!stat.isFile()) {
+                rejectedFiles.push({ path: filePath, error: "not_a_file" });
+                continue;
+              }
+              const field = typeof row?.field === "string" && row.field.trim() ? row.field.trim() : "file";
+              const filename =
+                typeof row?.filename === "string" && row.filename.trim()
+                  ? row.filename.trim()
+                  : path.basename(filePath);
+              const contentType =
+                typeof row?.contentType === "string" && row.contentType.trim()
+                  ? row.contentType.trim()
+                  : "application/octet-stream";
+
+              const buf = fs.readFileSync(filePath);
+              const blob = new Blob([buf], { type: contentType });
+              form.append(field, blob, filename);
+              acceptedFiles.push({ field, path: filePath, filename });
+            }
+          }
+        } catch {
+          // ignore files payload parse error; request can still proceed with form fields only
+        }
+      }
+
+      const startedAt = Date.now();
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), runtime.timeoutMs);
+
+      try {
+        const response = await fetch(url, {
+          method,
+          headers,
+          signal: ctrl.signal,
+          body: form
+        });
+
+        const text = (await response.text()).slice(0, maxChars);
+        const result = {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          method,
+          url,
+          tookMs: Date.now() - startedAt,
+          uploadedFiles: acceptedFiles,
+          rejectedFiles,
+          finalQualityLabel: response.ok ? "good" : "noisy",
+          text
+        };
+        return jsonResult(withMeta(result, meta));
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  };
+}
+
 function isSafeHttpUrl(raw: string): boolean {
   return /^https?:\/\//i.test(raw.trim());
 }
@@ -1665,6 +1831,7 @@ export default {
     api.registerTool(createMultiSearchTool(runtime, runtimeMeta));
     api.registerTool(createVisitTool(runtime, runtimeMeta));
     api.registerTool(createHttpTool(runtime, runtimeMeta));
+    api.registerTool(createMultipartHttpTool(runtime, runtimeMeta));
     api.registerTool(createOpenInSystemBrowserTool(runtime, runtimeMeta));
     api.registerTool(createStartWebTool(runtime, runtimeMeta));
     api.registerTool(createStopWebTool(runtime, runtimeMeta));
@@ -1710,6 +1877,17 @@ export default {
         runtimeMeta,
         ["selector", "value"],
         ["session_id"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_file_upload",
+        "Web File Upload",
+        "Upload local files to the active page file chooser.",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "paths"]
       )
     );
     api.registerTool(

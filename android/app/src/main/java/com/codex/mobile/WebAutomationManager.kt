@@ -1,11 +1,15 @@
 package com.codex.mobile
 
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -33,6 +37,8 @@ object WebAutomationManager {
         @Volatile var currentUrl: String = "about:blank"
         @Volatile var pageTitle: String = ""
         @Volatile var pageLoaded: Boolean = false
+        @Volatile var pendingFileChooser: ValueCallback<Array<Uri>>? = null
+        @Volatile var pendingFileChooserAtMs: Long = 0L
     }
 
     fun handleCall(context: Context, method: String, params: JSONObject): JSONObject {
@@ -47,7 +53,7 @@ object WebAutomationManager {
                 "web_wait_for" -> webWaitFor(params)
                 "web_snapshot" -> webSnapshot(params)
                 "web_content" -> webContent(params)
-                "web_file_upload" -> unsupported("web_file_upload", "not_supported_in_anyclaw_webview_bridge")
+                "web_file_upload" -> webFileUpload(params)
                 else -> unsupported(method, "unsupported_method")
             }
         } catch (e: Exception) {
@@ -95,6 +101,22 @@ object WebAutomationManager {
                         session.currentUrl = finishedUrl
                         session.pageTitle = view.title ?: ""
                         session.pageLoaded = true
+                    }
+                }
+
+            webView.webChromeClient =
+                object : WebChromeClient() {
+                    override fun onShowFileChooser(
+                        view: WebView?,
+                        filePathCallback: ValueCallback<Array<Uri>>?,
+                        fileChooserParams: FileChooserParams?,
+                    ): Boolean {
+                        if (filePathCallback == null) return false
+                        // Replace any stale chooser callback to avoid leaked pending states.
+                        session.pendingFileChooser?.onReceiveValue(null)
+                        session.pendingFileChooser = filePathCallback
+                        session.pendingFileChooserAtMs = System.currentTimeMillis()
+                        return true
                     }
                 }
 
@@ -399,6 +421,75 @@ object WebAutomationManager {
             .put("images", snapshot.optJSONArray("images") ?: JSONArray())
     }
 
+    private fun webFileUpload(params: JSONObject): JSONObject {
+        val session = resolveSession(params)
+            ?: return JSONObject().put("ok", false).put("error", "session_not_found")
+
+        val requestedPaths = mutableListOf<String>()
+        val rawPaths = params.optJSONArray("paths")
+        if (rawPaths != null) {
+            for (i in 0 until rawPaths.length()) {
+                val value = rawPaths.optString(i, "").trim()
+                if (value.isNotEmpty()) requestedPaths.add(value)
+            }
+        }
+
+        val accepted = JSONArray()
+        val rejected = JSONArray()
+        val result = JSONObject()
+
+        runOnMainSync {
+            val callback = session.pendingFileChooser
+            if (callback == null) {
+                result
+                    .put("ok", false)
+                    .put("status", "failed")
+                    .put("session_id", session.id)
+                    .put("error", "file_chooser_not_pending")
+                return@runOnMainSync
+            }
+
+            val waitingMs = (System.currentTimeMillis() - session.pendingFileChooserAtMs).coerceAtLeast(0L)
+
+            if (rawPaths == null) {
+                callback.onReceiveValue(null)
+                session.pendingFileChooser = null
+                session.pendingFileChooserAtMs = 0L
+                result
+                    .put("ok", true)
+                    .put("status", "cancelled")
+                    .put("session_id", session.id)
+                    .put("waiting_ms", waitingMs)
+                return@runOnMainSync
+            }
+
+            val uris = ArrayList<Uri>()
+            requestedPaths.forEach { path ->
+                val file = File(path)
+                if (!file.isAbsolute || !file.exists() || !file.isFile) {
+                    rejected.put(path)
+                } else {
+                    accepted.put(path)
+                    uris.add(Uri.fromFile(file))
+                }
+            }
+
+            callback.onReceiveValue(if (uris.isNotEmpty()) uris.toTypedArray() else null)
+            session.pendingFileChooser = null
+            session.pendingFileChooserAtMs = 0L
+
+            result
+                .put("ok", uris.isNotEmpty())
+                .put("status", if (uris.isNotEmpty()) "uploaded" else "rejected")
+                .put("session_id", session.id)
+                .put("accepted_paths", accepted)
+                .put("rejected_paths", rejected)
+                .put("waiting_ms", waitingMs)
+        }
+
+        return result
+    }
+
     private fun resolveSession(params: JSONObject): Session? {
         val requested = params.optString("session_id", "").trim()
         val id = if (requested.isNotBlank()) requested else activeSessionId
@@ -411,6 +502,12 @@ object WebAutomationManager {
     private fun destroySession(id: String) {
         val session = sessions.remove(id) ?: return
         runOnMainSync {
+            try {
+                session.pendingFileChooser?.onReceiveValue(null)
+            } catch (_: Exception) {
+            }
+            session.pendingFileChooser = null
+            session.pendingFileChooserAtMs = 0L
             try {
                 session.webView.stopLoading()
             } catch (_: Exception) {
