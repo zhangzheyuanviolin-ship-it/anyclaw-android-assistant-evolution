@@ -1869,102 +1869,102 @@ WEOF
 #!/system/bin/sh
 set -eu
 
-PREFIX="${PREFIX:-__PREFIX__}"
-HOME_DIR="${HOME:-__HOME__}"
-WORK="${HOME_DIR}/.openclaw/workspace/.tmp_deb"
-STATE_DIR="${PREFIX}/var/lib/anyclaw-manual"
-APT_REAL="${PREFIX}/bin/apt.real"
-DPKG_DEB="${PREFIX}/bin/dpkg-deb"
+PREFIX="${'$'}{PREFIX:-__PREFIX__}"
+HOME_DIR="${'$'}{HOME:-__HOME__}"
+WORK="${'$'}{HOME_DIR}/.openclaw/workspace/.tmp_deb"
+STATE_DIR="${'$'}{PREFIX}/var/lib/anyclaw-manual"
+APT_REAL="${'$'}{PREFIX}/bin/apt.real"
+DPKG_DEB="${'$'}{PREFIX}/bin/dpkg-deb"
 
-mkdir -p "${WORK}" "${STATE_DIR}" "${PREFIX}" 2>/dev/null || true
+mkdir -p "${'$'}{WORK}" "${'$'}{STATE_DIR}" "${'$'}{PREFIX}" 2>/dev/null || true
 
-if [ ! -x "${APT_REAL}" ]; then
-  APT_REAL="${PREFIX}/bin/apt"
+if [ ! -x "${'$'}{APT_REAL}" ]; then
+  APT_REAL="${'$'}{PREFIX}/bin/apt"
 fi
-if [ ! -x "${DPKG_DEB}" ]; then
-  DPKG_DEB="${PREFIX}/bin/dpkg-deb"
+if [ ! -x "${'$'}{DPKG_DEB}" ]; then
+  DPKG_DEB="${'$'}{PREFIX}/bin/dpkg-deb"
 fi
 
 safe_rel() {
-  rel="${1#./}"
-  case "${rel}" in
+  rel="${'$'}{1#./}"
+  case "${'$'}{rel}" in
     ""|/*|".."|../*|*/..|*/../*) return 1 ;;
-    *) printf "%s\n" "${rel}"; return 0 ;;
+    *) printf "%s\n" "${'$'}{rel}"; return 0 ;;
   esac
 }
 
 install_pkg() {
-  pkg="${1:-}"
-  [ -n "${pkg}" ] || return 1
+  pkg="${'$'}{1:-}"
+  [ -n "${'$'}{pkg}" ] || return 1
   (
-    cd "${WORK}"
-    "${APT_REAL}" download "${pkg}" >/dev/null
+    cd "${'$'}{WORK}"
+    "${'$'}{APT_REAL}" download "${'$'}{pkg}" >/dev/null
   ) || return 1
 
-  deb="$(ls -1t "${WORK}/${pkg}"_*.deb 2>/dev/null | head -n 1 || true)"
-  [ -n "${deb}" ] || return 1
+  deb="${'$'}(ls -1t "${'$'}{WORK}/${'$'}{pkg}"_*.deb 2>/dev/null | head -n 1 || true)"
+  [ -n "${'$'}{deb}" ] || return 1
 
-  stage="$(mktemp -d "${WORK}/stage.${pkg}.XXXXXX")"
+  stage="${'$'}(mktemp -d "${'$'}{WORK}/stage.${'$'}{pkg}.XXXXXX")"
   cleanup() {
-    rm -rf "${stage}" 2>/dev/null || true
+    rm -rf "${'$'}{stage}" 2>/dev/null || true
   }
   trap cleanup EXIT INT TERM
 
-  "${DPKG_DEB}" -x "${deb}" "${stage}" >/dev/null 2>&1 || return 1
+  "${'$'}{DPKG_DEB}" -x "${'$'}{deb}" "${'$'}{stage}" >/dev/null 2>&1 || return 1
 
-  payload="${stage}/data/data/com.termux/files/usr"
-  if [ ! -d "${payload}" ]; then
-    payload="${stage}/usr"
+  payload="${'$'}{stage}/data/data/com.termux/files/usr"
+  if [ ! -d "${'$'}{payload}" ]; then
+    payload="${'$'}{stage}/usr"
   fi
-  [ -d "${payload}" ] || return 1
+  [ -d "${'$'}{payload}" ] || return 1
 
-  manifest_tmp="${STATE_DIR}/${pkg}.files.tmp"
-  manifest="${STATE_DIR}/${pkg}.files"
-  : > "${manifest_tmp}"
-  paths_file="${stage}/.paths.list"
-  find "${payload}" -mindepth 1 -print | sort > "${paths_file}"
+  manifest_tmp="${'$'}{STATE_DIR}/${'$'}{pkg}.files.tmp"
+  manifest="${'$'}{STATE_DIR}/${'$'}{pkg}.files"
+  : > "${'$'}{manifest_tmp}"
+  paths_file="${'$'}{stage}/.paths.list"
+  find "${'$'}{payload}" -mindepth 1 -print | sort > "${'$'}{paths_file}"
   while IFS= read -r path; do
-    rel="$(safe_rel "${path#${payload}/}")" || continue
-    printf "%s\n" "${rel}" >> "${manifest_tmp}"
-  done < "${paths_file}"
+    rel="${'$'}(safe_rel "${'$'}{path#${'$'}{payload}/}")" || continue
+    printf "%s\n" "${'$'}{rel}" >> "${'$'}{manifest_tmp}"
+  done < "${'$'}{paths_file}"
 
-  cp -a "${payload}"/. "${PREFIX}"/
-  mv "${manifest_tmp}" "${manifest}"
-  printf "%s\n" "manual_install_ok ${pkg}"
+  cp -a "${'$'}{payload}"/. "${'$'}{PREFIX}"/
+  mv "${'$'}{manifest_tmp}" "${'$'}{manifest}"
+  printf "%s\n" "manual_install_ok ${'$'}{pkg}"
   trap - EXIT INT TERM
   cleanup
   return 0
 }
 
 remove_pkg() {
-  pkg="${1:-}"
-  [ -n "${pkg}" ] || return 1
-  manifest="${STATE_DIR}/${pkg}.files"
-  [ -f "${manifest}" ] || return 1
+  pkg="${'$'}{1:-}"
+  [ -n "${'$'}{pkg}" ] || return 1
+  manifest="${'$'}{STATE_DIR}/${'$'}{pkg}.files"
+  [ -f "${'$'}{manifest}" ] || return 1
 
-  tmp_sorted="${manifest}.sorted"
-  awk '{ print length, ${'$'}0 }' "${manifest}" | sort -rn | cut -d' ' -f2- > "${tmp_sorted}"
+  tmp_sorted="${'$'}{manifest}.sorted"
+  awk '{ print length, $0 }' "${'$'}{manifest}" | sort -rn | cut -d' ' -f2- > "${'$'}{tmp_sorted}"
   while IFS= read -r rel; do
-    [ -n "${rel}" ] || continue
-    target="${PREFIX}/${rel}"
-    if [ -L "${target}" ] || [ -f "${target}" ]; then
-      rm -f "${target}" 2>/dev/null || true
-    elif [ -d "${target}" ]; then
-      rmdir "${target}" 2>/dev/null || true
+    [ -n "${'$'}{rel}" ] || continue
+    target="${'$'}{PREFIX}/${'$'}{rel}"
+    if [ -L "${'$'}{target}" ] || [ -f "${'$'}{target}" ]; then
+      rm -f "${'$'}{target}" 2>/dev/null || true
+    elif [ -d "${'$'}{target}" ]; then
+      rmdir "${'$'}{target}" 2>/dev/null || true
     fi
-  done < "${tmp_sorted}"
-  rm -f "${tmp_sorted}" "${manifest}" 2>/dev/null || true
-  printf "%s\n" "manual_remove_ok ${pkg}"
+  done < "${'$'}{tmp_sorted}"
+  rm -f "${'$'}{tmp_sorted}" "${'$'}{manifest}" 2>/dev/null || true
+  printf "%s\n" "manual_remove_ok ${'$'}{pkg}"
   return 0
 }
 
 status_pkg() {
-  pkg="${1:-}"
-  [ -n "${pkg}" ] || return 1
-  manifest="${STATE_DIR}/${pkg}.files"
-  if [ -f "${manifest}" ]; then
-    count="$(wc -l < "${manifest}" 2>/dev/null | tr -d ' ')"
-    printf "Package: %s\nStatus: install ok installed (manual)\nFiles: %s\n" "${pkg}" "${count}"
+  pkg="${'$'}{1:-}"
+  [ -n "${'$'}{pkg}" ] || return 1
+  manifest="${'$'}{STATE_DIR}/${'$'}{pkg}.files"
+  if [ -f "${'$'}{manifest}" ]; then
+    count="${'$'}(wc -l < "${'$'}{manifest}" 2>/dev/null | tr -d ' ')"
+    printf "Package: %s\nStatus: install ok installed (manual)\nFiles: %s\n" "${'$'}{pkg}" "${'$'}{count}"
     return 0
   fi
   return 1
@@ -1972,22 +1972,22 @@ status_pkg() {
 
 list_pkgs() {
   found=0
-  for f in "${STATE_DIR}"/*.files; do
-    [ -f "${f}" ] || continue
+  for f in "${'$'}{STATE_DIR}"/*.files; do
+    [ -f "${'$'}{f}" ] || continue
     found=1
-    basename "${f}" .files
+    basename "${'$'}{f}" .files
   done
-  [ "${found}" -eq 1 ] || printf "%s\n" "(no manual packages)"
+  [ "${'$'}{found}" -eq 1 ] || printf "%s\n" "(no manual packages)"
 }
 
-cmd="${1:-}"
-if [ -z "${cmd}" ]; then
+cmd="${'$'}{1:-}"
+if [ -z "${'$'}{cmd}" ]; then
   printf "%s\n" "Usage: manual-deb-manager.sh <install|remove|status|list> ..."
   exit 2
 fi
 shift || true
 
-case "${cmd}" in
+case "${'$'}{cmd}" in
   install|add)
     [ "${'$'}#" -gt 0 ] || exit 2
     failed=0
@@ -2012,7 +2012,7 @@ case "${cmd}" in
     list_pkgs
     ;;
   *)
-    printf "%s\n" "Unsupported command: ${cmd}"
+    printf "%s\n" "Unsupported command: ${'$'}{cmd}"
     exit 2
     ;;
 esac
