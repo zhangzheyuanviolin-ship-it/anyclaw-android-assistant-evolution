@@ -1050,6 +1050,21 @@ function isSafeHttpUrl(raw: string): boolean {
   return /^https?:\/\//i.test(raw.trim());
 }
 
+function stripInternalNoise(raw: string): string {
+  const lines = String(raw || "").split(/\r?\n/);
+  const keep = lines.filter((line) => {
+    const text = line.trim();
+    if (!text) return false;
+    if (/^WARNING:\s+apt\.real does not have a stable CLI interface/i.test(text)) return false;
+    if (/^WARNING:\s+linker:/i.test(text)) return false;
+    if (/^CANNOT LINK EXECUTABLE/i.test(text)) return false;
+    if (/^ERROR\s+codex_core::/i.test(text)) return false;
+    if (/^proot error:/i.test(text)) return false;
+    return true;
+  });
+  return keep.join("\n").trim();
+}
+
 async function runSystemShell(
   args: string[],
   timeoutMs: number
@@ -1152,6 +1167,8 @@ function createOpenInSystemBrowserTool(runtime: RuntimeConfig, meta: PluginRunti
 
       const startedAt = Date.now();
       const run = await runSystemShell(shellArgs, runtime.timeoutMs);
+      const stdout = stripInternalNoise(run.stdout).slice(0, 1000);
+      const stderr = stripInternalNoise(run.stderr).slice(0, 1000);
       const result = {
         ok: run.ok,
         tool: "open_in_system_browser",
@@ -1159,8 +1176,8 @@ function createOpenInSystemBrowserTool(runtime: RuntimeConfig, meta: PluginRunti
         packageName: packageName || undefined,
         exitCode: run.code,
         tookMs: Date.now() - startedAt,
-        stdout: run.stdout,
-        stderr: run.stderr,
+        output: stdout || undefined,
+        errorOutput: run.ok ? undefined : (stderr || undefined),
         error: run.error
       };
       return jsonResult(withMeta(result, meta));
@@ -1186,20 +1203,22 @@ async function callWebBridge(method: string, params: Record<string, unknown>, ru
     });
     const raw = await response.text();
     if (!response.ok) {
+      const detail = stripInternalNoise(raw).slice(0, 800);
       return {
         ok: false,
         method,
         error: "web_bridge_http_" + String(response.status),
-        detail: raw.slice(0, 800)
+        detail: detail || undefined
       };
     }
     const parsed = JSON.parse(raw || "{}");
     if (!parsed || typeof parsed !== "object") {
+      const detail = stripInternalNoise(String(raw)).slice(0, 800);
       return {
         ok: false,
         method,
         error: "web_bridge_invalid_json",
-        detail: String(raw).slice(0, 800)
+        detail: detail || undefined
       };
     }
     return parsed as Record<string, unknown>;
@@ -1207,7 +1226,7 @@ async function callWebBridge(method: string, params: Record<string, unknown>, ru
     return {
       ok: false,
       method,
-      error: String(error)
+      error: stripInternalNoise(String(error)).slice(0, 400) || "web_bridge_call_failed"
     };
   } finally {
     clearTimeout(timer);
@@ -1724,17 +1743,6 @@ export default {
         runtimeMeta,
         [],
         ["session_id", "include_links", "include_images", "max_chars"]
-      )
-    );
-    api.registerTool(
-      createWebBridgeSimpleTool(
-        "web_file_upload",
-        "Web File Upload",
-        "Upload local files in session (if bridge supports it).",
-        runtime,
-        runtimeMeta,
-        ["paths"],
-        ["session_id", "selector"]
       )
     );
     api.registerTool(createTavilySearchTool(runtime, runtimeMeta));

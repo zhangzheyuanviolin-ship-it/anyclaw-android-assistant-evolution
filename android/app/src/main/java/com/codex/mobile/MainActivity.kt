@@ -271,7 +271,8 @@ class MainActivity : AppCompatActivity() {
         }
         updateStatus("proot ready")
 
-        // Step 1c: Prepare resilient package manager scripts/wrappers.
+        // Step 1c: Repair apt trust chain, then prepare resilient package manager scripts/wrappers.
+        serverManager.ensureAptTrustChain()
         serverManager.ensurePackageRecoveryScripts()
         serverManager.ensurePackageManagerWrappers()
 

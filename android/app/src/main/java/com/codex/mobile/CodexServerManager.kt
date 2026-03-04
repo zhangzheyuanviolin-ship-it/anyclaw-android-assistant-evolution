@@ -28,6 +28,7 @@ class CodexServerManager(private val context: Context) {
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
+        private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
     }
 
@@ -956,6 +957,7 @@ H3
         }
 
         ensureAnyClawSearchPlugin(paths.homeDir)
+        ensureAnyClawGithubPlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
@@ -972,9 +974,27 @@ H3
             searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.3")
         }
 
+        val githubSuiteEntry = ensureObject(entries, ANYCLAW_GITHUB_PLUGIN_ID)
+        githubSuiteEntry.put("enabled", true)
+        val githubSuiteConfig = ensureObject(githubSuiteEntry, "config")
+        if (!githubSuiteConfig.has("timeoutSeconds")) githubSuiteConfig.put("timeoutSeconds", 35)
+        if (!githubSuiteConfig.has("githubApiBaseUrl")) githubSuiteConfig.put("githubApiBaseUrl", "https://api.github.com")
+        if (!githubSuiteConfig.has("allowTerminal")) githubSuiteConfig.put("allowTerminal", true)
+        if (!githubSuiteConfig.has("terminalTimeoutMs")) githubSuiteConfig.put("terminalTimeoutMs", 30000)
+        if (!githubSuiteConfig.has("workspaceRoot")) githubSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
+        val githubUa = githubSuiteConfig.optString("userAgent", "").trim()
+        if (githubUa.isEmpty() || githubUa.startsWith("AnyClawGithubSuite/0.")) {
+            githubSuiteConfig.put("userAgent", "AnyClawGithubSuite/1.0")
+        }
+
         val allow = plugins.optJSONArray("allow")
-        if (allow != null && allow.length() > 0 && !jsonArrayContains(allow, ANYCLAW_SEARCH_PLUGIN_ID)) {
-            allow.put(ANYCLAW_SEARCH_PLUGIN_ID)
+        if (allow != null && allow.length() > 0) {
+            if (!jsonArrayContains(allow, ANYCLAW_SEARCH_PLUGIN_ID)) {
+                allow.put(ANYCLAW_SEARCH_PLUGIN_ID)
+            }
+            if (!jsonArrayContains(allow, ANYCLAW_GITHUB_PLUGIN_ID)) {
+                allow.put(ANYCLAW_GITHUB_PLUGIN_ID)
+            }
         }
 
         configFile.writeText(root.toString(2))
@@ -1857,6 +1877,57 @@ WEOF
         }
     }
 
+    fun ensureAptTrustChain() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd = """
+            set +e
+            prefix="${paths.prefixDir}"
+            key_dir="${paths.prefixDir}/etc/apt/trusted.gpg.d"
+            legacy_dir="${paths.prefixDir}/etc/apt/trusted.gpg.d.legacy"
+            key_file="${paths.prefixDir}/etc/apt/trusted.gpg.d/termux-main-5a897d96e57cf20c.asc"
+            key_url="https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5A897D96E57CF20C"
+            mkdir -p "${'$'}key_dir" "${'$'}legacy_dir" "${paths.prefixDir}/tmp" 2>/dev/null || true
+
+            download_ok=0
+            if [ -s "${'$'}key_file" ] && grep -q "BEGIN PGP PUBLIC KEY BLOCK" "${'$'}key_file" 2>/dev/null; then
+              download_ok=1
+            else
+              if command -v curl >/dev/null 2>&1; then
+                if curl -fsSL "${'$'}key_url" -o "${'$'}key_file"; then
+                  download_ok=1
+                fi
+              elif command -v wget >/dev/null 2>&1; then
+                if wget -qO "${'$'}key_file" "${'$'}key_url"; then
+                  download_ok=1
+                fi
+              fi
+            fi
+
+            if [ "${'$'}download_ok" -eq 1 ] && grep -q "BEGIN PGP PUBLIC KEY BLOCK" "${'$'}key_file" 2>/dev/null; then
+              chmod 600 "${'$'}key_file" 2>/dev/null || true
+              for old in "${'$'}key_dir"/*.gpg; do
+                [ -e "${'$'}old" ] || continue
+                base="${'$'}(basename "${'$'}old")"
+                mv -f "${'$'}old" "${'$'}legacy_dir/${'$'}base" 2>/dev/null || true
+              done
+            fi
+
+            if [ -x "${paths.prefixDir}/bin/apt.real" ]; then
+              "${paths.prefixDir}/bin/apt.real" update >/dev/null 2>&1 || true
+            fi
+
+            echo "apt-trust-chain-ready"
+            exit 0
+        """.trimIndent()
+
+        val code = runInPrefix(cmd)
+        if (code == 0) {
+            Log.i(TAG, "APT trust chain repaired")
+        } else {
+            Log.w(TAG, "APT trust chain repair returned $code")
+        }
+    }
+
     fun ensurePackageRecoveryScripts() {
         val paths = BootstrapInstaller.getPaths(context)
         val cmd = """
@@ -2601,6 +2672,23 @@ EOF
         }
     }
 
+    private fun ensureAnyClawGithubPlugin(homeDir: String) {
+        val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_GITHUB_PLUGIN_ID")
+        if (!pluginRoot.exists()) {
+            pluginRoot.mkdirs()
+        }
+        val manifestFile = File(pluginRoot, "openclaw.plugin.json")
+        val indexFile = File(pluginRoot, "index.ts")
+        val manifestChanged = writeAssetIfChanged(
+            "plugins/$ANYCLAW_GITHUB_PLUGIN_ID/openclaw.plugin.json",
+            manifestFile,
+        )
+        val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_GITHUB_PLUGIN_ID/index.ts", indexFile)
+        if (manifestChanged || indexChanged) {
+            Log.i(TAG, "Installed/updated plugin $ANYCLAW_GITHUB_PLUGIN_ID at $pluginRoot")
+        }
+    }
+
     private fun writeAssetIfChanged(assetPath: String, target: File): Boolean {
         return try {
             val bytes = context.assets.open(assetPath).use { it.readBytes() }
@@ -2655,7 +2743,7 @@ EOF
             "GIT_EXEC_PATH" to "${paths.prefixDir}/libexec/git-core",
             "GIT_TEMPLATE_DIR" to "${paths.prefixDir}/share/git-core/templates",
             "OPENSSL_CONF" to "${paths.prefixDir}/etc/tls/openssl.cnf",
-            "NODE_OPTIONS" to "--openssl-config=${paths.prefixDir}/etc/tls/openssl.cnf --unhandled-rejections=warn$bionicCompatOpt",
+            "NODE_OPTIONS" to "--openssl-config=${paths.prefixDir}/etc/tls/openssl.cnf --unhandled-rejections=none$bionicCompatOpt",
             "CONTAINER" to "1",
         )
 

@@ -1,0 +1,37 @@
+{
+  "id": "anyclaw-github-suite",
+  "name": "AnyClaw GitHub Suite",
+  "description": "GitHub REST tools with local apply_file and terminal helpers for AnyClaw.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "githubApiBaseUrl": {
+        "type": "string"
+      },
+      "githubToken": {
+        "type": "string"
+      },
+      "timeoutSeconds": {
+        "type": "number",
+        "minimum": 5,
+        "maximum": 120
+      },
+      "userAgent": {
+        "type": "string"
+      },
+      "allowTerminal": {
+        "type": "boolean"
+      },
+      "terminalTimeoutMs": {
+        "type": "number",
+        "minimum": 1000,
+        "maximum": 120000
+      },
+      "workspaceRoot": {
+        "type": "string"
+      }
+    }
+  }
+}
