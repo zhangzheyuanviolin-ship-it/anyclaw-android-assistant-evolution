@@ -965,6 +965,7 @@ H3
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
+        if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
@@ -1853,6 +1854,371 @@ WEOF
             Log.i(TAG, "Shared-storage bridge initialized")
         } else {
             Log.w(TAG, "Shared-storage bridge init returned code $code")
+        }
+    }
+
+    fun ensurePackageRecoveryScripts() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd = """
+            workspace="${paths.homeDir}/.openclaw/workspace"
+            scripts="${paths.homeDir}/.openclaw/workspace/scripts"
+            state_dir="${paths.prefixDir}/var/lib/anyclaw-manual"
+            mkdir -p "${'$'}workspace" "${'$'}scripts" "${'$'}state_dir" "${paths.prefixDir}/tmp" 2>/dev/null || true
+
+            cat > "${'$'}scripts/manual-deb-manager.sh" <<'EOF'
+#!/system/bin/sh
+set -eu
+
+PREFIX="${PREFIX:-__PREFIX__}"
+HOME_DIR="${HOME:-__HOME__}"
+WORK="${HOME_DIR}/.openclaw/workspace/.tmp_deb"
+STATE_DIR="${PREFIX}/var/lib/anyclaw-manual"
+APT_REAL="${PREFIX}/bin/apt.real"
+DPKG_DEB="${PREFIX}/bin/dpkg-deb"
+
+mkdir -p "${WORK}" "${STATE_DIR}" "${PREFIX}" 2>/dev/null || true
+
+if [ ! -x "${APT_REAL}" ]; then
+  APT_REAL="${PREFIX}/bin/apt"
+fi
+if [ ! -x "${DPKG_DEB}" ]; then
+  DPKG_DEB="${PREFIX}/bin/dpkg-deb"
+fi
+
+safe_rel() {
+  rel="${1#./}"
+  case "${rel}" in
+    ""|/*|".."|../*|*/..|*/../*) return 1 ;;
+    *) printf "%s\n" "${rel}"; return 0 ;;
+  esac
+}
+
+install_pkg() {
+  pkg="${1:-}"
+  [ -n "${pkg}" ] || return 1
+  (
+    cd "${WORK}"
+    "${APT_REAL}" download "${pkg}" >/dev/null
+  ) || return 1
+
+  deb="$(ls -1t "${WORK}/${pkg}"_*.deb 2>/dev/null | head -n 1 || true)"
+  [ -n "${deb}" ] || return 1
+
+  stage="$(mktemp -d "${WORK}/stage.${pkg}.XXXXXX")"
+  cleanup() {
+    rm -rf "${stage}" 2>/dev/null || true
+  }
+  trap cleanup EXIT INT TERM
+
+  "${DPKG_DEB}" -x "${deb}" "${stage}" >/dev/null 2>&1 || return 1
+
+  payload="${stage}/data/data/com.termux/files/usr"
+  if [ ! -d "${payload}" ]; then
+    payload="${stage}/usr"
+  fi
+  [ -d "${payload}" ] || return 1
+
+  manifest_tmp="${STATE_DIR}/${pkg}.files.tmp"
+  manifest="${STATE_DIR}/${pkg}.files"
+  : > "${manifest_tmp}"
+  paths_file="${stage}/.paths.list"
+  find "${payload}" -mindepth 1 -print | sort > "${paths_file}"
+  while IFS= read -r path; do
+    rel="$(safe_rel "${path#${payload}/}")" || continue
+    printf "%s\n" "${rel}" >> "${manifest_tmp}"
+  done < "${paths_file}"
+
+  cp -a "${payload}"/. "${PREFIX}"/
+  mv "${manifest_tmp}" "${manifest}"
+  printf "%s\n" "manual_install_ok ${pkg}"
+  trap - EXIT INT TERM
+  cleanup
+  return 0
+}
+
+remove_pkg() {
+  pkg="${1:-}"
+  [ -n "${pkg}" ] || return 1
+  manifest="${STATE_DIR}/${pkg}.files"
+  [ -f "${manifest}" ] || return 1
+
+  tmp_sorted="${manifest}.sorted"
+  awk '{ print length, ${'$'}0 }' "${manifest}" | sort -rn | cut -d' ' -f2- > "${tmp_sorted}"
+  while IFS= read -r rel; do
+    [ -n "${rel}" ] || continue
+    target="${PREFIX}/${rel}"
+    if [ -L "${target}" ] || [ -f "${target}" ]; then
+      rm -f "${target}" 2>/dev/null || true
+    elif [ -d "${target}" ]; then
+      rmdir "${target}" 2>/dev/null || true
+    fi
+  done < "${tmp_sorted}"
+  rm -f "${tmp_sorted}" "${manifest}" 2>/dev/null || true
+  printf "%s\n" "manual_remove_ok ${pkg}"
+  return 0
+}
+
+status_pkg() {
+  pkg="${1:-}"
+  [ -n "${pkg}" ] || return 1
+  manifest="${STATE_DIR}/${pkg}.files"
+  if [ -f "${manifest}" ]; then
+    count="$(wc -l < "${manifest}" 2>/dev/null | tr -d ' ')"
+    printf "Package: %s\nStatus: install ok installed (manual)\nFiles: %s\n" "${pkg}" "${count}"
+    return 0
+  fi
+  return 1
+}
+
+list_pkgs() {
+  found=0
+  for f in "${STATE_DIR}"/*.files; do
+    [ -f "${f}" ] || continue
+    found=1
+    basename "${f}" .files
+  done
+  [ "${found}" -eq 1 ] || printf "%s\n" "(no manual packages)"
+}
+
+cmd="${1:-}"
+if [ -z "${cmd}" ]; then
+  printf "%s\n" "Usage: manual-deb-manager.sh <install|remove|status|list> ..."
+  exit 2
+fi
+shift || true
+
+case "${cmd}" in
+  install|add)
+    [ "${'$'}#" -gt 0 ] || exit 2
+    failed=0
+    for pkg in "${'$'}@"; do
+      install_pkg "${pkg}" || failed=1
+    done
+    [ "${failed}" -eq 0 ] || exit 1
+    ;;
+  remove|purge|uninstall)
+    [ "${'$'}#" -gt 0 ] || exit 2
+    failed=0
+    for pkg in "${'$'}@"; do
+      remove_pkg "${pkg}" || failed=1
+    done
+    [ "${failed}" -eq 0 ] || exit 1
+    ;;
+  status)
+    [ "${'$'}#" -eq 1 ] || exit 2
+    status_pkg "${'$'}1" || exit 1
+    ;;
+  list)
+    list_pkgs
+    ;;
+  *)
+    printf "%s\n" "Unsupported command: ${cmd}"
+    exit 2
+    ;;
+esac
+EOF
+
+            sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/manual-deb-manager.sh"
+            sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/manual-deb-manager.sh"
+            chmod 700 "${'$'}scripts/manual-deb-manager.sh" 2>/dev/null || true
+            echo "package-recovery-scripts-ready"
+        """.trimIndent()
+
+        val code = runInPrefix(cmd)
+        if (code == 0) {
+            Log.i(TAG, "Package recovery scripts are ready")
+        } else {
+            Log.w(TAG, "Package recovery script install returned $code")
+        }
+    }
+
+    fun ensurePackageManagerWrappers() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd = """
+            set -e
+            prefix="${paths.prefixDir}"
+            home_dir="${paths.homeDir}"
+
+            make_real() {
+              tool="${'$'}1"
+              target="${'$'}prefix/bin/${'$'}tool"
+              real="${'$'}prefix/bin/${'$'}tool.real"
+              if [ ! -f "${'$'}real" ] && [ -f "${'$'}target" ]; then
+                mv "${'$'}target" "${'$'}real"
+              fi
+            }
+
+            write_common_wrapper() {
+              tool="${'$'}1"
+              target="${'$'}prefix/bin/${'$'}tool"
+              cat > "${'$'}target" <<'EOF'
+#!/system/bin/sh
+set -eu
+PREFIX="__PREFIX__"
+HOME_DIR="__HOME__"
+TOOL="__TOOL__"
+REAL="${'$'}{PREFIX}/bin/${'$'}{TOOL}.real"
+MANAGER="${'$'}{HOME_DIR}/.openclaw/workspace/scripts/manual-deb-manager.sh"
+EXTERNAL="/sdcard/Download/CodexExports/termux_pkg_repair.sh"
+BASH_BIN="${'$'}{PREFIX}/bin/bash"
+
+export PREFIX="${'$'}PREFIX"
+export HOME="${'$'}HOME_DIR"
+export PATH="${'$'}PREFIX/bin:${'$'}PREFIX/bin/applets:/system/bin"
+export LD_LIBRARY_PATH="${'$'}PREFIX/lib"
+export TMPDIR="${'$'}PREFIX/tmp"
+export APT_CONFIG="${'$'}PREFIX/etc/apt/apt.conf"
+export DPKG_ADMINDIR="${'$'}PREFIX/var/lib/dpkg"
+
+if [ ! -x "${'$'}REAL" ]; then
+  echo "Missing real command: ${'$'}REAL" >&2
+  exit 127
+fi
+
+first_non_option() {
+  for arg in "${'$'}@"; do
+    case "${'$'}arg" in
+      -*) continue ;;
+      *) printf "%s\n" "${'$'}arg"; return 0 ;;
+    esac
+  done
+  printf "\n"
+}
+
+collect_packages_after_verb() {
+  seen=0
+  for arg in "${'$'}@"; do
+    if [ "${'$'}seen" -eq 0 ]; then
+      case "${'$'}arg" in
+        -*) continue ;;
+        *) seen=1; continue ;;
+      esac
+    fi
+    case "${'$'}arg" in
+      -*) continue ;;
+      *) printf "%s\n" "${'$'}arg" ;;
+    esac
+  done
+}
+
+run_external_repair() {
+  if [ -x "${'$'}BASH_BIN" ] && [ -f "${'$'}EXTERNAL" ] && [ "${'$'}#" -gt 0 ]; then
+    "${'$'}BASH_BIN" "${'$'}EXTERNAL" "${'$'}@"
+    return "${'$'}?"
+  fi
+  return 1
+}
+
+verb="__VERB__"
+if [ "${'$'}verb" = "pkg" ]; then
+  action="${'$'}{1:-}"
+  case "${'$'}action" in
+    install|add)
+      shift || true
+      [ "${'$'}#" -gt 0 ] || { echo "No packages provided" >&2; exit 2; }
+      if [ -x "${'$'}MANAGER" ] && "${'$'}MANAGER" install "${'$'}@"; then
+        exit 0
+      fi
+      run_external_repair "${'$'}@" && exit 0
+      exit 1
+      ;;
+    remove|uninstall|purge)
+      shift || true
+      [ "${'$'}#" -gt 0 ] || { echo "No packages provided" >&2; exit 2; }
+      if [ -x "${'$'}MANAGER" ]; then
+        exec "${'$'}MANAGER" remove "${'$'}@"
+      fi
+      exit 1
+      ;;
+    list-installed)
+      if [ -x "${'$'}MANAGER" ]; then
+        "${'$'}MANAGER" list || true
+      fi
+      exec "${'$'}REAL" "${'$'}@"
+      ;;
+    *)
+      exec "${'$'}REAL" "${'$'}@"
+      ;;
+  esac
+fi
+
+if [ "${'$'}verb" = "dpkg" ]; then
+  action="${'$'}{1:-}"
+  case "${'$'}action" in
+    --version|-V|-v)
+      "${'$'}REAL" "${'$'}@" 2>/dev/null || printf "dpkg (manual compatibility wrapper)\n"
+      exit 0
+      ;;
+    -s|--status)
+      pkg="${'$'}{2:-}"
+      if [ -n "${'$'}pkg" ] && [ -x "${'$'}MANAGER" ] && "${'$'}MANAGER" status "${'$'}pkg" >/dev/null 2>&1; then
+        exec "${'$'}MANAGER" status "${'$'}pkg"
+      fi
+      exec "${'$'}REAL" "${'$'}@"
+      ;;
+    -r|--remove|--purge|-P)
+      shift || true
+      [ "${'$'}#" -gt 0 ] || exit 2
+      if [ -x "${'$'}MANAGER" ]; then
+        exec "${'$'}MANAGER" remove "${'$'}@"
+      fi
+      exit 1
+      ;;
+    *)
+      exec "${'$'}REAL" "${'$'}@"
+      ;;
+  esac
+fi
+
+action="$(first_non_option "${'$'}@")"
+case "${'$'}action" in
+  install|add|reinstall)
+    pkgs="$(collect_packages_after_verb "${'$'}@")"
+    [ -n "${'$'}pkgs" ] || { echo "No packages provided" >&2; exit 2; }
+    set -- ${'$'}pkgs
+    if [ -x "${'$'}MANAGER" ] && "${'$'}MANAGER" install "${'$'}@"; then
+      exit 0
+    fi
+    run_external_repair "${'$'}@" && exit 0
+    exit 1
+    ;;
+  remove|purge|uninstall)
+    pkgs="$(collect_packages_after_verb "${'$'}@")"
+    [ -n "${'$'}pkgs" ] || { echo "No packages provided" >&2; exit 2; }
+    set -- ${'$'}pkgs
+    if [ -x "${'$'}MANAGER" ]; then
+      exec "${'$'}MANAGER" remove "${'$'}@"
+    fi
+    exit 1
+    ;;
+  *)
+    exec "${'$'}REAL" "${'$'}@"
+    ;;
+esac
+EOF
+              sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}target"
+              sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}target"
+              sed -i "s#__TOOL__#${'$'}tool#g" "${'$'}target"
+              sed -i "s#__VERB__#${'$'}tool#g" "${'$'}target"
+              chmod 700 "${'$'}target"
+            }
+
+            make_real apt
+            make_real apt-get
+            make_real dpkg
+            make_real pkg
+            write_common_wrapper apt
+            write_common_wrapper apt-get
+            write_common_wrapper dpkg
+            write_common_wrapper pkg
+            echo "package-manager-wrappers-ready"
+        """.trimIndent()
+
+        val code = runInPrefix(cmd)
+        if (code == 0) {
+            Log.i(TAG, "Package manager wrappers are ready")
+        } else {
+            Log.w(TAG, "Package manager wrapper install returned $code")
         }
     }
 

@@ -1,4 +1,5 @@
 import { jsonResult, readNumberParam, readStringParam } from "openclaw/plugin-sdk";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,7 @@ type RuntimeConfig = {
   maxResults: number;
   maxChars: number;
   userAgent: string;
+  webBridgeUrl: string;
   tavilyApiKey?: string;
   tavilyBaseUrl: string;
 };
@@ -66,6 +68,7 @@ const DEFAULT_MAX_RESULTS = 6;
 const DEFAULT_MAX_CHARS = 12000;
 const MAX_RESULTS = 10;
 const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.3";
+const DEFAULT_WEB_BRIDGE_URL = "http://127.0.0.1:18926/web/call";
 const DEFAULT_TAVILY_BASE_URL = "https://api.tavily.com/search";
 
 const SEARCH_ENGINES = {
@@ -1043,6 +1046,328 @@ function createHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   };
 }
 
+function isSafeHttpUrl(raw: string): boolean {
+  return /^https?:\/\//i.test(raw.trim());
+}
+
+async function runSystemShell(
+  args: string[],
+  timeoutMs: number
+): Promise<{ ok: boolean; code: number; stdout: string; stderr: string; error?: string }> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let done = false;
+
+    const child = spawn("system-shell", args, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+      resolve({
+        ok: false,
+        code: -1,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        error: "system_shell_timeout"
+      });
+    }, Math.max(3000, timeoutMs));
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+    child.on("error", (error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({
+        ok: false,
+        code: -1,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        error: String(error)
+      });
+    });
+    child.on("close", (code) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({
+        ok: code === 0,
+        code: typeof code === "number" ? code : -1,
+        stdout: stdout.trim(),
+        stderr: stderr.trim()
+      });
+    });
+  });
+}
+
+function createOpenInSystemBrowserTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
+  return {
+    label: "AnyClaw Open In System Browser",
+    name: "anyclaw_open_in_system_browser",
+    description: "Open a URL in Android system browser via Shizuku-backed system-shell channel.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["url"],
+      properties: {
+        url: {
+          type: "string",
+          description: "Target URL, must start with http:// or https://"
+        },
+        packageName: {
+          type: "string",
+          description: "Optional browser package name"
+        }
+      }
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const url = readStringParam(args, "url", { required: true }).trim();
+      const packageName = (readStringParam(args, "packageName") || "").trim();
+      if (!isSafeHttpUrl(url)) {
+        return jsonResult(withMeta({
+          ok: false,
+          tool: "open_in_system_browser",
+          error: "invalid_url_scheme",
+          message: "url must start with http:// or https://"
+        }, meta));
+      }
+
+      const shellArgs = ["am", "start", "-a", "android.intent.action.VIEW", "-d", url];
+      if (packageName) {
+        shellArgs.push("-p", packageName);
+      }
+
+      const startedAt = Date.now();
+      const run = await runSystemShell(shellArgs, runtime.timeoutMs);
+      const result = {
+        ok: run.ok,
+        tool: "open_in_system_browser",
+        url,
+        packageName: packageName || undefined,
+        exitCode: run.code,
+        tookMs: Date.now() - startedAt,
+        stdout: run.stdout,
+        stderr: run.stderr,
+        error: run.error
+      };
+      return jsonResult(withMeta(result, meta));
+    }
+  };
+}
+
+async function callWebBridge(method: string, params: Record<string, unknown>, runtime: RuntimeConfig): Promise<Record<string, unknown>> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), runtime.timeoutMs);
+  try {
+    const response = await fetch(runtime.webBridgeUrl, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": runtime.userAgent
+      },
+      body: JSON.stringify({
+        method,
+        params
+      })
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        method,
+        error: "web_bridge_http_" + String(response.status),
+        detail: raw.slice(0, 800)
+      };
+    }
+    const parsed = JSON.parse(raw || "{}");
+    if (!parsed || typeof parsed !== "object") {
+      return {
+        ok: false,
+        method,
+        error: "web_bridge_invalid_json",
+        detail: String(raw).slice(0, 800)
+      };
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    return {
+      ok: false,
+      method,
+      error: String(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function createStartWebTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
+  return {
+    label: "Web Start",
+    name: "start_web",
+    description: "Start a persistent web session.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        url: { type: "string" },
+        user_agent: { type: "string" },
+        session_name: { type: "string" },
+        headersJson: { type: "string" }
+      }
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const headersRaw = readStringParam(args, "headersJson");
+      let headers: Record<string, string> = {};
+      if (headersRaw && headersRaw.trim()) {
+        try {
+          const parsed = JSON.parse(headersRaw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            for (const [k, v] of Object.entries(parsed)) {
+              if (typeof v === "string") headers[k] = v;
+            }
+          }
+        } catch {
+          headers = {};
+        }
+      }
+      const result = await callWebBridge("start_web", {
+        url: readStringParam(args, "url"),
+        user_agent: readStringParam(args, "user_agent"),
+        session_name: readStringParam(args, "session_name"),
+        headers
+      }, runtime);
+      return jsonResult(withMeta(result, meta));
+    }
+  };
+}
+
+function createStopWebTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
+  return {
+    label: "Web Stop",
+    name: "stop_web",
+    description: "Stop one session or all web sessions.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        session_id: { type: "string" },
+        close_all: { type: "boolean" }
+      }
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const result = await callWebBridge("stop_web", {
+        session_id: readStringParam(args, "session_id"),
+        close_all: !!args.close_all
+      }, runtime);
+      return jsonResult(withMeta(result, meta));
+    }
+  };
+}
+
+function createWebBridgeSimpleTool(
+  name: string,
+  label: string,
+  description: string,
+  runtime: RuntimeConfig,
+  meta: PluginRuntimeMeta,
+  required: string[],
+  optional: string[]
+) {
+  const numberKeys = new Set(["timeout_ms", "max_chars"]);
+  const booleanKeys = new Set(["include_links", "include_images", "close_all"]);
+  const arrayKeys = new Set(["paths"]);
+  const allKeys = [...required, ...optional];
+  const properties = Object.fromEntries(
+    allKeys.map((key) => {
+      if (numberKeys.has(key)) return [key, { type: "number" }];
+      if (booleanKeys.has(key)) return [key, { type: "boolean" }];
+      if (arrayKeys.has(key)) return [key, { type: "array", items: { type: "string" } }];
+      return [key, { type: "string" }];
+    })
+  );
+
+  return {
+    label,
+    name,
+    description,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required,
+      properties
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const params: Record<string, unknown> = {};
+      for (const key of allKeys) {
+        const raw = (args as Record<string, unknown>)[key];
+        if (raw === undefined) continue;
+        if (key === "headersJson") {
+          if (typeof raw === "string" && raw.trim()) {
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                params.headers = parsed;
+              }
+            } catch {
+              // ignore invalid headers JSON
+            }
+          }
+          continue;
+        }
+        if (numberKeys.has(key)) {
+          const n = readNumberParam(args, key, { integer: true });
+          if (n !== undefined) {
+            if (key === "max_chars") params[key] = clampNumber(n, 1000, 80000);
+            else params[key] = clampNumber(n, 1000, 60000);
+          }
+          continue;
+        }
+        if (booleanKeys.has(key)) {
+          const text = String(raw ?? "").toLowerCase().trim();
+          params[key] = raw === true || text === "true" || text === "1" || text === "yes";
+          continue;
+        }
+        if (arrayKeys.has(key)) {
+          if (Array.isArray(raw)) {
+            params[key] = raw.map((item) => String(item));
+          } else if (typeof raw === "string" && raw.trim()) {
+            try {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) {
+                params[key] = parsed.map((item) => String(item));
+              }
+            } catch {
+              // ignore invalid array payload
+            }
+          }
+          continue;
+        }
+        const value = readStringParam(args, key, { required: false, allowEmpty: true });
+        if (value !== undefined) params[key] = value;
+      }
+      const result = await callWebBridge(name, params, runtime);
+      return jsonResult(withMeta(result, meta));
+    }
+  };
+}
+
 function resolveTavilyApiKey(config: RuntimeConfig): string | null {
   const key = (config.tavilyApiKey || "").trim();
   if (!key) return null;
@@ -1243,6 +1568,10 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     ? cfg.userAgent.trim()
     : DEFAULT_USER_AGENT;
 
+  const webBridgeUrl = typeof cfg.webBridgeUrl === "string" && cfg.webBridgeUrl.trim()
+    ? cfg.webBridgeUrl.trim()
+    : DEFAULT_WEB_BRIDGE_URL;
+
   const tavilyApiKey = typeof cfg.tavilyApiKey === "string" && cfg.tavilyApiKey.trim()
     ? cfg.tavilyApiKey.trim()
     : undefined;
@@ -1256,6 +1585,7 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     maxResults,
     maxChars,
     userAgent,
+    webBridgeUrl,
     tavilyApiKey,
     tavilyBaseUrl
   };
@@ -1316,6 +1646,97 @@ export default {
     api.registerTool(createMultiSearchTool(runtime, runtimeMeta));
     api.registerTool(createVisitTool(runtime, runtimeMeta));
     api.registerTool(createHttpTool(runtime, runtimeMeta));
+    api.registerTool(createOpenInSystemBrowserTool(runtime, runtimeMeta));
+    api.registerTool(createStartWebTool(runtime, runtimeMeta));
+    api.registerTool(createStopWebTool(runtime, runtimeMeta));
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_navigate",
+        "Web Navigate",
+        "Navigate an existing web session to a URL.",
+        runtime,
+        runtimeMeta,
+        ["url"],
+        ["session_id", "headersJson"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_eval",
+        "Web Eval",
+        "Execute JavaScript in an active web session.",
+        runtime,
+        runtimeMeta,
+        ["script"],
+        ["session_id", "timeout_ms"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_click",
+        "Web Click",
+        "Click an element by aria-ref in an active web session.",
+        runtime,
+        runtimeMeta,
+        ["ref"],
+        ["session_id"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_fill",
+        "Web Fill",
+        "Fill an input using CSS selector in an active web session.",
+        runtime,
+        runtimeMeta,
+        ["selector", "value"],
+        ["session_id"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_wait_for",
+        "Web Wait For",
+        "Wait for page readiness or selector appearance.",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "selector", "timeout_ms"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_snapshot",
+        "Web Snapshot",
+        "Capture page text, refs, links and optional images.",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "include_links", "include_images", "max_chars"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_content",
+        "Web Content",
+        "Extract readable content from the active session page.",
+        runtime,
+        runtimeMeta,
+        [],
+        ["session_id", "include_links", "include_images", "max_chars"]
+      )
+    );
+    api.registerTool(
+      createWebBridgeSimpleTool(
+        "web_file_upload",
+        "Web File Upload",
+        "Upload local files in session (if bridge supports it).",
+        runtime,
+        runtimeMeta,
+        ["paths"],
+        ["session_id", "selector"]
+      )
+    );
     api.registerTool(createTavilySearchTool(runtime, runtimeMeta));
   }
 };
