@@ -1447,11 +1447,11 @@ EOF
 
             const existing = jobs.find((j) => j && j.name === NAME);
             if (!existing) {
-              run(`openclaw cron add --name ${NAME} --every 20m --system-event ${JSON.stringify(PROMPT)} --wake now --json`);
+              run('openclaw cron add --name ' + NAME + ' --every 20m --system-event ' + JSON.stringify(PROMPT) + ' --wake now --json');
             } else {
               const id = existing.id || existing.jobId || existing.key;
               if (id) {
-                run(`openclaw cron edit ${id} --every 20m --system-event ${JSON.stringify(PROMPT)} --enable --wake now`);
+                run('openclaw cron edit ' + id + ' --every 20m --system-event ' + JSON.stringify(PROMPT) + ' --enable --wake now');
               }
             }
 
