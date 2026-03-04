@@ -370,20 +370,9 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Codex authenticated")
         }
 
-        // Step 7: Configure and start OpenClaw
-        if (serverManager.isOpenClawInstalled()) {
-            updateStatus("Running OpenClaw preflight…")
-            serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
-
-            updateStatus("Configuring OpenClaw…")
-            serverManager.configureOpenClawAuth()
-
-            updateStatus("Starting OpenClaw gateway…")
-            serverManager.startOpenClawGateway()
-
-            updateStatus("Starting OpenClaw Control UI…")
-            serverManager.startOpenClawControlUiServer()
-        }
+        // Step 7: Start OpenClaw services in background so Codex chat page remains
+        // available even if gateway/bootstrap has a transient failure.
+        startOpenClawServicesAsync()
 
         // Step 8: Start web server
         updateStatus("Starting server…")
@@ -413,6 +402,36 @@ class MainActivity : AppCompatActivity() {
             startGatewayStatusMonitor()
             webView.loadUrl(consumeLaunchUrlOrDefault())
         }
+    }
+
+    private fun startOpenClawServicesAsync() {
+        if (!serverManager.isOpenClawInstalled()) return
+        Thread {
+            try {
+                updateStatus("Running OpenClaw preflight…")
+                serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
+
+                updateStatus("Configuring OpenClaw…")
+                serverManager.configureOpenClawAuth()
+
+                updateStatus("Starting OpenClaw gateway…")
+                val gatewayOk = serverManager.startOpenClawGateway()
+                if (!gatewayOk) {
+                    Log.w(TAG, "OpenClaw gateway did not become responsive")
+                }
+
+                updateStatus("Starting OpenClaw Control UI…")
+                serverManager.startOpenClawControlUiServer()
+            } catch (error: Exception) {
+                Log.e(TAG, "OpenClaw async startup failed", error)
+            } finally {
+                runOnUiThread {
+                    if (webView.visibility == View.VISIBLE) {
+                        refreshGatewayStatusAsync(announce = true)
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun consumeLaunchUrlOrDefault(): String {

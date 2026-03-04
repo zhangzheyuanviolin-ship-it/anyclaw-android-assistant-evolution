@@ -937,7 +937,12 @@ H3
             model.put("primary", "openai-codex/gpt-5.3-codex")
         }
         val heartbeat = ensureObject(defaults, "heartbeat")
-        heartbeat.put("enabled", true)
+        // OpenClaw 2026.3.2 schema does not accept "enabled" in defaults.heartbeat.
+        // Keep only supported fields and auto-clean legacy invalid keys to prevent
+        // gateway startup from failing with "Invalid config".
+        if (heartbeat.has("enabled")) {
+            heartbeat.remove("enabled")
+        }
         heartbeat.put("every", "20m")
         if (heartbeat.optString("target", "").isBlank()) {
             heartbeat.put("target", "none")
@@ -1199,10 +1204,15 @@ H3
             Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
         }.start()
 
-        Thread.sleep(5000)
-        ensureHeartbeatBootstrap()
-        Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
-        return true
+        Thread.sleep(1200)
+        if (isOpenClawGatewayResponsive()) {
+            ensureHeartbeatBootstrap()
+            Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
+            return true
+        }
+
+        Log.w(TAG, "OpenClaw gateway process launched but not responsive yet")
+        return false
     }
 
     /**
