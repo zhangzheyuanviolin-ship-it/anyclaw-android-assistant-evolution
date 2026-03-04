@@ -1992,17 +1992,17 @@ case "${'$'}{cmd}" in
     [ "${'$'}#" -gt 0 ] || exit 2
     failed=0
     for pkg in "${'$'}@"; do
-      install_pkg "${pkg}" || failed=1
+      install_pkg "${'$'}{pkg}" || failed=1
     done
-    [ "${failed}" -eq 0 ] || exit 1
+    [ "${'$'}{failed}" -eq 0 ] || exit 1
     ;;
   remove|purge|uninstall)
     [ "${'$'}#" -gt 0 ] || exit 2
     failed=0
     for pkg in "${'$'}@"; do
-      remove_pkg "${pkg}" || failed=1
+      remove_pkg "${'$'}{pkg}" || failed=1
     done
-    [ "${failed}" -eq 0 ] || exit 1
+    [ "${'$'}{failed}" -eq 0 ] || exit 1
     ;;
   status)
     [ "${'$'}#" -eq 1 ] || exit 2
