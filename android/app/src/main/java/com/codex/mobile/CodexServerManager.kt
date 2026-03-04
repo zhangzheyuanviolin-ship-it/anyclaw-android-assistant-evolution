@@ -30,6 +30,7 @@ class CodexServerManager(private val context: Context) {
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
+        private const val ANYCLAW_RUNTIME_PLUGIN_ID = "anyclaw-runtime-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
     }
 
@@ -935,6 +936,18 @@ H3
             // Keep legacy default for first install only; never override existing user model choice.
             model.put("primary", "openai-codex/gpt-5.3-codex")
         }
+        val heartbeat = ensureObject(defaults, "heartbeat")
+        heartbeat.put("enabled", true)
+        heartbeat.put("every", "20m")
+        if (heartbeat.optString("target", "").isBlank()) {
+            heartbeat.put("target", "none")
+        }
+        if (heartbeat.optString("prompt", "").isBlank()) {
+            heartbeat.put(
+                "prompt",
+                "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.",
+            )
+        }
 
         val memorySearch = ensureObject(defaults, "memorySearch")
         if (memorySearch.optString("provider", "").isBlank()) {
@@ -960,6 +973,7 @@ H3
         ensureAnyClawSearchPlugin(paths.homeDir)
         ensureAnyClawGithubPlugin(paths.homeDir)
         ensureAnyClawDevicePlugin(paths.homeDir)
+        ensureAnyClawRuntimePlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
@@ -996,6 +1010,27 @@ H3
         if (!deviceSuiteConfig.has("screenshotDir")) deviceSuiteConfig.put("screenshotDir", "/sdcard/Download/AnyClawShots")
         if (!deviceSuiteConfig.has("uiDumpPath")) deviceSuiteConfig.put("uiDumpPath", "/sdcard/Download/AnyClawShots/ui_dump.xml")
         if (!deviceSuiteConfig.has("maxUiNodes")) deviceSuiteConfig.put("maxUiNodes", 180)
+        if (!deviceSuiteConfig.has("inputVerifyReadback")) deviceSuiteConfig.put("inputVerifyReadback", false)
+        if (!deviceSuiteConfig.has("inputImePriority")) {
+            deviceSuiteConfig.put(
+                "inputImePriority",
+                JSONArray()
+                    .put("com.android.adbkeyboard/.AdbIME")
+                    .put("com.kevinluo.autoglm/.input.AutoGLMKeyboardService"),
+            )
+        }
+
+        val runtimeSuiteEntry = ensureObject(entries, ANYCLAW_RUNTIME_PLUGIN_ID)
+        runtimeSuiteEntry.put("enabled", true)
+        val runtimeSuiteConfig = ensureObject(runtimeSuiteEntry, "config")
+        if (!runtimeSuiteConfig.has("timeoutSeconds")) runtimeSuiteConfig.put("timeoutSeconds", 30)
+        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
+        if (!runtimeSuiteConfig.has("runtimeDoctorPath")) {
+            runtimeSuiteConfig.put(
+                "runtimeDoctorPath",
+                "${paths.homeDir}/.openclaw/workspace/scripts/runtime-env-doctor.sh",
+            )
+        }
 
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0) {
@@ -1008,10 +1043,14 @@ H3
             if (!jsonArrayContains(allow, ANYCLAW_DEVICE_PLUGIN_ID)) {
                 allow.put(ANYCLAW_DEVICE_PLUGIN_ID)
             }
+            if (!jsonArrayContains(allow, ANYCLAW_RUNTIME_PLUGIN_ID)) {
+                allow.put(ANYCLAW_RUNTIME_PLUGIN_ID)
+            }
         }
 
         configFile.writeText(root.toString(2))
         Log.i(TAG, "Updated OpenClaw config at $configFile")
+        ensureRuntimeDoctorScripts()
         ensureMainSessionIndexHealthy()
 
         // Copy the Codex access_token into OpenClaw's auth-profiles.json.
@@ -1406,6 +1445,9 @@ H3
             mkdir -p "${'$'}HOME/.openclaw/workspace" "${'$'}HOME/.openclaw-android/state"
             HB_FILE="${'$'}HOME/.openclaw/workspace/HEARTBEAT.md"
             DEFAULT_PROMPT="Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."
+            STATE_DIR="${'$'}HOME/.openclaw-android/state"
+            JOB_NAME="anyclaw-heartbeat-main"
+            EVERY="20m"
 
             if [ ! -f "${'$'}HB_FILE" ] || [ -z "${'$'}(grep -Ev '^[[:space:]]*(#|$)' "${'$'}HB_FILE" 2>/dev/null)" ]; then
               cat > "${'$'}HB_FILE" <<'EOF'
@@ -1417,50 +1459,99 @@ H3
 EOF
             fi
 
-            for i in 1 2 3 4; do
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
               openclaw gateway call health --json --params '{}' >/dev/null 2>&1 && break
-              sleep 1
+              sleep 2
             done
 
             node <<'NODE'
             const { execSync } = require('child_process');
+            const fs = require('fs');
+            const path = require('path');
             function run(cmd) {
               try {
-                return execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-              } catch (_) {
-                return null;
+                const out = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+                return { ok: true, out: String(out || '').trim(), err: '', code: 0 };
+              } catch (error) {
+                const stdout = error && error.stdout ? String(error.stdout) : '';
+                const stderr = error && error.stderr ? String(error.stderr) : '';
+                return {
+                  ok: false,
+                  out: stdout.trim(),
+                  err: stderr.trim(),
+                  code: typeof error?.status === 'number' ? error.status : 1
+                };
               }
             }
+            const stateDir = path.join(process.env.HOME || '', '.openclaw-android', 'state');
+            fs.mkdirSync(stateDir, { recursive: true });
             const NAME = 'anyclaw-heartbeat-main';
+            const EVERY = '20m';
             const PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.';
+            const summary = {
+              name: NAME,
+              every: EVERY,
+              configuredAt: new Date().toISOString(),
+              attempts: [],
+              final: {}
+            };
 
-            run('openclaw system heartbeat enable --json');
+            summary.attempts.push({ step: 'heartbeat_enable', result: run('openclaw system heartbeat enable --json') });
 
-            let jobs = [];
-            try {
-              const listRaw = run('openclaw cron list --json') || '{}';
-              const parsed = JSON.parse(listRaw);
-              jobs = Array.isArray(parsed.jobs) ? parsed.jobs : [];
-            } catch (_) {
-              jobs = [];
-            }
-
-            const existing = jobs.find((j) => j && j.name === NAME);
-            if (!existing) {
-              run('openclaw cron add --name ' + NAME + ' --every 20m --system-event ' + JSON.stringify(PROMPT) + ' --wake now --json');
-            } else {
-              const id = existing.id || existing.jobId || existing.key;
-              if (id) {
-                run('openclaw cron edit ' + id + ' --every 20m --system-event ' + JSON.stringify(PROMPT) + ' --enable --wake now');
+            function parseJobs(rawObj) {
+              try {
+                const parsed = JSON.parse(rawObj?.out || '{}');
+                return Array.isArray(parsed.jobs) ? parsed.jobs : [];
+              } catch (_) {
+                return [];
               }
             }
 
-            run('openclaw cron status --json');
-            NODE
+            function findByName(jobs) {
+              return jobs.find((j) => j && j.name === NAME);
+            }
 
-            openclaw cron list --json > "${'$'}HOME/.openclaw-android/state/cron-jobs.json" 2>/dev/null
-            openclaw cron status --json > "${'$'}HOME/.openclaw-android/state/cron-status.json" 2>/dev/null
-            openclaw system heartbeat last --json > "${'$'}HOME/.openclaw-android/state/heartbeat-last.json" 2>/dev/null
+            let jobsRaw = run('openclaw cron list --json');
+            let jobs = parseJobs(jobsRaw);
+            let job = findByName(jobs);
+            if (!job) {
+              summary.attempts.push({
+                step: 'cron_add',
+                result: run('openclaw cron add --name ' + NAME + ' --every ' + EVERY + ' --system-event ' + JSON.stringify(PROMPT) + ' --wake now --json')
+              });
+              jobsRaw = run('openclaw cron list --json');
+              jobs = parseJobs(jobsRaw);
+              job = findByName(jobs);
+            }
+
+            if (job) {
+              const id = job.id || job.jobId || job.key;
+              if (id) {
+                summary.attempts.push({
+                  step: 'cron_edit',
+                  result: run('openclaw cron edit ' + id + ' --every ' + EVERY + ' --system-event ' + JSON.stringify(PROMPT) + ' --enable --wake now')
+                });
+              }
+            }
+
+            const cronList = run('openclaw cron list --json');
+            const cronStatus = run('openclaw cron status --json');
+            const hbLast = run('openclaw system heartbeat last --json');
+            const health = run('openclaw gateway call health --json --params ' + JSON.stringify({}));
+
+            summary.final = {
+              cronListOk: cronList.ok,
+              cronStatusOk: cronStatus.ok,
+              heartbeatLastOk: hbLast.ok,
+              healthOk: health.ok
+            };
+
+            fs.writeFileSync(path.join(stateDir, 'cron-jobs.json'), (cronList.out || '{}') + '\n', 'utf8');
+            fs.writeFileSync(path.join(stateDir, 'cron-status.json'), (cronStatus.out || '{}') + '\n', 'utf8');
+            fs.writeFileSync(path.join(stateDir, 'heartbeat-last.json'), (hbLast.out || '{}') + '\n', 'utf8');
+            fs.writeFileSync(path.join(stateDir, 'heartbeat-bootstrap.json'), JSON.stringify(summary, null, 2) + '\n', 'utf8');
+            console.log(JSON.stringify(summary));
+            NODE
             """.trimIndent()
         runInPrefix(script) { Log.d(TAG, "[openclaw-heartbeat] $it") }
     }
@@ -2373,6 +2464,170 @@ EOF
         }
     }
 
+    fun ensureRuntimeDoctorScripts() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd = """
+            workspace="${paths.homeDir}/.openclaw/workspace"
+            scripts="${paths.homeDir}/.openclaw/workspace/scripts"
+            state_dir="${paths.homeDir}/.openclaw-android/state"
+            mkdir -p "${'$'}workspace" "${'$'}scripts" "${'$'}state_dir" "${paths.prefixDir}/tmp" 2>/dev/null || true
+
+            cat > "${'$'}scripts/runtime-env-doctor.sh" <<'EOF'
+#!/system/bin/sh
+set -eu
+
+PREFIX="${'$'}{PREFIX:-__PREFIX__}"
+HOME_DIR="${'$'}{HOME:-__HOME__}"
+STATE_DIR="${'$'}HOME_DIR/.openclaw-android/state"
+OUT_JSON="${'$'}STATE_DIR/runtime-health.json"
+PROBE=0
+REPAIR=0
+AGGRESSIVE=0
+
+while [ "${'$'}#" -gt 0 ]; do
+  case "${'$'}1" in
+    --probe) PROBE=1 ;;
+    --repair) REPAIR=1 ;;
+    --aggressive) AGGRESSIVE=1 ;;
+    --json) ;;
+  esac
+  shift || true
+done
+
+mkdir -p "${'$'}STATE_DIR" "${'$'}PREFIX/tmp" 2>/dev/null || true
+
+py="${'$'}PREFIX/bin/python3"
+if [ ! -x "${'$'}py" ] && [ -x "${'$'}PREFIX/bin/python" ]; then
+  py="${'$'}PREFIX/bin/python"
+fi
+
+repair_prefix() {
+  [ -x "${'$'}py" ] || return 0
+  "${'$'}py" - <<'PY'
+import os
+from pathlib import Path
+
+OLD = b"/data/data/com.termux"
+NEW = b"/data/user/0/com.codex.mobile.beta"
+
+roots = [
+    Path("/data/user/0/com.codex.mobile.beta/files/usr/bin"),
+    Path("/data/user/0/com.codex.mobile.beta/files/usr/libexec"),
+    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/scripts"),
+    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/.git/hooks"),
+]
+
+patched = 0
+busy = 0
+failed = 0
+for root in roots:
+    if not root.exists():
+        continue
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+        except Exception:
+            failed += 1
+            continue
+        if OLD not in data:
+            continue
+        if not (data.startswith(b"#!") or b"com.termux/files/usr" in data[:8192]):
+            continue
+        new_data = data.replace(OLD, NEW)
+        if new_data == data:
+            continue
+        try:
+            path.write_bytes(new_data)
+            patched += 1
+        except OSError as e:
+            if getattr(e, "errno", None) == 26:
+                busy += 1
+            else:
+                failed += 1
+
+print(f"patched={patched} busy={busy} failed={failed}")
+PY
+}
+
+probe_toolchain() {
+  echo "openclaw=$(command -v openclaw || true)"
+  echo "python3=$(command -v python3 || true)"
+  echo "pip=$(command -v pip || command -v pip3 || true)"
+  echo "apt=$(command -v apt || true)"
+  echo "dpkg=$(command -v dpkg || true)"
+  echo "pkg=$(command -v pkg || true)"
+  echo "prefix=${'$'}PREFIX"
+  echo "home=${'$'}HOME_DIR"
+}
+
+probe_mcp_python() {
+  [ -x "${'$'}py" ] || { echo "python_missing"; return 0; }
+  "${'$'}py" - <<'PY'
+mods = ["duckduckgo_mcp_server.server"]
+ok = []
+missing = []
+for mod in mods:
+    try:
+        __import__(mod)
+        ok.append(mod)
+    except Exception:
+        missing.append(mod)
+print("python_modules_ok=" + ",".join(ok))
+print("python_modules_missing=" + ",".join(missing))
+PY
+}
+
+repair_python_modules() {
+  [ -x "${'$'}py" ] || return 0
+  pip_bin="${'$'}PREFIX/bin/pip"
+  [ -x "${'$'}pip_bin" ] || pip_bin="${'$'}PREFIX/bin/pip3"
+  [ -x "${'$'}pip_bin" ] || return 0
+  "${'$'}py" - <<'PY'
+try:
+    import duckduckgo_mcp_server.server  # noqa:F401
+    print("duckduckgo_mcp_server=ok")
+except Exception:
+    print("duckduckgo_mcp_server=missing")
+PY
+  "${'$'}pip_bin" install --no-input --disable-pip-version-check duckduckgo-mcp-server >/dev/null 2>&1 || true
+}
+
+report="$(
+  {
+    if [ "${'$'}REPAIR" -eq 1 ]; then
+      repair_prefix
+      repair_python_modules
+    fi
+    probe_toolchain
+    probe_mcp_python
+  } 2>&1
+)"
+
+escaped="$(printf "%s" "${'$'}report" | sed 's/\\/\\\\/g; s/\"/\\"/g')"
+ts="$(date -Iseconds 2>/dev/null || date)"
+printf '{\"ok\":true,\"probe\":%s,\"repair\":%s,\"aggressive\":%s,\"timestamp\":\"%s\",\"report\":\"%s\"}\n' \
+  "${'$'}PROBE" "${'$'}REPAIR" "${'$'}AGGRESSIVE" "${'$'}ts" "${'$'}escaped" > "${'$'}OUT_JSON"
+cat "${'$'}OUT_JSON"
+exit 0
+EOF
+
+            sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
+            sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
+            chmod 700 "${'$'}scripts/runtime-env-doctor.sh" 2>/dev/null || true
+            "${'$'}scripts/runtime-env-doctor.sh" --probe --json > "${'$'}state_dir/runtime-health.json" 2>/dev/null || true
+            echo "runtime-doctor-ready"
+        """.trimIndent()
+
+        val code = runInPrefix(cmd)
+        if (code == 0) {
+            Log.i(TAG, "Runtime doctor scripts are ready")
+        } else {
+            Log.w(TAG, "Runtime doctor script install returned $code")
+        }
+    }
+
     fun ensureShizukuBridgeScripts() {
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
@@ -2783,6 +3038,23 @@ EOF
         val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_DEVICE_PLUGIN_ID/index.ts", indexFile)
         if (manifestChanged || indexChanged) {
             Log.i(TAG, "Installed/updated plugin $ANYCLAW_DEVICE_PLUGIN_ID at $pluginRoot")
+        }
+    }
+
+    private fun ensureAnyClawRuntimePlugin(homeDir: String) {
+        val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_RUNTIME_PLUGIN_ID")
+        if (!pluginRoot.exists()) {
+            pluginRoot.mkdirs()
+        }
+        val manifestFile = File(pluginRoot, "openclaw.plugin.json")
+        val indexFile = File(pluginRoot, "index.ts")
+        val manifestChanged = writeAssetIfChanged(
+            "plugins/$ANYCLAW_RUNTIME_PLUGIN_ID/openclaw.plugin.json",
+            manifestFile,
+        )
+        val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_RUNTIME_PLUGIN_ID/index.ts", indexFile)
+        if (manifestChanged || indexChanged) {
+            Log.i(TAG, "Installed/updated plugin $ANYCLAW_RUNTIME_PLUGIN_ID at $pluginRoot")
         }
     }
 

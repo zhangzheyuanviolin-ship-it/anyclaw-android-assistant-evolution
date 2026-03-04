@@ -1,0 +1,23 @@
+{
+  "id": "anyclaw-runtime-suite",
+  "name": "AnyClaw Runtime Suite",
+  "description": "Runtime health, prefix repair, and Codex MCP diagnostics for AnyClaw/OpenClaw.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "timeoutSeconds": {
+        "type": "number",
+        "minimum": 5,
+        "maximum": 180
+      },
+      "codexApiBaseUrl": {
+        "type": "string"
+      },
+      "runtimeDoctorPath": {
+        "type": "string"
+      }
+    }
+  }
+}

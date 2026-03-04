@@ -2,7 +2,7 @@
   "id": "anyclaw-device-suite",
   "name": "AnyClaw Device Suite",
   "description": "Shizuku-first Android device automation tools: screenshot, UI coordinates, tap/swipe/text/keyevent, and app navigation.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -22,6 +22,15 @@
         "type": "number",
         "minimum": 20,
         "maximum": 400
+      },
+      "inputImePriority": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "inputVerifyReadback": {
+        "type": "boolean"
       }
     }
   }
