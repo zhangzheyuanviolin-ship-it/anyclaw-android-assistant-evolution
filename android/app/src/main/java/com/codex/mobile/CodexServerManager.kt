@@ -900,6 +900,7 @@ H3
         } else {
             JSONObject()
         }
+        sanitizeHeartbeatDefaults(root)
 
         val meta = ensureObject(root, "meta")
         meta.put("lastTouchedVersion", getInstalledOpenClawVersion() ?: OPENCLAW_TARGET_VERSION)
@@ -1155,6 +1156,7 @@ H3
         }
 
         val paths = BootstrapInstaller.getPaths(context)
+        sanitizeHeartbeatConfigOnDisk(paths.homeDir)
 
         // Kill any orphaned gateway processes and reset all device tokens.
         runInPrefix("""
@@ -1495,6 +1497,7 @@ EOF
             }
             const stateDir = path.join(process.env.HOME || '', '.openclaw-android', 'state');
             fs.mkdirSync(stateDir, { recursive: true });
+            const configPath = path.join(process.env.HOME || '', '.openclaw', 'openclaw.json');
             const NAME = 'anyclaw-heartbeat-main';
             const EVERY = '20m';
             const PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.';
@@ -1506,7 +1509,38 @@ EOF
               final: {}
             };
 
-            summary.attempts.push({ step: 'heartbeat_enable', result: run('openclaw system heartbeat enable --json') });
+            function sanitizeConfig() {
+              try {
+                if (!fs.existsSync(configPath)) {
+                  return { ok: true, changed: false, reason: 'config_missing' };
+                }
+                const raw = fs.readFileSync(configPath, 'utf8');
+                const parsed = JSON.parse(raw || '{}');
+                const hb = (((parsed || {}).agents || {}).defaults || {}).heartbeat;
+                if (!hb || typeof hb !== 'object') {
+                  return { ok: true, changed: false, reason: 'heartbeat_missing' };
+                }
+                if (!Object.prototype.hasOwnProperty.call(hb, 'enabled')) {
+                  return { ok: true, changed: false, reason: 'already_clean' };
+                }
+                delete hb.enabled;
+                fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2));
+                return { ok: true, changed: true };
+              } catch (error) {
+                return { ok: false, changed: false, error: String(error) };
+              }
+            }
+
+            summary.attempts.push({ step: 'heartbeat_config_sanitize', result: sanitizeConfig() });
+
+            let hbEnable = run('openclaw system heartbeat enable --json');
+            summary.attempts.push({ step: 'heartbeat_enable', result: hbEnable });
+            const hbErr = ((hbEnable.err || '') + '\n' + (hbEnable.out || '')).toLowerCase();
+            if (!hbEnable.ok && hbErr.includes('unrecognized key') && hbErr.includes('heartbeat') && hbErr.includes('enabled')) {
+              summary.attempts.push({ step: 'heartbeat_config_sanitize_retry', result: sanitizeConfig() });
+              hbEnable = run('openclaw system heartbeat enable --json');
+              summary.attempts.push({ step: 'heartbeat_enable_retry', result: hbEnable });
+            }
 
             function parseJobs(rawObj) {
               try {
@@ -2327,6 +2361,15 @@ if [ ! -x "${'$'}REAL" ]; then
   exit 127
 fi
 
+if [ "${'$'}TOOL" = "apt" ] || [ "${'$'}TOOL" = "apt-get" ] || [ "${'$'}TOOL" = "pkg" ]; then
+  case "${'$'}{1:-}" in
+    --version|-v)
+      "${'$'}REAL" "${'$'}@" 2>/dev/null || printf "%s (manual compatibility wrapper)\n" "${'$'}TOOL"
+      exit 0
+      ;;
+  esac
+fi
+
 first_non_option() {
   for arg in "${'$'}@"; do
     case "${'$'}arg" in
@@ -2397,7 +2440,7 @@ fi
 if [ "${'$'}verb" = "dpkg" ]; then
   action="${'$'}{1:-}"
   case "${'$'}action" in
-    --version|-V|-v)
+    --version|-v)
       "${'$'}REAL" "${'$'}@" 2>/dev/null || printf "dpkg (manual compatibility wrapper)\n"
       exit 0
       ;;
@@ -2572,20 +2615,31 @@ probe_toolchain() {
   echo "home=${'$'}HOME_DIR"
 }
 
-probe_mcp_python() {
-  [ -x "${'$'}py" ] || { echo "python_missing"; return 0; }
+probe_python_modules() {
+  [ -x "${'$'}py" ] || { echo "python_available=0"; return 0; }
+  echo "python_available=1"
   "${'$'}py" - <<'PY'
-mods = ["duckduckgo_mcp_server.server"]
-ok = []
-missing = []
-for mod in mods:
+import importlib
+
+required = ["json", "ssl"]
+optional = ["duckduckgo_mcp_server.server"]
+required_missing = []
+optional_unavailable = []
+
+for mod in required:
     try:
-        __import__(mod)
-        ok.append(mod)
+        importlib.import_module(mod)
     except Exception:
-        missing.append(mod)
-print("python_modules_ok=" + ",".join(ok))
-print("python_modules_missing=" + ",".join(missing))
+        required_missing.append(mod)
+
+for mod in optional:
+    try:
+        importlib.import_module(mod)
+    except Exception:
+        optional_unavailable.append(mod)
+
+print("python_blocking_missing=" + ",".join(required_missing))
+print("python_optional_unavailable=" + ",".join(optional_unavailable))
 PY
 }
 
@@ -2594,13 +2648,6 @@ repair_python_modules() {
   pip_bin="${'$'}PREFIX/bin/pip"
   [ -x "${'$'}pip_bin" ] || pip_bin="${'$'}PREFIX/bin/pip3"
   [ -x "${'$'}pip_bin" ] || return 0
-  "${'$'}py" - <<'PY'
-try:
-    import duckduckgo_mcp_server.server  # noqa:F401
-    print("duckduckgo_mcp_server=ok")
-except Exception:
-    print("duckduckgo_mcp_server=missing")
-PY
   "${'$'}pip_bin" install --no-input --disable-pip-version-check duckduckgo-mcp-server >/dev/null 2>&1 || true
 }
 
@@ -2611,7 +2658,7 @@ report="$(
       repair_python_modules
     fi
     probe_toolchain
-    probe_mcp_python
+    probe_python_modules
   } 2>&1
 )"
 
@@ -2899,6 +2946,28 @@ EOF
         val created = JSONObject()
         parent.put(key, created)
         return created
+    }
+
+    private fun sanitizeHeartbeatDefaults(root: JSONObject): Boolean {
+        val agents = root.optJSONObject("agents") ?: return false
+        val defaults = agents.optJSONObject("defaults") ?: return false
+        val heartbeat = defaults.optJSONObject("heartbeat") ?: return false
+        if (!heartbeat.has("enabled")) return false
+        heartbeat.remove("enabled")
+        return true
+    }
+
+    private fun sanitizeHeartbeatConfigOnDisk(homeDir: String): Boolean {
+        val cfgFile = File(homeDir, ".openclaw/openclaw.json")
+        if (!cfgFile.exists()) return false
+        return runCatching {
+            val root = JSONObject(cfgFile.readText())
+            val changed = sanitizeHeartbeatDefaults(root)
+            if (changed) {
+                cfgFile.writeText(root.toString(2))
+            }
+            changed
+        }.getOrDefault(false)
     }
 
     private fun getInstalledOpenClawVersion(): String? {
