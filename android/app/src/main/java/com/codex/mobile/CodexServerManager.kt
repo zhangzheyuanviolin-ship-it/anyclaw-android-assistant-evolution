@@ -1151,7 +1151,6 @@ H3
         val env = buildEnvironment(paths)
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
-        val forcedGatewayUrlLiteral = JSONObject.quote("ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT")
 
         if (!File(controlUiRoot).exists()) {
             Log.w(TAG, "OpenClaw control-ui directory not found at $controlUiRoot")
@@ -1181,36 +1180,11 @@ H3
                 '.ico':'image/x-icon',
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
+              const localGatewayUrl = 'ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT';
               function injectBootstrap(html) {
-                const earlySnippet = '<script>(function(){try{' +
-                  'var params=new URLSearchParams(location.search);' +
-                  'var forcedGatewayUrl=$forcedGatewayUrlLiteral;' +
-                  'var forcedGatewayToken=' + JSON.stringify(gatewayToken || '') + ';' +
-                  'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
-                  'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
-                  'var nav=(navigator.language||\"\").toLowerCase();' +
-                  'var systemLocale=nav.indexOf(\"zh\")===0?\"zh-CN\":\"en\";' +
-                  'var locale=(pref===\"system\")?systemLocale:(pref===\"zh-CN\"?\"zh-CN\":\"en\");' +
-                  'localStorage.setItem(\"openclaw.i18n.locale\",locale);' +
-                  'var settingsKey=\"openclaw.control.settings.v1\";' +
-                  'var settings={};' +
-                  'try{settings=JSON.parse(localStorage.getItem(settingsKey)||\"{}\");}catch(_){}' +
-                  'if(!settings||typeof settings!==\"object\"){settings={};}' +
-                  'settings.gatewayUrl=forcedGatewayUrl;' +
-                  'if(forcedGatewayToken){settings.token=forcedGatewayToken;}' +
-                  'var sessionFromUrl=params.get(\"session\");' +
-                  'if(sessionFromUrl&&sessionFromUrl.trim()){settings.sessionKey=sessionFromUrl.trim();settings.lastActiveSessionKey=sessionFromUrl.trim();}' +
-                  'if(typeof settings.chatFocusMode!==\"boolean\"){settings.chatFocusMode=true;}' +
-                  'if(typeof settings.navCollapsed!==\"boolean\"){settings.navCollapsed=true;}' +
-                  'settings.locale=locale;' +
-                  'settings.theme=settings.theme||\"system\";' +
-                  'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
-                  '}catch(_){}})();</' + 'script>';
                 const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
                   'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
-                  'var forcedGatewayUrl=$forcedGatewayUrlLiteral;' +
-                  'var forcedGatewayToken=' + JSON.stringify(gatewayToken || '') + ';' +
                   'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
                   'var nav=(navigator.language||\"\").toLowerCase();' +
                   'var systemLocale=nav.indexOf(\"zh\")===0?\"zh-CN\":\"en\";' +
@@ -1222,8 +1196,6 @@ H3
                   'if(!settings||typeof settings!==\"object\"){settings={};}' +
                   'if(typeof settings.chatFocusMode!==\"boolean\"){settings.chatFocusMode=true;}' +
                   'if(typeof settings.navCollapsed!==\"boolean\"){settings.navCollapsed=true;}' +
-                  'settings.gatewayUrl=forcedGatewayUrl;' +
-                  'if(forcedGatewayToken){settings.token=forcedGatewayToken;}' +
                   'var sessionFromUrl=params.get(\"session\");' +
                   'if(sessionFromUrl&&sessionFromUrl.trim()){settings.sessionKey=sessionFromUrl.trim();settings.lastActiveSessionKey=sessionFromUrl.trim();}' +
                   'settings.locale=locale;' +
@@ -1231,7 +1203,7 @@ H3
                   'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
                   'var isZh=locale===\"zh-CN\";' +
                   'function replaceFirstTextNode(el,next){if(!el){return;}for(var i=0;i<el.childNodes.length;i++){var n=el.childNodes[i];if(n&&n.nodeType===3){n.nodeValue=\" \"+next+\" \";return;}}if(!el.children||el.children.length===0){el.textContent=next;}}' +
-                  'function normalizeSpace(text){var s=(text||\"\").replaceAll(\"\\n\",\" \").replaceAll(\"\\t\",\" \");while(s.indexOf(\"  \")>=0){s=s.replaceAll(\"  \",\" \");}return s.trim();}' +
+                  'function normalizeSpace(text){var s=(text||\"\");return s.replace(/\\s+/g,\" \").trim();}' +
                   'function localizeStatic(){if(!isZh){return;}var map={\"New session\":\"新建会话\",\"Send\":\"发送\",\"Queue\":\"排队发送\",\"Stop\":\"停止\",\"Connect\":\"连接\",\"Refresh\":\"刷新\",\"Exit focus mode\":\"退出专注模式\"};document.querySelectorAll(\"button\").forEach(function(btn){var raw=normalizeSpace(btn.textContent||\"\");if(map[raw]){replaceFirstTextNode(btn,map[raw]);}var aria=normalizeSpace(btn.getAttribute(\"aria-label\")||\"\");if(map[aria]){btn.setAttribute(\"aria-label\",map[aria]);}if(aria===\"Remove queued message\"){btn.setAttribute(\"aria-label\",\"移除排队消息\");}var title=normalizeSpace(btn.getAttribute(\"title\")||\"\");if(map[title]){btn.setAttribute(\"title\",map[title]);}});document.querySelectorAll(\"textarea\").forEach(function(el){var p=normalizeSpace(el.getAttribute(\"placeholder\")||\"\");if(p.indexOf(\"Message\")===0){el.setAttribute(\"placeholder\",\"输入消息（回车发送，Shift+回车换行，可粘贴图片）\");}});document.querySelectorAll(\".muted\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t===\"Loading chat…\"){el.textContent=\"正在加载聊天…\";}});document.querySelectorAll(\".chat-queue__title\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Queued (\")===0&&t.endsWith(\")\")){el.textContent=\"排队（\"+t.slice(8,t.length-1)+\"）\";}});document.querySelectorAll(\".chat-new-messages\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"New messages\")===0){el.textContent=\"新消息\";}});}' +
                   'function makeSessionKey(current){var now=Date.now().toString(36);var key=(current||\"main\").trim();if(key.indexOf(\"agent:\")===0){var parts=key.split(\":\");var agent=(parts.length>1&&parts[1])?parts[1]:\"main\";return \"agent:\"+agent+\":mobile-\"+now;}return \"mobile-\"+now;}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
@@ -1242,18 +1214,39 @@ H3
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
                   '}catch(_){}})();</' + 'script>';
-                let patchedHtml = html;
-                if (patchedHtml.includes('<script type=\"module\"')) {
-                  patchedHtml = patchedHtml.replace('<script type=\"module\"', earlySnippet + '<script type=\"module\"');
-                } else if (patchedHtml.includes('</head>')) {
-                  patchedHtml = patchedHtml.replace('</head>', earlySnippet + '</head>');
-                } else {
-                  patchedHtml = earlySnippet + patchedHtml;
+                if (html.includes('</body>')) {
+                  return html.replace('</body>', snippet + '</body>');
                 }
-                if (patchedHtml.includes('</body>')) {
-                  return patchedHtml.replace('</body>', snippet + '</body>');
+                return html + snippet;
+              }
+              function ensureChatBootstrapUrl(reqUrl) {
+                try {
+                  const urlObj = new URL(reqUrl || '/', 'http://127.0.0.1');
+                  const rawPath = decodeURIComponent(urlObj.pathname || '/');
+                  const normalizedPath = rawPath.endsWith('/') && rawPath.length > 1 ? rawPath.slice(0, -1) : rawPath;
+                  if (normalizedPath !== '/' && normalizedPath !== '/index.html' && normalizedPath !== '/chat') return null;
+                  let changed = false;
+                  if (!urlObj.searchParams.get('gatewayUrl')) {
+                    urlObj.searchParams.set('gatewayUrl', localGatewayUrl);
+                    changed = true;
+                  }
+                  if (!urlObj.searchParams.get('simple')) {
+                    urlObj.searchParams.set('simple', '1');
+                    changed = true;
+                  }
+                  if (gatewayToken && !urlObj.searchParams.get('token')) {
+                    urlObj.searchParams.set('token', gatewayToken);
+                    changed = true;
+                  }
+                  if (normalizedPath === '/' || normalizedPath === '/index.html') {
+                    urlObj.pathname = '/chat';
+                    changed = true;
+                  }
+                  if (!changed) return null;
+                  return urlObj.pathname + (urlObj.search || '') + (urlObj.hash || '');
+                } catch (_) {
+                  return null;
                 }
-                return patchedHtml + snippet;
               }
               function sendStatic(res, filePath, data) {
                 const ext = path.extname(filePath);
@@ -1268,6 +1261,12 @@ H3
                 res.end(data);
               }
               http.createServer((req, res) => {
+                const redirectTarget = ensureChatBootstrapUrl(req.url || '/');
+                if (redirectTarget) {
+                  res.writeHead(302, { 'Location': redirectTarget, 'Cache-Control': 'no-store' });
+                  res.end();
+                  return;
+                }
                 let pathname = '/';
                 try {
                   const parsed = new URL(req.url || '/', 'http://127.0.0.1');
