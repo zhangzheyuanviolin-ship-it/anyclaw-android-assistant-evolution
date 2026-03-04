@@ -3,6 +3,7 @@ package com.codex.mobile
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +15,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.webkit.ConsoleMessage
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -61,6 +63,9 @@ class MainActivity : AppCompatActivity() {
     private var gatewayConnected = false
     private var gatewayStatusChecking = false
     private var pendingLaunchUrl: String? = null
+    private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
+    private var openClawWatchdogRunnable: Runnable? = null
+    private var openClawRecoveryAttempts = 0
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -168,6 +173,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        cancelOpenClawWatchdog()
         stopGatewayStatusMonitor()
         shizukuBridgeServer?.stop()
         shizukuBridgeServer = null
@@ -219,12 +225,45 @@ class MainActivity : AppCompatActivity() {
             allowFileAccess = false
             setSupportZoom(false)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+        }
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 url: String,
             ): Boolean = false
+
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                if (!isOpenClawChatUrl(url)) {
+                    openClawRecoveryAttempts = 0
+                }
+                cancelOpenClawWatchdog()
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                scheduleOpenClawWatchdog(url)
+            }
+
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                Log.e(
+                    TAG,
+                    "WebView renderer gone didCrash=${detail.didCrash()} priority=${detail.rendererPriorityAtExit()}",
+                )
+                runOnUiThread {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "页面渲染异常，正在自动恢复到可用状态",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    pendingLaunchUrl = "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
+                    recreate()
+                }
+                return true
+            }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -233,6 +272,77 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         }
+    }
+
+    private fun isOpenClawChatUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        return url.contains(":${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}") &&
+            (url.contains("/chat") || url.contains("/index.html"))
+    }
+
+    private fun cancelOpenClawWatchdog() {
+        val r = openClawWatchdogRunnable ?: return
+        openClawWatchdogHandler.removeCallbacks(r)
+        openClawWatchdogRunnable = null
+    }
+
+    private fun scheduleOpenClawWatchdog(url: String?) {
+        cancelOpenClawWatchdog()
+        if (!isOpenClawChatUrl(url)) return
+        if (openClawRecoveryAttempts >= 2) return
+
+        val runnable = Runnable {
+            if (!isOpenClawChatUrl(webView.url)) return@Runnable
+            val js =
+                """
+                (function(){
+                  try{
+                    var hasComposer=!!document.querySelector('textarea');
+                    var bodyText=((document.body&&document.body.innerText)||'').slice(0,1200);
+                    var stuck=/Loading chat|正在加载聊天/.test(bodyText);
+                    return (hasComposer?'1':'0') + '|' + (stuck?'1':'0');
+                  }catch(_){
+                    return '0|0';
+                  }
+                })();
+                """.trimIndent()
+            webView.evaluateJavascript(js) { raw ->
+                val normalized = (raw ?: "").replace("\"", "")
+                val hasComposer = normalized.startsWith("1|")
+                val stuck = normalized.endsWith("|1")
+                if (!hasComposer && stuck) {
+                    triggerOpenClawSafeRecovery(url)
+                } else if (hasComposer) {
+                    openClawRecoveryAttempts = 0
+                }
+            }
+        }
+        openClawWatchdogRunnable = runnable
+        val delayMs = if (openClawRecoveryAttempts == 0) 9000L else 13000L
+        openClawWatchdogHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun triggerOpenClawSafeRecovery(originalUrl: String?) {
+        if (openClawRecoveryAttempts >= 2) return
+        openClawRecoveryAttempts += 1
+        Toast.makeText(this, "检测到聊天页卡住，正在自动降载恢复", Toast.LENGTH_SHORT).show()
+        webView.evaluateJavascript(
+            "(function(){try{localStorage.setItem('anyclaw.chat.history.limit','20');localStorage.setItem('anyclaw.chat.render.limit','20');}catch(_){}})();",
+            null,
+        )
+
+        val fallback = "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat"
+        val parsed = Uri.parse(originalUrl ?: fallback)
+        val builder = parsed.buildUpon().clearQuery()
+        for (name in parsed.queryParameterNames) {
+            if (name == "historyLimit" || name == "recovery") continue
+            for (value in parsed.getQueryParameters(name)) {
+                builder.appendQueryParameter(name, value)
+            }
+        }
+        builder.appendQueryParameter("historyLimit", "20")
+        builder.appendQueryParameter("recovery", openClawRecoveryAttempts.toString())
+        webView.loadUrl(builder.build().toString())
     }
 
     private fun startSetupFlow() {

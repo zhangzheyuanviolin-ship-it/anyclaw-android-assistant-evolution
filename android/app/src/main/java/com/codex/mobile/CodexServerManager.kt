@@ -32,6 +32,11 @@ class CodexServerManager(private val context: Context) {
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
         private const val ANYCLAW_RUNTIME_PLUGIN_ID = "anyclaw-runtime-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
+        private const val OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT = 60
+        private const val OPENCLAW_CHAT_HISTORY_LIMIT_STEP = 40
+        private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
+        private const val OPENCLAW_CHAT_HISTORY_LIMIT_MAX = 400
+        private const val OPENCLAW_CHAT_HISTORY_MAX_BYTES = 1 * 1024 * 1024
     }
 
     private var serverProcess: Process? = null
@@ -1133,6 +1138,58 @@ H3
     }
 
     /**
+     * Keep gateway chat history payload bounded on mobile to reduce ANR risk on
+     * large transcripts. We patch all gateway-cli bundles shipped with OpenClaw
+     * because hashed filenames may vary across updates.
+     */
+    private fun ensureOpenClawGatewayHistoryByteCap() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val distDir = File(paths.prefixDir, "lib/node_modules/openclaw/dist")
+        if (!distDir.exists()) return
+
+        val script = """
+            node <<'NODE'
+            const fs = require('fs');
+            const path = require('path');
+            const dist = ${"'" + distDir.absolutePath + "'"};
+            let scanned = 0;
+            let changed = 0;
+            try {
+              const files = fs.readdirSync(dist).filter((name) => /^gateway-cli-.*\.js$/.test(name));
+              for (const file of files) {
+                const full = path.join(dist, file);
+                let text = fs.readFileSync(full, 'utf8');
+                scanned += 1;
+                const next = text.replace(
+                  /const DEFAULT_MAX_CHAT_HISTORY_MESSAGES_BYTES\s*=\s*\d+\s*\*\s*1024\s*\*\s*1024;/,
+                  'const DEFAULT_MAX_CHAT_HISTORY_MESSAGES_BYTES = ${OPENCLAW_CHAT_HISTORY_MAX_BYTES};',
+                );
+                if (next !== text) {
+                  fs.writeFileSync(full, next, 'utf8');
+                  changed += 1;
+                }
+              }
+              console.log('gateway-history-cap scanned=' + scanned + ' changed=' + changed);
+            } catch (error) {
+              console.log('gateway-history-cap error=' + String(error));
+            }
+            NODE
+        """.trimIndent()
+        runInPrefix(script) { Log.d(TAG, "[openclaw-gw-cap] $it") }
+    }
+
+    /**
+     * Patch control-ui bundle to use a smaller default history window and make
+     * it user-adjustable via localStorage-backed limits.
+     */
+    private fun ensureOpenClawControlUiHistoryPatch(controlUiRoot: String) {
+        // Keep this as a no-op for stability: directly patching hashed/minified
+        // control-ui bundles is brittle across upstream updates and can break chat
+        // startup. We now enforce history limits via runtime bootstrap injection.
+        Log.d(TAG, "[openclaw-ui-patch] skipped (runtime-only mode) root=$controlUiRoot")
+    }
+
+    /**
      * Start the OpenClaw WebSocket gateway. Requires openclaw.json to be
      * configured first via [configureOpenClawAuth].
      *
@@ -1157,6 +1214,7 @@ H3
 
         val paths = BootstrapInstaller.getPaths(context)
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
+        ensureOpenClawGatewayHistoryByteCap()
 
         // Kill any orphaned gateway processes and reset all device tokens.
         runInPrefix("""
@@ -1242,6 +1300,7 @@ H3
             Log.w(TAG, "OpenClaw control-ui directory not found at $controlUiRoot")
             return false
         }
+        ensureOpenClawControlUiHistoryPatch(controlUiRoot)
 
         val shell = "${paths.prefixDir}/bin/sh"
         val serverScript = """
@@ -1288,15 +1347,23 @@ H3
                   'settings.theme=settings.theme||\"system\";' +
                   'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
                   'var isZh=locale===\"zh-CN\";' +
+                  'var HISTORY_DEFAULT=${OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT},HISTORY_STEP=${OPENCLAW_CHAT_HISTORY_LIMIT_STEP},HISTORY_MIN=${OPENCLAW_CHAT_HISTORY_LIMIT_MIN},HISTORY_MAX=${OPENCLAW_CHAT_HISTORY_LIMIT_MAX};' +
+                  'function clampHistory(v){var n=Number(v);if(!Number.isFinite(n)){n=HISTORY_DEFAULT;}n=Math.floor(n);if(n<HISTORY_MIN){n=HISTORY_MIN;}if(n>HISTORY_MAX){n=HISTORY_MAX;}return n;}' +
+                  'function getHistoryLimit(){try{return clampHistory(localStorage.getItem(\"anyclaw.chat.history.limit\"));}catch(_){return HISTORY_DEFAULT;}}' +
+                  'function setHistoryLimit(next){var n=clampHistory(next);try{localStorage.setItem(\"anyclaw.chat.history.limit\",String(n));localStorage.setItem(\"anyclaw.chat.render.limit\",String(n));}catch(_){}return n;}' +
+                  'var fromUrl=params.get(\"historyLimit\");if(fromUrl){setHistoryLimit(fromUrl);}' +
+                  'setHistoryLimit(getHistoryLimit());' +
                   'function replaceFirstTextNode(el,next){if(!el){return;}for(var i=0;i<el.childNodes.length;i++){var n=el.childNodes[i];if(n&&n.nodeType===3){n.nodeValue=\" \"+next+\" \";return;}}if(!el.children||el.children.length===0){el.textContent=next;}}' +
                   'function normalizeSpace(text){var s=(text||\"\");return s.replace(/\\s+/g,\" \").trim();}' +
+                  'function installHistoryControls(){var wrap=document.getElementById(\"anyclaw-history-controls\");if(!wrap){wrap=document.createElement(\"div\");wrap.id=\"anyclaw-history-controls\";wrap.style.position=\"fixed\";wrap.style.left=\"12px\";wrap.style.top=\"56px\";wrap.style.zIndex=\"2147482999\";wrap.style.display=\"flex\";wrap.style.gap=\"8px\";wrap.style.alignItems=\"center\";wrap.style.flexWrap=\"wrap\";wrap.style.maxWidth=\"92vw\";document.body.appendChild(wrap);}wrap.innerHTML=\"\";var current=getHistoryLimit();var more=document.createElement(\"button\");more.type=\"button\";more.textContent=isZh?(\"加载更早历史 +\"+HISTORY_STEP):(\"Load older +\"+HISTORY_STEP);more.style.padding=\"6px 10px\";more.style.borderRadius=\"8px\";more.style.border=\"1px solid rgba(255,255,255,0.25)\";more.style.background=\"rgba(17,24,39,0.88)\";more.style.color=\"#fff\";more.addEventListener(\"click\",function(){var next=setHistoryLimit(current+HISTORY_STEP);var u=new URL(location.href);u.searchParams.set(\"historyLimit\",String(next));location.assign(u.toString());});var reset=document.createElement(\"button\");reset.type=\"button\";reset.textContent=isZh?\"恢复轻量\":\"Reset lite\";reset.style.padding=\"6px 10px\";reset.style.borderRadius=\"8px\";reset.style.border=\"1px solid rgba(255,255,255,0.25)\";reset.style.background=\"rgba(17,24,39,0.88)\";reset.style.color=\"#fff\";reset.addEventListener(\"click\",function(){var next=setHistoryLimit(HISTORY_DEFAULT);var u=new URL(location.href);u.searchParams.set(\"historyLimit\",String(next));location.assign(u.toString());});var tip=document.createElement(\"span\");tip.textContent=isZh?(\"历史窗口 \"+current):(\"History window \"+current);tip.style.fontSize=\"12px\";tip.style.padding=\"6px 8px\";tip.style.borderRadius=\"8px\";tip.style.background=\"rgba(17,24,39,0.82)\";tip.style.color=\"#fff\";wrap.appendChild(more);wrap.appendChild(reset);wrap.appendChild(tip);}' +
                   'function localizeStatic(){if(!isZh){return;}var map={\"New session\":\"新建会话\",\"Send\":\"发送\",\"Queue\":\"排队发送\",\"Stop\":\"停止\",\"Connect\":\"连接\",\"Refresh\":\"刷新\",\"Exit focus mode\":\"退出专注模式\"};document.querySelectorAll(\"button\").forEach(function(btn){var raw=normalizeSpace(btn.textContent||\"\");if(map[raw]){replaceFirstTextNode(btn,map[raw]);}var aria=normalizeSpace(btn.getAttribute(\"aria-label\")||\"\");if(map[aria]){btn.setAttribute(\"aria-label\",map[aria]);}if(aria===\"Remove queued message\"){btn.setAttribute(\"aria-label\",\"移除排队消息\");}var title=normalizeSpace(btn.getAttribute(\"title\")||\"\");if(map[title]){btn.setAttribute(\"title\",map[title]);}});document.querySelectorAll(\"textarea\").forEach(function(el){var p=normalizeSpace(el.getAttribute(\"placeholder\")||\"\");if(p.indexOf(\"Message\")===0){el.setAttribute(\"placeholder\",\"输入消息（回车发送，Shift+回车换行，可粘贴图片）\");}});document.querySelectorAll(\".muted\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t===\"Loading chat…\"){el.textContent=\"正在加载聊天…\";}});document.querySelectorAll(\".chat-queue__title\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Queued (\")===0&&t.endsWith(\")\")){el.textContent=\"排队（\"+t.slice(8,t.length-1)+\"）\";}});document.querySelectorAll(\".chat-new-messages\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"New messages\")===0){el.textContent=\"新消息\";}});}' +
                   'function makeSessionKey(current){var now=Date.now().toString(36);var key=(current||\"main\").trim();if(key.indexOf(\"agent:\")===0){var parts=key.split(\":\");var agent=(parts.length>1&&parts[1])?parts[1]:\"main\";return \"agent:\"+agent+\":mobile-\"+now;}return \"mobile-\"+now;}' +
+                  'function patchChatHistoryRequest(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||typeof app.client.request!==\"function\"){return;}if(app.client.__anyclawReqPatched===\"1\"){return;}var orig=app.client.request.bind(app.client);app.client.request=function(method,params){try{if(method===\"chat.history\"&&params&&typeof params===\"object\"){var capped=getHistoryLimit();var wanted=Number(params.limit);if(!Number.isFinite(wanted)){wanted=capped;}if(wanted>capped){wanted=capped;}params=Object.assign({},params,{limit:wanted});}}catch(_){}return orig(method,params);};app.client.__anyclawReqPatched=\"1\";}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
                   'function wireNewSessionButton(){document.querySelectorAll(\"button\").forEach(function(btn){var label=normalizeSpace(btn.textContent||\"\");if(label!==\"New session\"&&label!==\"新建会话\"){return;}if(btn.dataset.anyclawNewBound===\"1\"){return;}btn.dataset.anyclawNewBound=\"1\";btn.addEventListener(\"click\",function(ev){try{ev.preventDefault();ev.stopPropagation();if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}}catch(_){}openNewSessionDirect();},true);if(isZh){replaceFirstTextNode(btn,\"新建会话\");}});}' +
                   'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:18923/\";});document.body.appendChild(btn);}' +
-                  'function runPatches(){localizeStatic();wireNewSessionButton();installBackButton();}' +
-                  'runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches);var mo=new MutationObserver(function(){runPatches();});mo.observe(document.documentElement,{childList:true,subtree:true});' +
+                  'function runPatches(){patchChatHistoryRequest();localizeStatic();wireNewSessionButton();installBackButton();installHistoryControls();}' +
+                  'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
                   '}catch(_){}})();</' + 'script>';
