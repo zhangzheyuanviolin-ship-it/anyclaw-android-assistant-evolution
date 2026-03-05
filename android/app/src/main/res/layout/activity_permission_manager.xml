@@ -105,6 +105,45 @@
             android:textAllCaps="false" />
 
         <TextView
+            android:id="@+id/tvCodexAuthTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/codex_auth_title"
+            android:textColor="#E2E8F0"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvCodexAuthSubtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/codex_auth_subtitle"
+            android:textColor="#94A3B8"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/tvCodexAuthStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/codex_auth_status_checking"
+            android:textColor="#CBD5E1"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btnCodexAuthBrowser"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:contentDescription="@string/codex_auth_open_browser_desc"
+            android:importantForAccessibility="yes"
+            android:minHeight="48dp"
+            android:text="@string/codex_auth_open_browser_text"
+            android:textAllCaps="false" />
+
+        <TextView
             android:id="@+id/tvRevokeHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
