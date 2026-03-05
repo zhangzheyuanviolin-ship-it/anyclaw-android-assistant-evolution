@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AnyClaw Beta</string>
+    <string name="app_name">口袋大龙虾</string>
     <string name="status_initializing">Initializing…</string>
     <string name="status_extracting_bootstrap">Extracting environment…</string>
     <string name="status_installing_packages">Installing packages (first run)…</string>
