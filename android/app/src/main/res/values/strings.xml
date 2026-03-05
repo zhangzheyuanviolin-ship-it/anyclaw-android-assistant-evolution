@@ -107,6 +107,12 @@
     <string name="gateway_toggle_disconnect_failed">网关断开失败。</string>
     <string name="back_to_codex_button_text">返回聊天页</string>
     <string name="back_to_codex_button_desc">返回 Codex 聊天主页面</string>
+    <string name="trace_toggle_fallback_text">过程显示开关</string>
+    <string name="trace_toggle_fallback_desc">切换大龙虾过程显示开关（原生兜底）</string>
+    <string name="history_more_fallback_text">加载更早历史</string>
+    <string name="history_more_fallback_desc">增加历史窗口并重载聊天页面（原生兜底）</string>
+    <string name="history_reset_fallback_text">恢复轻量</string>
+    <string name="history_reset_fallback_desc">恢复轻量历史窗口并重载聊天页面（原生兜底）</string>
     <string name="prompt_add_button_text">新建提示词</string>
     <string name="prompt_clear_selected_button_text">取消当前选中</string>
     <string name="prompt_delete_selected_button_text">删除当前选中</string>

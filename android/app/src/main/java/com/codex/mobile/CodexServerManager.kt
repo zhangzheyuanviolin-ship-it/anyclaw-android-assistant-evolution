@@ -23,11 +23,13 @@ class CodexServerManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CodexServerManager"
-        const val SERVER_PORT = 18923
-        private const val PROXY_PORT = 18924
+        private const val BASE_SERVER_PORT = 18923
+        private const val BASE_PROXY_PORT = 18924
         private const val CODEX_VERSION = "0.104.0"
-        const val OPENCLAW_GATEWAY_PORT = 18789
-        const val OPENCLAW_CONTROL_UI_PORT = 19001
+        private const val BASE_OPENCLAW_GATEWAY_PORT = 18789
+        private const val BASE_OPENCLAW_CONTROL_UI_PORT = 19001
+        private const val ISOLATED_PORT_OFFSET = 10000
+        private const val TEST_PACKAGE_SUFFIX = ".pocketlobster.test"
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
@@ -39,12 +41,36 @@ class CodexServerManager(private val context: Context) {
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MAX = 400
         private const val OPENCLAW_CHAT_HISTORY_MAX_BYTES = 1 * 1024 * 1024
         private const val OPENCLAW_CONTROL_UI_BOOTSTRAP_MARKER = "anyclaw-mobile-bootstrap-v3"
+
+        @JvmStatic
+        fun useIsolatedPortsForPackage(packageName: String): Boolean =
+            packageName.endsWith(TEST_PACKAGE_SUFFIX)
+
+        @JvmStatic
+        fun serverPortForPackage(packageName: String): Int =
+            if (useIsolatedPortsForPackage(packageName)) BASE_SERVER_PORT + ISOLATED_PORT_OFFSET else BASE_SERVER_PORT
+
+        @JvmStatic
+        fun proxyPortForPackage(packageName: String): Int =
+            if (useIsolatedPortsForPackage(packageName)) BASE_PROXY_PORT + ISOLATED_PORT_OFFSET else BASE_PROXY_PORT
+
+        @JvmStatic
+        fun openClawGatewayPortForPackage(packageName: String): Int =
+            if (useIsolatedPortsForPackage(packageName)) BASE_OPENCLAW_GATEWAY_PORT + ISOLATED_PORT_OFFSET else BASE_OPENCLAW_GATEWAY_PORT
+
+        @JvmStatic
+        fun openClawControlUiPortForPackage(packageName: String): Int =
+            if (useIsolatedPortsForPackage(packageName)) BASE_OPENCLAW_CONTROL_UI_PORT + ISOLATED_PORT_OFFSET else BASE_OPENCLAW_CONTROL_UI_PORT
     }
 
     private var serverProcess: Process? = null
     private var proxyProcess: Process? = null
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
+    val serverPort: Int = serverPortForPackage(context.packageName)
+    val proxyPort: Int = proxyPortForPackage(context.packageName)
+    val openClawGatewayPort: Int = openClawGatewayPortForPackage(context.packageName)
+    val openClawControlUiPort: Int = openClawControlUiPortForPackage(context.packageName)
 
     val isRunning: Boolean
         get() {
@@ -927,8 +953,8 @@ H3
         controlUi.put(
             "allowedOrigins",
             JSONArray()
-                .put("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT")
-                .put("http://localhost:$OPENCLAW_CONTROL_UI_PORT"),
+                .put("http://127.0.0.1:$openClawControlUiPort")
+                .put("http://localhost:$openClawControlUiPort"),
         )
         controlUi.put("allowInsecureAuth", true)
         controlUi.put("dangerouslyDisableDeviceAuth", false)
@@ -1037,7 +1063,7 @@ H3
         runtimeSuiteEntry.put("enabled", true)
         val runtimeSuiteConfig = ensureObject(runtimeSuiteEntry, "config")
         if (!runtimeSuiteConfig.has("timeoutSeconds")) runtimeSuiteConfig.put("timeoutSeconds", 30)
-        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
+        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$serverPort")
         if (!runtimeSuiteConfig.has("runtimeDoctorPath")) {
             runtimeSuiteConfig.put(
                 "runtimeDoctorPath",
@@ -1229,7 +1255,7 @@ H3
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 if echo "${'$'}cmdline" | grep -q "openclaw gateway run"; then
                     kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q "18789"; then
+                elif echo "${'$'}cmdline" | grep -q "${openClawGatewayPort}"; then
                     kill -9 ${'$'}pid 2>/dev/null
                 fi
             done
@@ -1245,7 +1271,7 @@ H3
 
         val env = buildEnvironment(paths)
         val shell = "${paths.prefixDir}/bin/sh"
-        val cmd = "exec openclaw gateway run --force --port $OPENCLAW_GATEWAY_PORT 2>&1"
+        val cmd = "exec openclaw gateway run --force --port $openClawGatewayPort 2>&1"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
         pb.environment().clear()
@@ -1272,7 +1298,7 @@ H3
 
         Thread.sleep(1200)
         if (isOpenClawGatewayResponsive()) {
-            Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
+            Log.i(TAG, "OpenClaw gateway started on port $openClawGatewayPort")
             return true
         }
 
@@ -1299,8 +1325,8 @@ H3
                 [ "${'$'}pid" = "${'$'}PPID" ] && continue
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 echo "${'$'}cmdline" | grep -q "openclaw/dist/control-ui" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "Control UI on port ${OPENCLAW_CONTROL_UI_PORT}" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${OPENCLAW_CONTROL_UI_PORT}" && echo "${'$'}cmdline" | grep -q "node -e" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "Control UI on port ${openClawControlUiPort}" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${openClawControlUiPort}" && echo "${'$'}cmdline" | grep -q "node -e" && kill -9 ${'$'}pid 2>/dev/null
             done
             rm -f ${paths.prefixDir}/tmp/openclaw*/control-ui.pid ${paths.prefixDir}/tmp/openclaw/control-ui.pid 2>/dev/null
             """.trimIndent(),
@@ -1311,8 +1337,8 @@ H3
         val deadline = System.currentTimeMillis() + timeoutMs
         val url =
             URL(
-                "http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT/chat?" +
-                    "gatewayUrl=ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT&simple=1&probe=1",
+                "http://127.0.0.1:$openClawControlUiPort/chat?" +
+                    "gatewayUrl=ws://127.0.0.1:$openClawGatewayPort&simple=1&probe=1",
             )
         while (System.currentTimeMillis() < deadline) {
             val proc = openClawControlUiProcess
@@ -1344,7 +1370,7 @@ H3
 
     /**
      * Start a lightweight Node.js static file server to serve the OpenClaw
-     * Control UI on [OPENCLAW_CONTROL_UI_PORT]. The UI assets live inside
+     * Control UI on [openClawControlUiPort]. The UI assets live inside
      * the installed openclaw npm package at dist/control-ui/.
      */
     fun startOpenClawControlUiServer(): Boolean {
@@ -1385,7 +1411,7 @@ H3
                 '.ico':'image/x-icon',
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
-              const localGatewayUrl = 'ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT';
+              const localGatewayUrl = 'ws://127.0.0.1:$openClawGatewayPort';
               function injectBootstrap(html) {
                 const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
@@ -1410,7 +1436,7 @@ H3
                   'if(typeof settings.chatShowThinking!==\"boolean\"){settings.chatShowThinking=false;}' +
                   'if(simpleFromUrl===\"0\"||simpleFromUrl===\"1\"){settings.chatShowThinking=(simpleFromUrl===\"0\");}' +
                   'var tokenFromUrl=params.get(\"token\");' +
-                  'var targetGateway=\"ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT\";' +
+                  'var targetGateway=\"ws://127.0.0.1:$openClawGatewayPort\";' +
                   'var isLoopback=function(v){return /^wss?:\\/\\/(127\\.0\\.0\\.1|localhost)(:\\d+)?(\\/|$)/i.test(String(v||\"\").trim());};' +
                   'var currentGateway=String(settings.gatewayUrl||\"\").trim();' +
                   'if(!currentGateway||isLoopback(currentGateway)){settings.gatewayUrl=targetGateway;}' +
@@ -1431,7 +1457,7 @@ H3
                   'function patchChatHistoryRequest(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||typeof app.client.request!==\"function\"){return;}if(app.client.__anyclawReqPatched===\"1\"){return;}var orig=app.client.request.bind(app.client);app.client.request=function(method,params){try{if(method===\"chat.history\"&&params&&typeof params===\"object\"){var capped=getHistoryLimit();var wanted=Number(params.limit);if(!Number.isFinite(wanted)){wanted=capped;}if(wanted>capped){wanted=capped;}params=Object.assign({},params,{limit:wanted});}}catch(_){}return orig(method,params);};app.client.__anyclawReqPatched=\"1\";}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
                   'function wireNewSessionButton(){document.querySelectorAll(\"button\").forEach(function(btn){var label=normalizeSpace(btn.textContent||\"\");if(label!==\"New session\"&&label!==\"新建会话\"){return;}if(btn.dataset.anyclawNewBound===\"1\"){return;}btn.dataset.anyclawNewBound=\"1\";btn.addEventListener(\"click\",function(ev){try{ev.preventDefault();ev.stopPropagation();if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}}catch(_){}openNewSessionDirect();},true);if(isZh){replaceFirstTextNode(btn,\"新建会话\");}});}' +
-                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:18923/\";});document.body.appendChild(btn);}' +
+                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:${serverPort}/?openclawGatewayPort=${openClawGatewayPort}&openclawControlUiPort=${openClawControlUiPort}\";});document.body.appendChild(btn);}' +
                   'function installTraceToggle(){var id=\"anyclaw-trace-toggle\";var btn=document.getElementById(id);var u=new URL(location.href);var isSimple=u.searchParams.get(\"simple\")!==\"0\";if(!btn){btn=document.createElement(\"button\");btn.id=id;btn.type=\"button\";btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"96px\";btn.style.zIndex=\"2147482998\";btn.style.padding=\"6px 10px\";btn.style.borderRadius=\"8px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.88)\";btn.style.color=\"#fff\";btn.style.fontSize=\"12px\";document.body.appendChild(btn);}btn.textContent=isZh?(isSimple?\"过程显示：关\":\"过程显示：开\"):(isSimple?\"Process view: off\":\"Process view: on\");btn.setAttribute(\"aria-label\",btn.textContent);btn.onclick=function(){var nextSimple=isSimple?\"0\":\"1\";settings.chatShowThinking=(nextSimple===\"0\");try{localStorage.setItem(settingsKey,JSON.stringify(settings));}catch(_){}var next=new URL(location.href);if(!next.searchParams.get(\"gatewayUrl\")){next.searchParams.set(\"gatewayUrl\",targetGateway);}if(settings.token&&!next.searchParams.get(\"token\")){next.searchParams.set(\"token\",settings.token);}next.searchParams.set(\"simple\",nextSimple);location.assign(next.toString());};}' +
                   'function autoConfirmGatewayUrl(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.pendingGatewayUrl||typeof app.handleGatewayUrlConfirm!==\"function\"){return;}var pending=String(app.pendingGatewayUrl||\"\").trim();if(isLoopback(pending)){try{app.handleGatewayUrlConfirm();}catch(_){}}}' +
                   'function safeRun(fn){try{fn();}catch(_){}}' +
@@ -1518,7 +1544,7 @@ H3
                   }
                   sendStatic(res, fp, data);
                 });
-              }).listen($OPENCLAW_CONTROL_UI_PORT, '127.0.0.1', () => console.log('Control UI on port $OPENCLAW_CONTROL_UI_PORT'));
+              }).listen($openClawControlUiPort, '127.0.0.1', () => console.log('Control UI on port $openClawControlUiPort'));
             " 2>&1
         """.trimIndent()
 
@@ -1543,7 +1569,7 @@ H3
             }.start()
 
             if (waitForOpenClawControlUiReady()) {
-                Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
+                Log.i(TAG, "OpenClaw Control UI server started on port $openClawControlUiPort")
                 return true
             }
 
@@ -1553,7 +1579,7 @@ H3
             Thread.sleep(300)
         }
 
-        Log.e(TAG, "OpenClaw Control UI failed to become ready on port $OPENCLAW_CONTROL_UI_PORT")
+        Log.e(TAG, "OpenClaw Control UI failed to become ready on port $openClawControlUiPort")
         return false
     }
 
@@ -1580,8 +1606,8 @@ H3
             for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 echo "${'$'}cmdline" | grep -q "openclaw gateway run" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${OPENCLAW_CONTROL_UI_PORT}" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${openClawGatewayPort}" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${openClawControlUiPort}" && kill -9 ${'$'}pid 2>/dev/null
             done
             rm -f ${paths.prefixDir}/tmp/openclaw*/gateway.lock ${paths.prefixDir}/tmp/openclaw*/gateway.pid 2>/dev/null
             rm -f ${paths.prefixDir}/tmp/openclaw/gateway.lock ${paths.prefixDir}/tmp/openclaw/gateway.pid 2>/dev/null
@@ -1987,7 +2013,7 @@ WEOF
         }.start()
 
         Thread.sleep(800)
-        Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$PROXY_PORT")
+        Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$proxyPort")
         return true
     }
 
@@ -2055,8 +2081,8 @@ WEOF
     ): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
 
         val pb = ProcessBuilder(codexBinPath(), "login")
         pb.environment().clear()
@@ -2103,8 +2129,8 @@ WEOF
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
 
         val shell = "${paths.prefixDir}/bin/sh"
         val cmd = "${codexBinPath()} exec --skip-git-repo-check \"say hi\" 2>&1"
@@ -2164,8 +2190,8 @@ WEOF
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
 
         val serverScript = "${paths.prefixDir}/lib/node_modules/codex-web-local/dist-cli/index.js"
         if (!File(serverScript).exists()) {
@@ -2174,7 +2200,7 @@ WEOF
         }
 
         val shell = "${paths.prefixDir}/bin/sh"
-        val command = "exec node $serverScript --port $SERVER_PORT --no-password"
+        val command = "exec node $serverScript --port $serverPort --no-password"
 
         Log.i(TAG, "Starting server: $command")
 
@@ -2202,7 +2228,7 @@ WEOF
 
     fun waitForServer(timeoutMs: Long = 60_000): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
-        val url = URL("http://127.0.0.1:$SERVER_PORT/")
+        val url = URL("http://127.0.0.1:$serverPort/")
 
         while (System.currentTimeMillis() < deadline) {
             try {
@@ -2776,13 +2802,13 @@ import os
 from pathlib import Path
 
 OLD = b"/data/data/com.termux"
-NEW = b"/data/user/0/com.codex.mobile.beta"
+NEW = b"__APP_ROOT__"
 
 roots = [
-    Path("/data/user/0/com.codex.mobile.beta/files/usr/bin"),
-    Path("/data/user/0/com.codex.mobile.beta/files/usr/libexec"),
-    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/scripts"),
-    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/.git/hooks"),
+    Path("__APP_ROOT__/files/usr/bin"),
+    Path("__APP_ROOT__/files/usr/libexec"),
+    Path("__APP_ROOT__/files/home/.openclaw/workspace/scripts"),
+    Path("__APP_ROOT__/files/home/.openclaw/workspace/.git/hooks"),
 ]
 
 patched = 0
@@ -2887,6 +2913,7 @@ EOF
 
             sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
             sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
+            sed -i "s#__APP_ROOT__#${context.dataDir.absolutePath}#g" "${'$'}scripts/runtime-env-doctor.sh"
             chmod 700 "${'$'}scripts/runtime-env-doctor.sh" 2>/dev/null || true
             "${'$'}scripts/runtime-env-doctor.sh" --probe --json > "${'$'}state_dir/runtime-health.json" 2>/dev/null || true
             echo "runtime-doctor-ready"

@@ -17,6 +17,7 @@ import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -34,6 +35,11 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "CodexMainActivity"
+        private const val LEGACY_OPENCLAW_CONTROL_UI_PORT = 19001
+        private const val FALLBACK_HISTORY_DEFAULT = 60
+        private const val FALLBACK_HISTORY_STEP = 40
+        private const val FALLBACK_HISTORY_MIN = 20
+        private const val FALLBACK_HISTORY_MAX = 400
         const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
         const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.SESSION_KEY"
@@ -52,6 +58,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modelManagerButton: Button
     private lateinit var gatewayToggleButton: Button
     private lateinit var backToCodexButton: Button
+    private lateinit var traceToggleFallbackButton: Button
+    private lateinit var historyMoreFallbackButton: Button
+    private lateinit var historyResetFallbackButton: Button
     private lateinit var serverManager: CodexServerManager
     private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
@@ -66,6 +75,12 @@ class MainActivity : AppCompatActivity() {
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
+    private val serverPort: Int
+        get() = serverManager.serverPort
+    private val openClawGatewayPort: Int
+        get() = serverManager.openClawGatewayPort
+    private val openClawControlUiPort: Int
+        get() = serverManager.openClawControlUiPort
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -109,6 +124,9 @@ class MainActivity : AppCompatActivity() {
         modelManagerButton = findViewById(R.id.btnModelManager)
         gatewayToggleButton = findViewById(R.id.btnGatewayToggle)
         backToCodexButton = findViewById(R.id.btnBackToCodex)
+        traceToggleFallbackButton = findViewById(R.id.btnTraceToggleFallback)
+        historyMoreFallbackButton = findViewById(R.id.btnHistoryMoreFallback)
+        historyResetFallbackButton = findViewById(R.id.btnHistoryResetFallback)
 
         serverManager = CodexServerManager(this)
 
@@ -128,7 +146,16 @@ class MainActivity : AppCompatActivity() {
             onGatewayTogglePressed()
         }
         backToCodexButton.setOnClickListener {
-            webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
+            webView.loadUrl(buildCodexRootUrl())
+        }
+        traceToggleFallbackButton.setOnClickListener {
+            toggleOpenClawProcessViewFallback()
+        }
+        historyMoreFallbackButton.setOnClickListener {
+            increaseOpenClawHistoryWindowFallback()
+        }
+        historyResetFallbackButton.setOnClickListener {
+            resetOpenClawHistoryWindowFallback()
         }
 
         requestBatteryOptimizationExemption()
@@ -233,18 +260,25 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 url: String,
-            ): Boolean = false
+            ): Boolean = handleOpenClawDashboardNavigation(url)
+
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest,
+            ): Boolean = handleOpenClawDashboardNavigation(request.url?.toString())
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 if (!isOpenClawChatUrl(url)) {
                     openClawRecoveryAttempts = 0
                 }
+                updateOpenClawFallbackButtonsVisibility(url)
                 cancelOpenClawWatchdog()
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
+                updateOpenClawFallbackButtonsVisibility(url)
                 scheduleOpenClawWatchdog(url)
             }
 
@@ -259,7 +293,7 @@ class MainActivity : AppCompatActivity() {
                         "页面渲染异常，正在自动恢复到可用状态",
                         Toast.LENGTH_LONG,
                     ).show()
-                    pendingLaunchUrl = "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
+                    pendingLaunchUrl = buildCodexRootUrl()
                     recreate()
                 }
                 return true
@@ -276,8 +310,52 @@ class MainActivity : AppCompatActivity() {
 
     private fun isOpenClawChatUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        return url.contains(":${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}") &&
+        val controlPort = ":$openClawControlUiPort"
+        val legacyPort = ":$LEGACY_OPENCLAW_CONTROL_UI_PORT"
+        return (url.contains(controlPort) || url.contains(legacyPort)) &&
             (url.contains("/chat") || url.contains("/index.html"))
+    }
+
+    private fun handleOpenClawDashboardNavigation(rawUrl: String?): Boolean {
+        if (rawUrl.isNullOrBlank()) return false
+        val uri = try {
+            Uri.parse(rawUrl)
+        } catch (_: Exception) {
+            return false
+        }
+        val host = (uri.host ?: "").lowercase()
+        if (host != "127.0.0.1" && host != "localhost") return false
+        val port = if (uri.port > 0) uri.port else -1
+        if (port != openClawControlUiPort && port != LEGACY_OPENCLAW_CONTROL_UI_PORT) return false
+        val path = uri.path ?: "/"
+        if (!path.startsWith("/chat") && path != "/" && path != "/index.html") return false
+        val session = uri.getQueryParameter("session")
+        webView.loadUrl(buildOpenClawChatUrl(session))
+        return true
+    }
+
+    private fun buildCodexRootUrl(): String {
+        val query = Uri.Builder()
+            .appendQueryParameter("openclawGatewayPort", openClawGatewayPort.toString())
+            .appendQueryParameter("openclawControlUiPort", openClawControlUiPort.toString())
+            .build()
+            .encodedQuery
+        return "http://127.0.0.1:$serverPort/?$query"
+    }
+
+    private fun buildOpenClawChatUrl(sessionKey: String?): String {
+        val builder = Uri.Builder()
+            .scheme("http")
+            .encodedAuthority("127.0.0.1:$openClawControlUiPort")
+            .appendPath("chat")
+            .appendQueryParameter("gatewayUrl", "ws://127.0.0.1:$openClawGatewayPort")
+            .appendQueryParameter("simple", "1")
+            .appendQueryParameter("openclawGatewayPort", openClawGatewayPort.toString())
+            .appendQueryParameter("openclawControlUiPort", openClawControlUiPort.toString())
+        if (!sessionKey.isNullOrBlank()) {
+            builder.appendQueryParameter("session", sessionKey.trim())
+        }
+        return builder.build().toString()
     }
 
     private fun cancelOpenClawWatchdog() {
@@ -331,7 +409,7 @@ class MainActivity : AppCompatActivity() {
             null,
         )
 
-        val fallback = "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat"
+        val fallback = "http://127.0.0.1:$openClawControlUiPort/chat"
         val parsed = Uri.parse(originalUrl ?: fallback)
         val builder = parsed.buildUpon().clearQuery()
         for (name in parsed.queryParameterNames) {
@@ -343,6 +421,89 @@ class MainActivity : AppCompatActivity() {
         builder.appendQueryParameter("historyLimit", "20")
         builder.appendQueryParameter("recovery", openClawRecoveryAttempts.toString())
         webView.loadUrl(builder.build().toString())
+    }
+
+    private fun updateOpenClawFallbackButtonsVisibility(url: String?) {
+        val visible = webView.visibility == View.VISIBLE && isOpenClawChatUrl(url)
+        val state = if (visible) View.VISIBLE else View.GONE
+        traceToggleFallbackButton.visibility = state
+        historyMoreFallbackButton.visibility = state
+        historyResetFallbackButton.visibility = state
+    }
+
+    private fun toggleOpenClawProcessViewFallback() {
+        if (!isOpenClawChatUrl(webView.url)) return
+        val js =
+            """
+            (function(){
+              try{
+                var settingsKey='openclaw.control.settings.v1';
+                var settings={};
+                try{settings=JSON.parse(localStorage.getItem(settingsKey)||'{}');}catch(_){}
+                if(!settings||typeof settings!=='object'){settings={};}
+                var u=new URL(location.href);
+                var isSimple=u.searchParams.get('simple')!=='0';
+                var nextSimple=isSimple?'0':'1';
+                settings.chatShowThinking=(nextSimple==='0');
+                localStorage.setItem(settingsKey,JSON.stringify(settings));
+                if(!u.searchParams.get('gatewayUrl')){u.searchParams.set('gatewayUrl','ws://127.0.0.1:$openClawGatewayPort');}
+                if(settings.token && !u.searchParams.get('token')){u.searchParams.set('token',settings.token);}
+                u.searchParams.set('simple',nextSimple);
+                location.assign(u.toString());
+                return 'ok';
+              }catch(e){
+                return 'err:' + String(e);
+              }
+            })();
+            """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun increaseOpenClawHistoryWindowFallback() {
+        if (!isOpenClawChatUrl(webView.url)) return
+        val js =
+            """
+            (function(){
+              try{
+                var HDEF=$FALLBACK_HISTORY_DEFAULT,HSTEP=$FALLBACK_HISTORY_STEP,HMIN=$FALLBACK_HISTORY_MIN,HMAX=$FALLBACK_HISTORY_MAX;
+                function clamp(v){var n=Number(v);if(!Number.isFinite(n)){n=HDEF;}n=Math.floor(n);if(n<HMIN)n=HMIN;if(n>HMAX)n=HMAX;return n;}
+                var cur=clamp(localStorage.getItem('anyclaw.chat.history.limit'));
+                var next=clamp(cur+HSTEP);
+                localStorage.setItem('anyclaw.chat.history.limit',String(next));
+                localStorage.setItem('anyclaw.chat.render.limit',String(next));
+                var u=new URL(location.href);
+                u.searchParams.set('historyLimit',String(next));
+                if(!u.searchParams.get('gatewayUrl')){u.searchParams.set('gatewayUrl','ws://127.0.0.1:$openClawGatewayPort');}
+                location.assign(u.toString());
+                return 'ok';
+              }catch(e){
+                return 'err:' + String(e);
+              }
+            })();
+            """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun resetOpenClawHistoryWindowFallback() {
+        if (!isOpenClawChatUrl(webView.url)) return
+        val js =
+            """
+            (function(){
+              try{
+                var HDEF=$FALLBACK_HISTORY_DEFAULT;
+                localStorage.setItem('anyclaw.chat.history.limit',String(HDEF));
+                localStorage.setItem('anyclaw.chat.render.limit',String(HDEF));
+                var u=new URL(location.href);
+                u.searchParams.set('historyLimit',String(HDEF));
+                if(!u.searchParams.get('gatewayUrl')){u.searchParams.set('gatewayUrl','ws://127.0.0.1:$openClawGatewayPort');}
+                location.assign(u.toString());
+                return 'ok';
+              }catch(e){
+                return 'err:' + String(e);
+              }
+            })();
+            """.trimIndent()
+        webView.evaluateJavascript(js, null)
     }
 
     private fun startSetupFlow() {
@@ -508,6 +669,7 @@ class MainActivity : AppCompatActivity() {
             modelManagerButton.visibility = View.VISIBLE
             gatewayToggleButton.visibility = View.VISIBLE
             backToCodexButton.visibility = View.VISIBLE
+            updateOpenClawFallbackButtonsVisibility(webView.url)
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
             webView.loadUrl(consumeLaunchUrlOrDefault())
@@ -547,7 +709,7 @@ class MainActivity : AppCompatActivity() {
     private fun consumeLaunchUrlOrDefault(): String {
         val target = pendingLaunchUrl
         pendingLaunchUrl = null
-        return target ?: "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
+        return target ?: buildCodexRootUrl()
     }
 
     private fun resolveLaunchUrlFromIntent(intent: Intent?): String? {
@@ -557,23 +719,18 @@ class MainActivity : AppCompatActivity() {
             OPEN_TARGET_CODEX_THREAD -> {
                 val threadId = intent?.getStringExtra(EXTRA_THREAD_ID)?.trim().orEmpty()
                 if (threadId.isEmpty()) null
-                else "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/thread/${Uri.encode(threadId)}"
+                else {
+                    val query = Uri.Builder()
+                        .appendQueryParameter("openclawGatewayPort", openClawGatewayPort.toString())
+                        .appendQueryParameter("openclawControlUiPort", openClawControlUiPort.toString())
+                        .build()
+                        .encodedQuery
+                    "http://127.0.0.1:$serverPort/thread/${Uri.encode(threadId)}?$query"
+                }
             }
             OPEN_TARGET_OPENCLAW_SESSION -> {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
-                if (sessionKey.isEmpty()) null
-                else {
-                    val query = Uri.Builder()
-                        .appendQueryParameter(
-                            "gatewayUrl",
-                            "ws://127.0.0.1:${CodexServerManager.OPENCLAW_GATEWAY_PORT}",
-                        )
-                        .appendQueryParameter("simple", "1")
-                        .appendQueryParameter("session", sessionKey)
-                        .build()
-                        .encodedQuery
-                    "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat?$query"
-                }
+                if (sessionKey.isEmpty()) null else buildOpenClawChatUrl(sessionKey)
             }
             else -> null
         }
@@ -756,6 +913,9 @@ class MainActivity : AppCompatActivity() {
             modelManagerButton.visibility = View.GONE
             gatewayToggleButton.visibility = View.GONE
             backToCodexButton.visibility = View.GONE
+            traceToggleFallbackButton.visibility = View.GONE
+            historyMoreFallbackButton.visibility = View.GONE
+            historyResetFallbackButton.visibility = View.GONE
         }
     }
 

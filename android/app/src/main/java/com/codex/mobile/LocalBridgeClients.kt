@@ -31,7 +31,8 @@ object LocalBridgeClients {
             .put("params", params)
             .toString()
 
-        val url = URL("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/codex-api/rpc")
+        val serverPort = CodexServerManager.serverPortForPackage(BuildConfig.APPLICATION_ID)
+        val url = URL("http://127.0.0.1:$serverPort/codex-api/rpc")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 10_000
