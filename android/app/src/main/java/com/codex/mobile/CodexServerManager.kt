@@ -38,6 +38,7 @@ class CodexServerManager(private val context: Context) {
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MAX = 400
         private const val OPENCLAW_CHAT_HISTORY_MAX_BYTES = 1 * 1024 * 1024
+        private const val OPENCLAW_CONTROL_UI_BOOTSTRAP_MARKER = "anyclaw-mobile-bootstrap-v3"
     }
 
     private var serverProcess: Process? = null
@@ -1279,21 +1280,75 @@ H3
         return false
     }
 
+    private fun stopTrackedOpenClawControlUiProcess() {
+        val proc = openClawControlUiProcess ?: return
+        openClawControlUiProcess = null
+        try {
+            proc.destroy()
+            proc.waitFor(400, TimeUnit.MILLISECONDS)
+            if (proc.isAlive) proc.destroyForcibly()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun killOrphanOpenClawControlUiProcesses(paths: BootstrapInstaller.Paths) {
+        runInPrefix(
+            """
+            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
+                [ "${'$'}pid" = "${'$'}${'$'}" ] && continue
+                [ "${'$'}pid" = "${'$'}PPID" ] && continue
+                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
+                echo "${'$'}cmdline" | grep -q "openclaw/dist/control-ui" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "Control UI on port ${OPENCLAW_CONTROL_UI_PORT}" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${OPENCLAW_CONTROL_UI_PORT}" && echo "${'$'}cmdline" | grep -q "node -e" && kill -9 ${'$'}pid 2>/dev/null
+            done
+            rm -f ${paths.prefixDir}/tmp/openclaw*/control-ui.pid ${paths.prefixDir}/tmp/openclaw/control-ui.pid 2>/dev/null
+            """.trimIndent(),
+        ) { Log.d(TAG, "[openclaw-ui-clean] $it") }
+    }
+
+    private fun waitForOpenClawControlUiReady(timeoutMs: Long = 12_000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        val url =
+            URL(
+                "http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT/chat?" +
+                    "gatewayUrl=ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT&simple=1&probe=1",
+            )
+        while (System.currentTimeMillis() < deadline) {
+            val proc = openClawControlUiProcess
+            if (proc != null && !proc.isAlive) return false
+            try {
+                val conn = (url.openConnection() as HttpURLConnection)
+                conn.connectTimeout = 1500
+                conn.readTimeout = 2000
+                conn.requestMethod = "GET"
+                conn.instanceFollowRedirects = true
+                val code = conn.responseCode
+                val stream = try {
+                    conn.inputStream
+                } catch (_: Exception) {
+                    conn.errorStream
+                }
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                conn.disconnect()
+                if (code in 200..399 && body.contains(OPENCLAW_CONTROL_UI_BOOTSTRAP_MARKER)) {
+                    return true
+                }
+            } catch (_: Exception) {
+                // Retry until timeout.
+            }
+            Thread.sleep(350)
+        }
+        return false
+    }
+
     /**
      * Start a lightweight Node.js static file server to serve the OpenClaw
      * Control UI on [OPENCLAW_CONTROL_UI_PORT]. The UI assets live inside
      * the installed openclaw npm package at dist/control-ui/.
      */
     fun startOpenClawControlUiServer(): Boolean {
-        if (openClawControlUiProcess != null) {
-            try {
-                openClawControlUiProcess!!.exitValue()
-                openClawControlUiProcess = null
-            } catch (_: IllegalThreadStateException) {
-                Log.i(TAG, "OpenClaw Control UI server already running")
-                return true
-            }
-        }
+        stopTrackedOpenClawControlUiProcess()
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths)
@@ -1305,6 +1360,7 @@ H3
             return false
         }
         ensureOpenClawControlUiHistoryPatch(controlUiRoot)
+        killOrphanOpenClawControlUiProcesses(paths)
 
         val shell = "${paths.prefixDir}/bin/sh"
         val serverScript = """
@@ -1333,6 +1389,7 @@ H3
               function injectBootstrap(html) {
                 const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
+                  'window.__anyclawBootstrapRev=\"$OPENCLAW_CONTROL_UI_BOOTSTRAP_MARKER\";' +
                   'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
                   'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
                   'var nav=(navigator.language||\"\").toLowerCase();' +
@@ -1379,7 +1436,7 @@ H3
                   'function autoConfirmGatewayUrl(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.pendingGatewayUrl||typeof app.handleGatewayUrlConfirm!==\"function\"){return;}var pending=String(app.pendingGatewayUrl||\"\").trim();if(isLoopback(pending)){try{app.handleGatewayUrlConfirm();}catch(_){}}}' +
                   'function safeRun(fn){try{fn();}catch(_){}}' +
                   'function runPatches(){safeRun(patchChatHistoryRequest);safeRun(localizeStatic);safeRun(wireNewSessionButton);safeRun(installBackButton);safeRun(installTraceToggle);safeRun(installHistoryControls);safeRun(autoConfirmGatewayUrl);}' +
-                  'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
+                  'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();var keepAlive=setInterval(runPatches,1200);setTimeout(function(){try{clearInterval(keepAlive);}catch(_){ }},120000);document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
                   '}catch(_){}})();</' + 'script>';
@@ -1465,28 +1522,39 @@ H3
             " 2>&1
         """.trimIndent()
 
-        val pb = ProcessBuilder(shell, "-c", "exec $serverScript")
-        pb.environment().clear()
-        pb.environment().putAll(env)
-        pb.directory(File(paths.homeDir))
-        pb.redirectErrorStream(true)
+        for (attempt in 1..2) {
+            val pb = ProcessBuilder(shell, "-c", "exec $serverScript")
+            pb.environment().clear()
+            pb.environment().putAll(env)
+            pb.directory(File(paths.homeDir))
+            pb.redirectErrorStream(true)
 
-        val proc = pb.start()
-        openClawControlUiProcess = proc
+            val proc = pb.start()
+            openClawControlUiProcess = proc
 
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-ui] $line")
-                line = reader.readLine()
+            Thread {
+                val reader = BufferedReader(InputStreamReader(proc.inputStream))
+                var line = reader.readLine()
+                while (line != null) {
+                    Log.d(TAG, "[openclaw-ui] $line")
+                    line = reader.readLine()
+                }
+                Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
+            }.start()
+
+            if (waitForOpenClawControlUiReady()) {
+                Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
+                return true
             }
-            Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
-        }.start()
 
-        Thread.sleep(1000)
-        Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
-        return true
+            Log.w(TAG, "OpenClaw Control UI readiness check failed (attempt=$attempt)")
+            stopTrackedOpenClawControlUiProcess()
+            killOrphanOpenClawControlUiProcesses(paths)
+            Thread.sleep(300)
+        }
+
+        Log.e(TAG, "OpenClaw Control UI failed to become ready on port $OPENCLAW_CONTROL_UI_PORT")
+        return false
     }
 
     fun isOpenClawGatewayResponsive(): Boolean {
