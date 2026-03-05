@@ -120,9 +120,14 @@ function stripInternalNoise(raw: string): string {
     if (/^CANNOT LINK EXECUTABLE/i.test(text)) return false;
     if (/^ERROR\s+codex_core::/i.test(text)) return false;
     if (/^proot error:/i.test(text)) return false;
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(text) && /(codex_core::|models_manager::manager|openclaw|gateway)/i.test(text)) return false;
+    if (/^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\./.test(text) && /(codex_core::|openclaw|gateway)/i.test(text)) return false;
+    if (/^\[openclaw-(gw|ui)\]/i.test(text)) return false;
     return true;
   });
-  return keep.join("\n").trim();
+  const cleaned = keep.join("\n").trim();
+  if (cleaned.length <= 1200) return cleaned;
+  return cleaned.slice(0, 1200) + "\n...(truncated)";
 }
 
 async function runSystemShell(

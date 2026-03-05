@@ -35,9 +35,102 @@ function stripInternalNoise(raw: string): string {
     if (/^CANNOT LINK EXECUTABLE/i.test(text)) return false;
     if (/^ERROR\s+codex_core::/i.test(text)) return false;
     if (/^proot error:/i.test(text)) return false;
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(text) && /(codex_core::|models_manager::manager|openclaw|gateway)/i.test(text)) return false;
+    if (/^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\./.test(text) && /(codex_core::|openclaw|gateway)/i.test(text)) return false;
+    if (/^\[openclaw-(gw|ui)\]/i.test(text)) return false;
     return true;
   });
-  return keep.join("\n").trim();
+  const cleaned = keep.join("\n").trim();
+  if (cleaned.length <= 1200) return cleaned;
+  return cleaned.slice(0, 1200) + "\n...(truncated)";
+}
+
+type McpHealthLevel = "healthy" | "degraded" | "blocked";
+
+function firstString(value: unknown, keys: string[]): string {
+  if (!value || typeof value !== "object") return "";
+  const obj = value as Record<string, unknown>;
+  for (const key of keys) {
+    const text = String(obj[key] ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function normalizeMcpStatus(value: unknown): string {
+  const text = String(value ?? "").trim().toLowerCase();
+  return text.replace(/\s+/g, "_");
+}
+
+function detectMcpHealth(statusText: string, reason: string): McpHealthLevel {
+  const all = `${statusText} ${reason}`.toLowerCase();
+  if (/(403|forbidden|denied|unauthorized|blocked|invalid[_\s-]?token)/.test(all)) return "blocked";
+  if (/(error|failed|timeout|unavailable|offline|disconnected|disabled)/.test(all)) return "blocked";
+  if (/(ok|healthy|ready|connected|running|active|available)/.test(all)) return "healthy";
+  if (/(warn|degraded|partial|slow|unstable|limited|init|loading|pending)/.test(all)) return "degraded";
+  return "degraded";
+}
+
+function flattenMcpItems(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) {
+    return value.filter((item) => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, unknown>>;
+  }
+  if (!value || typeof value !== "object") return [];
+  const obj = value as Record<string, unknown>;
+  const direct = ["servers", "items", "list", "services", "results"];
+  for (const key of direct) {
+    if (Array.isArray(obj[key])) {
+      return flattenMcpItems(obj[key]);
+    }
+  }
+  for (const key of ["data", "result", "payload", "body"]) {
+    const nested = obj[key];
+    const flat = flattenMcpItems(nested);
+    if (flat.length > 0) return flat;
+  }
+  return [];
+}
+
+function summarizeMcpHealth(rawData: unknown): Record<string, unknown> {
+  const rows = flattenMcpItems(rawData);
+  if (rows.length === 0) {
+    return {
+      level: "degraded",
+      total: 0,
+      healthy: 0,
+      degraded: 0,
+      blocked: 0,
+      preferredOrder: [],
+      servers: []
+    };
+  }
+
+  const normalized = rows.map((item, index) => {
+    const id = firstString(item, ["id", "name", "serverId", "key"]) || `server_${index + 1}`;
+    const name = firstString(item, ["name", "displayName", "label"]);
+    const statusRaw = firstString(item, ["status", "health", "state", "connectionState", "result"]) || "unknown";
+    const reason = firstString(item, ["error", "message", "detail", "lastError", "reason"]);
+    const status = normalizeMcpStatus(statusRaw);
+    const level = detectMcpHealth(status, reason);
+    return { id, name, status, level, reason };
+  });
+
+  const healthy = normalized.filter((item) => item.level === "healthy");
+  const degraded = normalized.filter((item) => item.level === "degraded");
+  const blocked = normalized.filter((item) => item.level === "blocked");
+
+  const level: McpHealthLevel =
+    healthy.length > 0 ? "healthy" : (degraded.length > 0 ? "degraded" : "blocked");
+
+  return {
+    level,
+    total: normalized.length,
+    healthy: healthy.length,
+    degraded: degraded.length,
+    blocked: blocked.length,
+    preferredOrder: [...healthy, ...degraded].map((item) => item.id),
+    servers: normalized
+  };
 }
 
 function resolvePath(input: string): string {
@@ -321,12 +414,14 @@ function createCodexMcpStatusTool(runtime: RuntimeConfig) {
       const attempts: Array<Record<string, unknown>> = [];
       for (const method of candidates) {
         const res = await codexRpc(runtime, method, {});
-        attempts.push({ method, ok: res.ok, status: res.status, data: res.data, error: res.error });
+        const health = res.ok ? summarizeMcpHealth(res.data) : undefined;
+        attempts.push({ method, ok: res.ok, status: res.status, health, data: res.data, error: res.error });
         if (res.ok) {
           return jsonResult({
             ok: true,
             tool: "codex_mcp_status",
             method,
+            health,
             data: res.data,
             attempts
           });

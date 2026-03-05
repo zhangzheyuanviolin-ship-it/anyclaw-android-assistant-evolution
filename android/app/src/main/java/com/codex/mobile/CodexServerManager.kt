@@ -11,6 +11,7 @@ import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 
 /**
  * Manages the lifecycle of the Node.js codex-web-local server process running
@@ -1365,7 +1366,8 @@ H3
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
                   'function wireNewSessionButton(){document.querySelectorAll(\"button\").forEach(function(btn){var label=normalizeSpace(btn.textContent||\"\");if(label!==\"New session\"&&label!==\"新建会话\"){return;}if(btn.dataset.anyclawNewBound===\"1\"){return;}btn.dataset.anyclawNewBound=\"1\";btn.addEventListener(\"click\",function(ev){try{ev.preventDefault();ev.stopPropagation();if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}}catch(_){}openNewSessionDirect();},true);if(isZh){replaceFirstTextNode(btn,\"新建会话\");}});}' +
                   'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:18923/\";});document.body.appendChild(btn);}' +
-                  'function runPatches(){patchChatHistoryRequest();localizeStatic();wireNewSessionButton();installBackButton();installHistoryControls();}' +
+                  'function installTraceToggle(){var id=\"anyclaw-trace-toggle\";var btn=document.getElementById(id);var u=new URL(location.href);var isSimple=u.searchParams.get(\"simple\")!==\"0\";if(!btn){btn=document.createElement(\"button\");btn.id=id;btn.type=\"button\";btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"96px\";btn.style.zIndex=\"2147482998\";btn.style.padding=\"6px 10px\";btn.style.borderRadius=\"8px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.88)\";btn.style.color=\"#fff\";btn.style.fontSize=\"12px\";document.body.appendChild(btn);}btn.textContent=isZh?(isSimple?\"过程显示：关\":\"过程显示：开\"):(isSimple?\"Process view: off\":\"Process view: on\");btn.setAttribute(\"aria-label\",btn.textContent);btn.onclick=function(){var next=new URL(location.href);next.searchParams.set(\"simple\",isSimple?\"0\":\"1\");location.assign(next.toString());};}' +
+                  'function runPatches(){patchChatHistoryRequest();localizeStatic();wireNewSessionButton();installBackButton();installTraceToggle();installHistoryControls();}' +
                   'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
@@ -1552,11 +1554,13 @@ EOF
             const path = require('path');
             function runOpenClaw(args) {
               const res = spawnSync('openclaw', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              const code = typeof res.status === 'number' ? res.status : 1;
+              const errObj = res.error ? String(res.error) : '';
               return {
-                ok: (res.status || 0) === 0,
+                ok: code === 0 && !errObj,
                 out: String(res.stdout || '').trim(),
-                err: String(res.stderr || '').trim(),
-                code: typeof res.status === 'number' ? res.status : 1
+                err: [String(res.stderr || '').trim(), errObj].filter(Boolean).join('\n').trim(),
+                code
               };
             }
             const stateDir = path.join(process.env.HOME || '', '.openclaw-android', 'state');
@@ -1564,6 +1568,7 @@ EOF
             const configPath = path.join(process.env.HOME || '', '.openclaw', 'openclaw.json');
             const NAME = 'anyclaw-heartbeat-main';
             const EVERY = '20m';
+            const EVERY_MS = 20 * 60 * 1000;
             const PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.';
             const summary = {
               name: NAME,
@@ -1636,10 +1641,14 @@ EOF
 
             if (job) {
               const id = job.id || job.jobId || job.key;
-              if (id) {
+              const everyMs = Number((((job || {}).schedule || {}).everyMs) || 0);
+              const payloadText = String((((job || {}).payload || {}).text) || '');
+              const enabled = job.enabled === true;
+              const needsEdit = !enabled || everyMs !== EVERY_MS || payloadText !== PROMPT;
+              if (id && needsEdit) {
                 summary.attempts.push({
                   step: 'cron_edit',
-                  result: runOpenClaw(['cron', 'edit', String(id), '--every', EVERY, '--system-event', PROMPT, '--enable', '--wake', 'now'])
+                  result: runOpenClaw(['cron', 'edit', String(id), '--every', EVERY, '--system-event', PROMPT, '--enable'])
                 });
               }
             }
@@ -1678,16 +1687,30 @@ EOF
 
     private fun isHeartbeatBootstrapHealthy(homeDir: String): Boolean {
         val stateDir = File(homeDir, ".openclaw-android/state")
+        val cronJobsFile = File(stateDir, "cron-jobs.json")
         val cronStatusFile = File(stateDir, "cron-status.json")
-        val hbLastFile = File(stateDir, "heartbeat-last.json")
-        if (!cronStatusFile.exists() || !hbLastFile.exists()) return false
+        if (!cronJobsFile.exists() || !cronStatusFile.exists()) return false
 
         return try {
-            val cron = JSONObject(cronStatusFile.readText())
-            val jobs = cron.optInt("jobs", 0)
-            val hb = JSONObject(hbLastFile.readText())
-            val hbHasData = hb.length() > 0
-            jobs > 0 && hbHasData
+            val cronJobsObj = JSONTokener(cronJobsFile.readText()).nextValue()
+            val cronStatusObj = JSONTokener(cronStatusFile.readText()).nextValue()
+            if (cronJobsObj !is JSONObject || cronStatusObj !is JSONObject) return false
+
+            val jobsCount = cronStatusObj.optInt("jobs", 0)
+            val nextWakeAtMs = cronStatusObj.optLong("nextWakeAtMs", 0L)
+            if (jobsCount <= 0 || nextWakeAtMs <= 0L) return false
+
+            val jobs = cronJobsObj.optJSONArray("jobs") ?: return false
+            var found = false
+            for (i in 0 until jobs.length()) {
+                val job = jobs.optJSONObject(i) ?: continue
+                if (job.optString("name") != "anyclaw-heartbeat-main") continue
+                val enabled = job.optBoolean("enabled", false)
+                val everyMs = job.optJSONObject("schedule")?.optLong("everyMs", 0L) ?: 0L
+                found = enabled && everyMs == 20L * 60L * 1000L
+                if (found) break
+            }
+            found
         } catch (_: Exception) {
             false
         }
