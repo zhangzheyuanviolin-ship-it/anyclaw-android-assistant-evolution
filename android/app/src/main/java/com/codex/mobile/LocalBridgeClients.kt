@@ -2,6 +2,7 @@ package com.codex.mobile
 
 import android.util.Log
 import java.io.OutputStreamWriter
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
@@ -31,7 +32,8 @@ object LocalBridgeClients {
             .put("params", params)
             .toString()
 
-        val serverPort = CodexServerManager.serverPortForPackage(BuildConfig.APPLICATION_ID)
+        val serverPort =
+            CodexServerManager.serverPortForPackage(resolveRuntimePackageName())
         val url = URL("http://127.0.0.1:$serverPort/codex-api/rpc")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -64,6 +66,16 @@ object LocalBridgeClients {
             throw IllegalStateException("Malformed RPC envelope: $rawResponse")
         }
         return envelope.getJSONObject("result")
+    }
+
+    private fun resolveRuntimePackageName(): String {
+        return try {
+            val raw = File("/proc/self/cmdline").readBytes().toString(Charsets.UTF_8)
+            val trimmed = raw.trim { it == '\u0000' || it.isWhitespace() }
+            if (trimmed.isBlank()) "com.codex.mobile.beta" else trimmed
+        } catch (_: Exception) {
+            "com.codex.mobile.beta"
+        }
     }
 
     class OpenClawGateway(private val serverManager: CodexServerManager) {
