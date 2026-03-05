@@ -165,13 +165,51 @@ import type { ReasoningEffort, ThreadScrollState } from './types/codex'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const { localePreference, setLocalePreference, t } = useUiI18n()
+const OPENCLAW_GATEWAY_PORT_STORAGE_KEY = 'anyclaw.openclaw.gateway.port.v1'
+const OPENCLAW_CONTROL_UI_PORT_STORAGE_KEY = 'anyclaw.openclaw.controlui.port.v1'
+const DEFAULT_OPENCLAW_GATEWAY_PORT = '18789'
+const DEFAULT_OPENCLAW_CONTROL_UI_PORT = '19001'
+
+function resolveRuntimePort(
+  queryName: string,
+  storageKey: string,
+  fallbackPort: string,
+): string {
+  if (typeof window === 'undefined') return fallbackPort
+  try {
+    const params = new URLSearchParams(window.location.search)
+    const fromQuery = (params.get(queryName) ?? '').trim()
+    if (/^\d+$/.test(fromQuery)) {
+      window.localStorage.setItem(storageKey, fromQuery)
+      return fromQuery
+    }
+    const fromStorage = (window.localStorage.getItem(storageKey) ?? '').trim()
+    if (/^\d+$/.test(fromStorage)) return fromStorage
+  } catch {
+    // Ignore and fallback.
+  }
+  return fallbackPort
+}
+
 const openClawDashboardUrl = computed(() => {
+  const gatewayPort = resolveRuntimePort(
+    'openclawGatewayPort',
+    OPENCLAW_GATEWAY_PORT_STORAGE_KEY,
+    DEFAULT_OPENCLAW_GATEWAY_PORT,
+  )
+  const controlUiPort = resolveRuntimePort(
+    'openclawControlUiPort',
+    OPENCLAW_CONTROL_UI_PORT_STORAGE_KEY,
+    DEFAULT_OPENCLAW_CONTROL_UI_PORT,
+  )
   const params = new URLSearchParams({
-    gatewayUrl: 'ws://localhost:18789',
+    gatewayUrl: `ws://localhost:${gatewayPort}`,
     localePref: localePreference.value,
     simple: '1',
+    openclawGatewayPort: gatewayPort,
+    openclawControlUiPort: controlUiPort,
   })
-  return `http://localhost:19001/chat?${params.toString()}`
+  return `http://localhost:${controlUiPort}/chat?${params.toString()}`
 })
 
 const {
