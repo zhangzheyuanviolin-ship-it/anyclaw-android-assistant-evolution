@@ -12,6 +12,11 @@
     <string name="api_key_hint">sk-…</string>
     <string name="ok">OK</string>
     <string name="cancel">Cancel</string>
+    <string name="storage_permission_required_title">存储权限 / Storage Permission</string>
+    <string name="storage_permission_required_message_android_r">口袋大龙虾需要完整文件访问权限，用于读写共享存储（例如 /sdcard）。请授予“所有文件访问权限”后继续。&#10;&#10;Pocket Lobster needs full file access to read and write shared storage (for example /sdcard). Grant \"All files access\" to continue.</string>
+    <string name="storage_permission_required_message_legacy">口袋大龙虾需要存储权限，用于读写共享存储（例如 /sdcard）。请授权后继续。&#10;&#10;Pocket Lobster needs storage permission to read and write shared storage (for example /sdcard). Grant permission to continue.</string>
+    <string name="storage_permission_grant">去授权 / Grant</string>
+    <string name="storage_permission_exit">退出 / Exit</string>
     <string name="error_title">Error</string>
     <string name="error_bootstrap">Failed to set up the environment. Please try again.</string>
     <string name="error_server">Failed to start the server.</string>

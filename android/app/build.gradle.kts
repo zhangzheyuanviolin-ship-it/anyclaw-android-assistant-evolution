@@ -39,14 +39,14 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.codex.mobile.beta"
+        applicationId = "com.codex.mobile.pocketlobster.test"
         minSdk = 24
         // targetSdk 28 allows executing binaries from app data directory.
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 69
-        versionName = "0.3.19-beta-branding-pocket-lobster-p0"
+        versionCode = 70
+        versionName = "0.3.20-beta-temp-package-test-p0"
     }
 
     signingConfigs {
