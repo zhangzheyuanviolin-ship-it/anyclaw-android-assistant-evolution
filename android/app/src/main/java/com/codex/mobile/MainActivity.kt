@@ -729,19 +729,19 @@ class MainActivity : AppCompatActivity() {
     private fun showStoragePermissionDialog() {
         val message =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                "AnyClaw needs full file access to read and write your shared storage (for example /sdcard). Grant \"All files access\" to continue."
+                getString(R.string.storage_permission_required_message_android_r)
             } else {
-                "AnyClaw needs storage permission to read and write your shared storage (for example /sdcard). Grant permission to continue."
+                getString(R.string.storage_permission_required_message_legacy)
             }
 
         AlertDialog.Builder(this)
-            .setTitle("Storage Permission Required")
+            .setTitle(getString(R.string.storage_permission_required_title))
             .setMessage(message)
             .setCancelable(false)
-            .setPositiveButton("Grant") { _, _ ->
+            .setPositiveButton(getString(R.string.storage_permission_grant)) { _, _ ->
                 requestStorageAccess()
             }
-            .setNegativeButton("Exit") { _, _ ->
+            .setNegativeButton(getString(R.string.storage_permission_exit)) { _, _ ->
                 finish()
             }
             .show()
