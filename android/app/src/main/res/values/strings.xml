@@ -107,6 +107,8 @@
     <string name="gateway_toggle_disconnect_failed">网关断开失败。</string>
     <string name="back_to_codex_button_text">返回聊天页</string>
     <string name="back_to_codex_button_desc">返回 Codex 聊天主页面</string>
+    <string name="openclaw_new_chat_button_text">进入新版聊天页</string>
+    <string name="openclaw_new_chat_button_desc">切换到新版大龙虾聊天页面</string>
     <string name="prompt_add_button_text">新建提示词</string>
     <string name="prompt_clear_selected_button_text">取消当前选中</string>
     <string name="prompt_delete_selected_button_text">删除当前选中</string>

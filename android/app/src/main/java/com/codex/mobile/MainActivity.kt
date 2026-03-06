@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modelManagerButton: Button
     private lateinit var gatewayToggleButton: Button
     private lateinit var backToCodexButton: Button
+    private lateinit var openClawNewChatButton: Button
     private lateinit var serverManager: CodexServerManager
     private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
@@ -109,6 +110,7 @@ class MainActivity : AppCompatActivity() {
         modelManagerButton = findViewById(R.id.btnModelManager)
         gatewayToggleButton = findViewById(R.id.btnGatewayToggle)
         backToCodexButton = findViewById(R.id.btnBackToCodex)
+        openClawNewChatButton = findViewById(R.id.btnOpenClawNewChat)
 
         serverManager = CodexServerManager(this)
 
@@ -129,6 +131,9 @@ class MainActivity : AppCompatActivity() {
         }
         backToCodexButton.setOnClickListener {
             webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
+        }
+        openClawNewChatButton.setOnClickListener {
+            webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
         }
 
         requestBatteryOptimizationExemption()
@@ -508,6 +513,7 @@ class MainActivity : AppCompatActivity() {
             modelManagerButton.visibility = View.VISIBLE
             gatewayToggleButton.visibility = View.VISIBLE
             backToCodexButton.visibility = View.VISIBLE
+            openClawNewChatButton.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
             webView.loadUrl(consumeLaunchUrlOrDefault())
@@ -561,22 +567,28 @@ class MainActivity : AppCompatActivity() {
             }
             OPEN_TARGET_OPENCLAW_SESSION -> {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
-                if (sessionKey.isEmpty()) null
-                else {
-                    val query = Uri.Builder()
-                        .appendQueryParameter(
-                            "gatewayUrl",
-                            "ws://127.0.0.1:${CodexServerManager.OPENCLAW_GATEWAY_PORT}",
-                        )
-                        .appendQueryParameter("simple", "1")
-                        .appendQueryParameter("session", sessionKey)
-                        .build()
-                        .encodedQuery
-                    "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat?$query"
-                }
+                buildOpenClawChatPageUrl(sessionKey)
             }
             else -> null
         }
+    }
+
+    private fun extractSessionFromCurrentUrl(): String? {
+        val current = webView.url ?: return null
+        return try {
+            Uri.parse(current).getQueryParameter("session")?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun buildOpenClawChatPageUrl(sessionKey: String?): String {
+        val builder = Uri.parse("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/openclaw/chat").buildUpon()
+        val normalized = sessionKey?.trim().orEmpty()
+        if (normalized.isNotEmpty()) {
+            builder.appendQueryParameter("session", normalized)
+        }
+        return builder.build().toString()
     }
 
     /**
@@ -756,6 +768,7 @@ class MainActivity : AppCompatActivity() {
             modelManagerButton.visibility = View.GONE
             gatewayToggleButton.visibility = View.GONE
             backToCodexButton.visibility = View.GONE
+            openClawNewChatButton.visibility = View.GONE
         }
     }
 

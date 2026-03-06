@@ -1,13 +1,15 @@
 <template>
   <form class="openclaw-composer" @submit.prevent="onSubmit">
     <div class="openclaw-composer-shell">
-      <input
+      <textarea
+        ref="composerInputRef"
         v-model="draft"
         class="openclaw-composer-input"
-        type="text"
+        rows="2"
         :placeholder="placeholder"
         :disabled="disabled || !sessionKey"
         :aria-label="placeholder"
+        @focus="onFocusInput"
         @keydown.enter.exact.prevent="onSubmit"
       />
       <button
@@ -23,7 +25,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 
 const props = defineProps<{
   sessionKey: string
@@ -37,6 +39,24 @@ const emit = defineEmits<{
 }>()
 
 const draft = ref('')
+const composerInputRef = ref<HTMLTextAreaElement | null>(null)
+
+function moveCursorToEnd(): void {
+  const input = composerInputRef.value
+  if (!input) return
+  const length = input.value.length
+  requestAnimationFrame(() => {
+    try {
+      input.setSelectionRange(length, length)
+    } catch {
+      // Ignore unsupported selection operations.
+    }
+  })
+}
+
+function onFocusInput(): void {
+  moveCursorToEnd()
+}
 
 function onSubmit(): void {
   const text = draft.value.trim()
@@ -49,6 +69,7 @@ watch(
   () => props.sessionKey,
   () => {
     draft.value = ''
+    void nextTick(() => moveCursorToEnd())
   },
 )
 </script>
@@ -65,7 +86,7 @@ watch(
 }
 
 .openclaw-composer-input {
-  @apply flex-1 min-w-0 h-11 rounded-xl border-0 bg-transparent px-1 text-sm text-zinc-900 outline-none;
+  @apply flex-1 min-w-0 h-16 max-h-48 rounded-xl border-0 bg-transparent px-1 py-2 text-sm text-zinc-900 outline-none resize-y;
 }
 
 .openclaw-composer-input:disabled {
