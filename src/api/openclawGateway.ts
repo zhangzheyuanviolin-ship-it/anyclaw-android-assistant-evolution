@@ -23,8 +23,37 @@ async function requestOpenClaw<T>(
   path: string,
   options: RequestInit = {},
   fallbackMessage = 'OpenClaw request failed',
+  timeoutMs = 9000,
 ): Promise<T> {
-  const response = await fetch(path, options)
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const timerHost = typeof globalThis !== 'undefined' ? globalThis : null
+  const timeout =
+    controller && timeoutMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
+      ? timerHost.setTimeout(() => {
+          controller.abort()
+        }, timeoutMs)
+      : null
+
+  let response: Response
+  try {
+    response = await fetch(path, {
+      ...options,
+      signal: controller?.signal,
+    })
+  } catch (error) {
+    if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
+      timerHost.clearTimeout(timeout)
+    }
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(`${fallbackMessage}: request timeout`)
+    }
+    throw error
+  }
+
+  if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
+    timerHost.clearTimeout(timeout)
+  }
+
   let payload: unknown = null
   try {
     payload = await response.json()

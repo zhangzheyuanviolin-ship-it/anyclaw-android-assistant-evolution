@@ -150,41 +150,61 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
   const command =
     `openclaw gateway call ${normalizedMethod} --json --params ${shellQuote(serializedParams)} 2>&1`
 
-  const output = await new Promise<string>((resolve, reject) => {
-    const env = { ...process.env }
-    if (prefixBin) {
-      const currentPath = typeof env.PATH === 'string' ? env.PATH : ''
-      if (!currentPath.split(':').includes(prefixBin)) {
-        env.PATH = currentPath.length > 0 ? `${prefixBin}:${currentPath}` : prefixBin
+  const runCommandOnce = () =>
+    new Promise<string>((resolve, reject) => {
+      const env = { ...process.env }
+      if (prefixBin) {
+        const currentPath = typeof env.PATH === 'string' ? env.PATH : ''
+        if (!currentPath.split(':').includes(prefixBin)) {
+          env.PATH = currentPath.length > 0 ? `${prefixBin}:${currentPath}` : prefixBin
+        }
       }
+
+      const child = spawn(shellPath, ['-c', command], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+        cwd: homeDir || process.cwd(),
+      })
+
+      let buffer = ''
+      child.stdout.setEncoding('utf8')
+      child.stderr.setEncoding('utf8')
+
+      child.stdout.on('data', (chunk: string) => {
+        buffer += chunk
+      })
+      child.stderr.on('data', (chunk: string) => {
+        buffer += chunk
+      })
+
+      child.on('error', reject)
+      child.on('exit', (code) => {
+        if (code === 0) {
+          resolve(buffer)
+          return
+        }
+        reject(new Error(buffer.trim() || `OpenClaw gateway call failed: ${normalizedMethod}`))
+      })
+    })
+
+  const shouldRetryGatewayClosed = (message: string): boolean => {
+    const normalized = message.toLowerCase()
+    return normalized.includes('gateway closed (1006') ||
+      normalized.includes('abnormal closure') ||
+      normalized.includes('connection is not open')
+  }
+
+  let output = ''
+  try {
+    output = await runCommandOnce()
+  } catch (error) {
+    const firstMessage = getErrorMessage(error, '')
+    if (!shouldRetryGatewayClosed(firstMessage)) {
+      throw error
     }
-
-    const child = spawn(shellPath, ['-c', command], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-      cwd: homeDir || process.cwd(),
-    })
-
-    let buffer = ''
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-
-    child.stdout.on('data', (chunk: string) => {
-      buffer += chunk
-    })
-    child.stderr.on('data', (chunk: string) => {
-      buffer += chunk
-    })
-
-    child.on('error', reject)
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve(buffer)
-        return
-      }
-      reject(new Error(buffer.trim() || `OpenClaw gateway call failed: ${normalizedMethod}`))
-    })
-  })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    output = await runCommandOnce()
+  }
 
   const payload = extractJsonPayload(output)
   return JSON.parse(payload) as unknown

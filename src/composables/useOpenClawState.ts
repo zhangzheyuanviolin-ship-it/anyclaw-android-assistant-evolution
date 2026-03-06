@@ -22,6 +22,10 @@ type SessionSelectOptions = {
   syncHistory?: boolean
 }
 
+type HistoryRefreshOptions = {
+  silent?: boolean
+}
+
 function safeJsonStringify(value: unknown, maxLength = 360): string {
   try {
     const serialized = JSON.stringify(value)
@@ -252,14 +256,26 @@ export function useOpenClawState() {
     }
   }
 
-  async function refreshHistory(): Promise<void> {
+  async function refreshHealth(): Promise<void> {
+    try {
+      const health = await getOpenClawHealth()
+      healthOk.value = health.ok
+    } catch {
+      healthOk.value = false
+    }
+  }
+
+  async function refreshHistory(options: HistoryRefreshOptions = {}): Promise<void> {
     const sessionKey = selectedSessionKey.value.trim()
     if (!sessionKey) {
       messages.value = []
       return
     }
 
-    isLoadingMessages.value = true
+    const showBusy = options.silent !== true
+    if (showBusy) {
+      isLoadingMessages.value = true
+    }
     try {
       const payload = await readOpenClawHistory({
         sessionKey,
@@ -273,7 +289,9 @@ export function useOpenClawState() {
     } catch (error) {
       lastError.value = error instanceof Error ? error.message : '加载聊天记录失败'
     } finally {
-      isLoadingMessages.value = false
+      if (showBusy) {
+        isLoadingMessages.value = false
+      }
     }
   }
 
@@ -293,12 +311,7 @@ export function useOpenClawState() {
   }
 
   async function initialize(preferredSessionKey = ''): Promise<void> {
-    try {
-      const health = await getOpenClawHealth()
-      healthOk.value = health.ok
-    } catch {
-      healthOk.value = false
-    }
+    await refreshHealth()
 
     await refreshSessions(preferredSessionKey)
     if (selectedSessionKey.value) {
@@ -335,6 +348,7 @@ export function useOpenClawState() {
       })
       await refreshHistory()
       await refreshSessions(sessionKey)
+      await refreshHealth()
       lastError.value = ''
     } catch (error) {
       pendingRun.value = false
@@ -380,8 +394,9 @@ export function useOpenClawState() {
       pollTick += 1
       if (pollTick % 3 === 0) {
         await refreshSessions(selectedSessionKey.value)
+        await refreshHealth()
       }
-      await refreshHistory()
+      await refreshHistory({ silent: true })
     } finally {
       pollInFlight = false
     }
@@ -415,6 +430,7 @@ export function useOpenClawState() {
     liveOverlay,
     lastError,
     initialize,
+    refreshHealth,
     refreshSessions,
     refreshHistory,
     selectSession,

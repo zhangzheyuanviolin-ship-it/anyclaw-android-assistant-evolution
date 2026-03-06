@@ -231,7 +231,7 @@
               <div class="content-thread">
                 <ThreadConversation
                   :messages="openClawMessages"
-                  :is-loading="isOpenClawLoadingMessages"
+                  :is-loading="isOpenClawLoadingMessages && openClawMessages.length === 0"
                   :active-thread-id="openClawSelectedSessionKey || '__openclaw__'"
                   :scroll-state="null"
                   :live-overlay="openClawLiveOverlay"
@@ -251,7 +251,7 @@
 
               <OpenClawComposer
                 :session-key="openClawSelectedSessionKey"
-                :disabled="isOpenClawSendingMessage || isOpenClawLoadingMessages"
+                :disabled="isOpenClawSendingMessage"
                 :placeholder="t('openclaw_send_placeholder')"
                 :send-label="t('openclaw_send_button')"
                 @submit="onSubmitOpenClawMessage"
@@ -387,6 +387,7 @@ const {
   liveOverlay: openClawLiveOverlay,
   lastError: openClawLastError,
   initialize: initializeOpenClaw,
+  refreshHealth: refreshOpenClawHealth,
   refreshSessions: refreshOpenClawSessions,
   refreshHistory: refreshOpenClawHistory,
   selectSession: selectOpenClawSession,
@@ -700,6 +701,7 @@ function onSelectOpenClawSession(sessionKey: string): void {
 
 function onRefreshOpenClaw(): void {
   void (async () => {
+    await refreshOpenClawHealth()
     await refreshOpenClawSessions(openClawSelectedSessionKey.value)
     await refreshOpenClawHistory()
   })()
