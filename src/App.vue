@@ -1,7 +1,98 @@
 <template>
   <DesktopLayout :is-sidebar-collapsed="isSidebarCollapsed">
     <template #sidebar>
-      <section class="sidebar-root">
+      <section v-if="isOpenClawRoute" class="sidebar-root">
+        <div v-if="!isSidebarCollapsed" class="openclaw-sidebar-actions">
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('openclaw_back_codex')"
+            @click="onBackToCodexRoute"
+          >
+            {{ t('openclaw_back_codex') }}
+          </button>
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('openclaw_new_session')"
+            @click="onCreateOpenClawSession"
+          >
+            {{ t('openclaw_new_session') }}
+          </button>
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('openclaw_refresh')"
+            @click="onRefreshOpenClaw"
+          >
+            {{ t('openclaw_refresh') }}
+          </button>
+        </div>
+
+        <div v-if="!isSidebarCollapsed" class="sidebar-search-bar">
+          <IconTablerSearch class="sidebar-search-bar-icon" />
+          <input
+            v-model="openClawSearchQuery"
+            class="sidebar-search-input"
+            type="text"
+            :aria-label="t('openclaw_search_sessions')"
+            :placeholder="t('openclaw_filter_sessions')"
+          />
+          <button
+            v-if="openClawSearchQuery.length > 0"
+            class="sidebar-search-clear"
+            type="button"
+            :aria-label="t('sidebar_clear_search')"
+            @click="onToggleOpenClawSearch"
+          >
+            <IconTablerX class="sidebar-search-clear-icon" />
+          </button>
+        </div>
+
+        <div v-if="!isSidebarCollapsed" class="openclaw-health-status">
+          {{ openClawHealthOk ? t('openclaw_health_ok') : t('openclaw_health_fail') }}
+        </div>
+
+        <ul v-if="!isSidebarCollapsed" class="openclaw-session-list">
+          <li v-if="isOpenClawLoadingSessions" class="openclaw-session-empty">
+            {{ t('openclaw_session_loading') }}
+          </li>
+          <li v-else-if="openClawFilteredSessions.length === 0" class="openclaw-session-empty">
+            {{ t('openclaw_session_empty') }}
+          </li>
+          <li
+            v-for="session in openClawFilteredSessions"
+            :key="session.key"
+            class="openclaw-session-item"
+          >
+            <button
+              type="button"
+              class="openclaw-session-button"
+              :class="{ 'is-active': session.key === openClawSelectedSessionKey }"
+              :aria-current="session.key === openClawSelectedSessionKey ? 'true' : 'false'"
+              :aria-label="`${session.title} ${formatOpenClawTime(session.updatedAtMs)}`"
+              @click="onSelectOpenClawSession(session.key)"
+              @contextmenu.prevent="onRenameOpenClawSession(session.key)"
+            >
+              <span class="openclaw-session-title">{{ session.title }}</span>
+              <span class="openclaw-session-meta">{{ formatOpenClawTime(session.updatedAtMs) }}</span>
+            </button>
+          </li>
+        </ul>
+
+        <a
+          v-if="!isSidebarCollapsed"
+          class="openclaw-dashboard-link"
+          :href="openClawDashboardUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <IconTablerExternalLink class="openclaw-dashboard-icon" />
+          <span class="openclaw-dashboard-label">{{ t('openclaw_original_dashboard_label') }}</span>
+        </a>
+      </section>
+
+      <section v-else class="sidebar-root">
         <SidebarThreadControls
           v-if="!isSidebarCollapsed"
           class="sidebar-thread-controls-host"
@@ -55,16 +146,16 @@
           @archive="onArchiveThread" @start-new-thread="onStartNewThread" @rename-project="onRenameProject"
           @remove-project="onRemoveProject" @reorder-project="onReorderProject" />
 
-        <a
+        <button
           v-if="!isSidebarCollapsed"
           class="openclaw-dashboard-link"
-          :href="openClawDashboardUrl"
-          target="_blank"
-          rel="noopener noreferrer"
+          type="button"
+          :aria-label="t('openclaw_dashboard_label')"
+          @click="onOpenOpenClawChat"
         >
           <IconTablerExternalLink class="openclaw-dashboard-icon" />
           <span class="openclaw-dashboard-label">{{ t('openclaw_dashboard_label') }}</span>
-        </a>
+        </button>
       </section>
     </template>
 
@@ -73,7 +164,7 @@
         <ContentHeader :title="contentTitle">
           <template #leading>
             <SidebarThreadControls
-              v-if="isSidebarCollapsed"
+              v-if="isSidebarCollapsed && !isOpenClawRoute"
               class="sidebar-thread-controls-header-host"
               :is-sidebar-collapsed="isSidebarCollapsed"
               :is-auto-refresh-enabled="isAutoRefreshEnabled"
@@ -101,7 +192,74 @@
         </ContentHeader>
 
         <section class="content-body">
-          <template v-if="isHomeRoute">
+          <template v-if="isOpenClawRoute">
+            <div class="content-grid">
+              <div class="openclaw-toolbar">
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="openClawProcessToggleLabel"
+                  @click="toggleOpenClawProcessView"
+                >
+                  {{ openClawProcessToggleLabel }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="t('openclaw_load_older')"
+                  @click="loadOlderOpenClawHistory"
+                >
+                  {{ t('openclaw_load_older') }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="t('openclaw_reset_lite')"
+                  @click="resetOpenClawHistoryToLite"
+                >
+                  {{ t('openclaw_reset_lite') }}
+                </button>
+                <span class="openclaw-toolbar-tip">
+                  {{ t('openclaw_history_window', { count: String(openClawHistoryLimit) }) }}
+                </span>
+              </div>
+
+              <p v-if="openClawLastError.length > 0" class="content-error">
+                {{ openClawLastError }}
+              </p>
+
+              <div class="content-thread">
+                <ThreadConversation
+                  :messages="openClawMessages"
+                  :is-loading="isOpenClawLoadingMessages"
+                  :active-thread-id="openClawSelectedSessionKey || '__openclaw__'"
+                  :scroll-state="null"
+                  :live-overlay="openClawLiveOverlay"
+                  :pending-requests="openClawPendingRequests"
+                  :message-actions-enabled="false"
+                  @update-scroll-state="onIgnoreThreadScrollState"
+                  @respond-server-request="onIgnoreServerRequest"
+                  @copy-message="onCopyMessage"
+                  @delete-from-message="onIgnoreMessageAction"
+                  @branch-from-message="onIgnoreMessageAction"
+                />
+              </div>
+
+              <p v-if="!openClawSelectedSessionKey" class="conversation-empty">
+                {{ t('openclaw_no_session_selected') }}
+              </p>
+
+              <OpenClawComposer
+                :session-key="openClawSelectedSessionKey"
+                :disabled="isOpenClawSendingMessage || isOpenClawLoadingMessages"
+                :placeholder="t('openclaw_send_placeholder')"
+                :send-label="t('openclaw_send_button')"
+                @submit="onSubmitOpenClawMessage"
+              />
+            </div>
+          </template>
+
+          <template v-else-if="isHomeRoute">
             <div class="content-grid">
               <div class="new-thread-empty">
                 <p class="new-thread-hero">{{ t('home_hero') }}</p>
@@ -154,14 +312,16 @@ import SidebarThreadTree from './components/sidebar/SidebarThreadTree.vue'
 import ContentHeader from './components/content/ContentHeader.vue'
 import ThreadConversation from './components/content/ThreadConversation.vue'
 import ThreadComposer from './components/content/ThreadComposer.vue'
+import OpenClawComposer from './components/content/OpenClawComposer.vue'
 import ComposerDropdown from './components/content/ComposerDropdown.vue'
 import SidebarThreadControls from './components/sidebar/SidebarThreadControls.vue'
 import IconTablerSearch from './components/icons/IconTablerSearch.vue'
 import IconTablerX from './components/icons/IconTablerX.vue'
 import IconTablerExternalLink from './components/icons/IconTablerExternalLink.vue'
 import { useDesktopState } from './composables/useDesktopState'
+import { useOpenClawState } from './composables/useOpenClawState'
 import { useUiI18n, type LocalePreference } from './composables/useUiI18n'
-import type { ReasoningEffort, ThreadScrollState } from './types/codex'
+import type { ReasoningEffort, ThreadScrollState, UiServerRequest } from './types/codex'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const { localePreference, setLocalePreference, t } = useUiI18n()
@@ -212,6 +372,34 @@ const {
   stopPolling,
 } = useDesktopState()
 
+const {
+  sessions: openClawSessions,
+  selectedSession: openClawSelectedSession,
+  selectedSessionKey: openClawSelectedSessionKey,
+  selectedSessionTitle: openClawSelectedSessionTitle,
+  messages: openClawMessages,
+  showProcess: openClawShowProcess,
+  historyLimit: openClawHistoryLimit,
+  healthOk: openClawHealthOk,
+  isLoadingSessions: isOpenClawLoadingSessions,
+  isLoadingMessages: isOpenClawLoadingMessages,
+  isSendingMessage: isOpenClawSendingMessage,
+  liveOverlay: openClawLiveOverlay,
+  lastError: openClawLastError,
+  initialize: initializeOpenClaw,
+  refreshSessions: refreshOpenClawSessions,
+  refreshHistory: refreshOpenClawHistory,
+  selectSession: selectOpenClawSession,
+  sendMessage: sendOpenClawMessage,
+  createSession: createOpenClawSession,
+  updateSessionTitle: updateOpenClawSessionTitle,
+  toggleProcessView: toggleOpenClawProcessView,
+  loadOlderHistory: loadOlderOpenClawHistory,
+  resetHistoryToLite: resetOpenClawHistoryToLite,
+  startPolling: startOpenClawPolling,
+  stopPolling: stopOpenClawPolling,
+} = useOpenClawState()
+
 const route = useRoute()
 const router = useRouter()
 const isRouteSyncInProgress = ref(false)
@@ -221,10 +409,16 @@ const isSidebarCollapsed = ref(loadSidebarCollapsed())
 const sidebarSearchQuery = ref('')
 const isSidebarSearchVisible = ref(false)
 const sidebarSearchInputRef = ref<HTMLInputElement | null>(null)
+const openClawSearchQuery = ref('')
+const openClawPendingRequests = ref<UiServerRequest[]>([])
 
 const routeThreadId = computed(() => {
   const rawThreadId = route.params.threadId
   return typeof rawThreadId === 'string' ? rawThreadId : ''
+})
+const routeOpenClawSessionKey = computed(() => {
+  const rawSession = route.query.session
+  return typeof rawSession === 'string' ? rawSession.trim() : ''
 })
 
 const knownThreadIdSet = computed(() => {
@@ -238,7 +432,13 @@ const knownThreadIdSet = computed(() => {
 })
 
 const isHomeRoute = computed(() => route.name === 'home')
+const isThreadRoute = computed(() => route.name === 'thread')
+const isOpenClawRoute = computed(() => route.name === 'openclaw-chat')
+const isCodexRoute = computed(() => isHomeRoute.value || isThreadRoute.value)
 const contentTitle = computed(() => {
+  if (isOpenClawRoute.value) {
+    return openClawSelectedSessionTitle.value || t('openclaw_chat_title')
+  }
   if (isHomeRoute.value) return t('content_new_thread')
   return selectedThread.value?.title ?? t('content_choose_thread')
 })
@@ -258,6 +458,20 @@ const filteredMessages = computed(() =>
 const liveOverlay = computed(() => selectedLiveOverlay.value)
 const composerThreadContextId = computed(() => (isHomeRoute.value ? '__new-thread__' : selectedThreadId.value))
 const isSelectedThreadInProgress = computed(() => !isHomeRoute.value && selectedThread.value?.inProgress === true)
+const openClawProcessToggleLabel = computed(() =>
+  openClawShowProcess.value ? t('openclaw_process_on') : t('openclaw_process_off'),
+)
+const openClawFilteredSessions = computed(() => {
+  const query = openClawSearchQuery.value.trim().toLowerCase()
+  if (query.length === 0) return openClawSessions.value
+  return openClawSessions.value.filter((row) => {
+    return (
+      row.title.toLowerCase().includes(query) ||
+      row.key.toLowerCase().includes(query) ||
+      row.preview.toLowerCase().includes(query)
+    )
+  })
+})
 const DEFAULT_WORKSPACE_NAME = 'codex'
 
 const newThreadFolderOptions = computed(() => {
@@ -289,6 +503,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onWindowKeyDown)
   stopPolling()
+  stopOpenClawPolling()
 })
 
 function toggleSidebarSearch(): void {
@@ -447,6 +662,88 @@ function onInterruptTurn(): void {
   void interruptSelectedThreadTurn()
 }
 
+function formatOpenClawTime(updatedAtMs: number): string {
+  if (!updatedAtMs || updatedAtMs <= 0) return t('time_na')
+  const date = new Date(updatedAtMs)
+  if (Number.isNaN(date.getTime())) return t('time_na')
+  return date.toLocaleString()
+}
+
+function onOpenOpenClawChat(): void {
+  const query = openClawSelectedSessionKey.value
+    ? { session: openClawSelectedSessionKey.value }
+    : undefined
+  void router.push({ name: 'openclaw-chat', query })
+}
+
+function onBackToCodexRoute(): void {
+  if (selectedThreadId.value) {
+    void router.push({ name: 'thread', params: { threadId: selectedThreadId.value } })
+    return
+  }
+  void router.push({ name: 'home' })
+}
+
+function onToggleOpenClawSearch(): void {
+  openClawSearchQuery.value = ''
+}
+
+function onSelectOpenClawSession(sessionKey: string): void {
+  if (!sessionKey) return
+  void (async () => {
+    await selectOpenClawSession(sessionKey)
+    if (isOpenClawRoute.value) {
+      await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
+    }
+  })()
+}
+
+function onRefreshOpenClaw(): void {
+  void (async () => {
+    await refreshOpenClawSessions(openClawSelectedSessionKey.value)
+    await refreshOpenClawHistory()
+  })()
+}
+
+function onCreateOpenClawSession(): void {
+  void (async () => {
+    const sessionKey = await createOpenClawSession()
+    if (sessionKey) {
+      await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
+    }
+  })()
+}
+
+function onRenameOpenClawSession(sessionKey: string): void {
+  if (!sessionKey || typeof window === 'undefined') return
+  const current = openClawSelectedSession.value?.title || sessionKey
+  const nextTitle = window.prompt(t('openclaw_rename_session'), current)?.trim() || ''
+  if (!nextTitle) return
+  void (async () => {
+    try {
+      await updateOpenClawSessionTitle(sessionKey, nextTitle)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : t('openclaw_rename_session_failed'))
+    }
+  })()
+}
+
+function onSubmitOpenClawMessage(text: string): void {
+  void sendOpenClawMessage(text)
+}
+
+function onIgnoreThreadScrollState(): void {
+  // No-op for OpenClaw chat mode.
+}
+
+function onIgnoreServerRequest(): void {
+  // No-op for OpenClaw chat mode.
+}
+
+function onIgnoreMessageAction(): void {
+  // No-op for OpenClaw chat mode.
+}
+
 function loadSidebarCollapsed(): boolean {
   if (typeof window === 'undefined') return false
   const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)
@@ -469,12 +766,21 @@ function normalizeMessageType(rawType: string | undefined, role: string): string
 
 async function initialize(): Promise<void> {
   await refreshAll()
+  try {
+    await initializeOpenClaw(routeOpenClawSessionKey.value)
+  } catch {
+    // Keep Codex UI available even if OpenClaw bootstrap is temporarily unavailable.
+  }
   hasInitialized.value = true
   await syncThreadSelectionWithRoute()
   startPolling()
+  if (isOpenClawRoute.value) {
+    startOpenClawPolling()
+  }
 }
 
 async function syncThreadSelectionWithRoute(): Promise<void> {
+  if (!isCodexRoute.value) return
   if (isRouteSyncInProgress.value) return
   isRouteSyncInProgress.value = true
 
@@ -526,6 +832,7 @@ watch(
   async (threadId) => {
     if (!hasInitialized.value) return
     if (isRouteSyncInProgress.value) return
+    if (!isCodexRoute.value) return
     if (isHomeRoute.value) return
 
     if (!threadId) {
@@ -537,6 +844,45 @@ watch(
 
     if (route.name === 'thread' && routeThreadId.value === threadId) return
     await router.replace({ name: 'thread', params: { threadId } })
+  },
+)
+
+watch(
+  () => isOpenClawRoute.value,
+  (isActive) => {
+    if (!hasInitialized.value) return
+    if (isActive) {
+      startOpenClawPolling()
+      if (routeOpenClawSessionKey.value) {
+        void selectOpenClawSession(routeOpenClawSessionKey.value)
+      } else if (openClawSelectedSessionKey.value) {
+        void router.replace({ name: 'openclaw-chat', query: { session: openClawSelectedSessionKey.value } })
+      }
+      return
+    }
+    stopOpenClawPolling()
+  },
+)
+
+watch(
+  () => routeOpenClawSessionKey.value,
+  (sessionKey) => {
+    if (!hasInitialized.value) return
+    if (!isOpenClawRoute.value) return
+    if (!sessionKey) return
+    if (sessionKey === openClawSelectedSessionKey.value) return
+    void selectOpenClawSession(sessionKey)
+  },
+)
+
+watch(
+  () => openClawSelectedSessionKey.value,
+  (sessionKey) => {
+    if (!hasInitialized.value) return
+    if (!isOpenClawRoute.value) return
+    if (!sessionKey) return
+    if (routeOpenClawSessionKey.value === sessionKey) return
+    void router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
   },
 )
 
@@ -676,6 +1022,58 @@ async function submitFirstMessageForNewThread(text: string): Promise<void> {
 
 .openclaw-dashboard-label {
   @apply truncate;
+}
+
+.openclaw-sidebar-actions {
+  @apply mx-2 mt-1 mb-1 flex flex-col gap-2;
+}
+
+.openclaw-sidebar-button {
+  @apply w-full rounded-md border border-zinc-200 bg-white px-2.5 py-2 text-left text-sm text-zinc-700 transition hover:bg-zinc-50 hover:border-zinc-300;
+}
+
+.openclaw-health-status {
+  @apply mx-2 mb-1 rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-600;
+}
+
+.openclaw-session-list {
+  @apply list-none m-0 px-2 pb-2 flex-1 min-h-0 overflow-y-auto overflow-x-hidden space-y-1;
+}
+
+.openclaw-session-empty {
+  @apply rounded-md border border-dashed border-zinc-200 bg-white px-2.5 py-2 text-xs text-zinc-500;
+}
+
+.openclaw-session-item {
+  @apply m-0;
+}
+
+.openclaw-session-button {
+  @apply w-full rounded-md border border-transparent bg-white px-2.5 py-2 text-left transition hover:border-zinc-200 hover:bg-zinc-50;
+}
+
+.openclaw-session-button.is-active {
+  @apply border-orange-200 bg-orange-50;
+}
+
+.openclaw-session-title {
+  @apply block truncate text-sm text-zinc-800;
+}
+
+.openclaw-session-meta {
+  @apply mt-0.5 block truncate text-[11px] text-zinc-500;
+}
+
+.openclaw-toolbar {
+  @apply mx-auto w-full max-w-175 px-6 flex flex-wrap items-center gap-2;
+}
+
+.openclaw-toolbar-button {
+  @apply rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-700 transition hover:bg-zinc-50 hover:border-zinc-300;
+}
+
+.openclaw-toolbar-tip {
+  @apply text-xs text-zinc-500;
 }
 
 .ui-locale-label {

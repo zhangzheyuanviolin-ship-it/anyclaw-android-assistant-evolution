@@ -109,6 +109,100 @@ function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/gu, `'\"'\"'`)}'`
+}
+
+function extractJsonPayload(raw: string): string {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    throw new Error('Empty gateway response')
+  }
+  if (
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']'))
+  ) {
+    return trimmed
+  }
+
+  const firstBrace = trimmed.indexOf('{')
+  const lastBrace = trimmed.lastIndexOf('}')
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return trimmed.slice(firstBrace, lastBrace + 1)
+  }
+
+  const firstBracket = trimmed.indexOf('[')
+  const lastBracket = trimmed.lastIndexOf(']')
+  if (firstBracket >= 0 && lastBracket > firstBracket) {
+    return trimmed.slice(firstBracket, lastBracket + 1)
+  }
+
+  throw new Error('No JSON payload found in gateway response')
+}
+
+async function runOpenClawGatewayCall(method: string, params: unknown): Promise<unknown> {
+  const normalizedMethod = method.trim()
+  if (!/^[a-zA-Z0-9._/-]+$/u.test(normalizedMethod)) {
+    throw new Error(`Invalid OpenClaw gateway method: ${method}`)
+  }
+
+  const serializedParams = JSON.stringify(params ?? {})
+  const command =
+    `openclaw gateway call ${normalizedMethod} --json --params ${shellQuote(serializedParams)} 2>&1`
+
+  const output = await new Promise<string>((resolve, reject) => {
+    const env = { ...process.env }
+    if (prefixBin) {
+      const currentPath = typeof env.PATH === 'string' ? env.PATH : ''
+      if (!currentPath.split(':').includes(prefixBin)) {
+        env.PATH = currentPath.length > 0 ? `${prefixBin}:${currentPath}` : prefixBin
+      }
+    }
+
+    const child = spawn(shellPath, ['-c', command], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+      cwd: homeDir || process.cwd(),
+    })
+
+    let buffer = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+
+    child.stdout.on('data', (chunk: string) => {
+      buffer += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      buffer += chunk
+    })
+
+    child.on('error', reject)
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve(buffer)
+        return
+      }
+      reject(new Error(buffer.trim() || `OpenClaw gateway call failed: ${normalizedMethod}`))
+    })
+  })
+
+  const payload = extractJsonPayload(output)
+  return JSON.parse(payload) as unknown
+}
+
+function readPositiveInt(value: string | null, fallback: number): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  const normalized = Math.floor(parsed)
+  if (normalized < 1) return fallback
+  return normalized
+}
+
+function buildOpenClawSessionKey(): string {
+  const now = Date.now().toString(36)
+  return `agent:main:mobile-${now}`
+}
+
 function buildCapabilitySummary(statusRecord: Record<string, unknown> | null): string {
   if (!statusRecord) return ''
   const installed = statusRecord.installed === true ? '1' : '0'
@@ -606,6 +700,90 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         const result = await appServer.rpc(body.method, nextParams)
         setJson(res, 200, { result })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/openclaw-api/health') {
+        const payload = await runOpenClawGatewayCall('health', {})
+        setJson(res, 200, { ok: true, data: payload })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/openclaw-api/sessions') {
+        const limit = readPositiveInt(url.searchParams.get('limit'), 200)
+        const payload = await runOpenClawGatewayCall('sessions.list', {
+          limit,
+          includeDerivedTitles: true,
+          includeLastMessage: true,
+          includeGlobal: true,
+          includeUnknown: true,
+        })
+        const record = asRecord(payload)
+        const sessions = Array.isArray(record?.sessions) ? record.sessions : []
+        setJson(res, 200, { sessions })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/history') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        if (!sessionKey) {
+          setJson(res, 400, { error: 'Missing sessionKey' })
+          return
+        }
+        const limit = readPositiveInt(String(payload?.limit ?? ''), 60)
+        const result = await runOpenClawGatewayCall('chat.history', {
+          sessionKey,
+          limit,
+        })
+        setJson(res, 200, result)
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/send') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        const message = normalizeText(payload?.message)
+        if (!sessionKey || !message) {
+          setJson(res, 400, { error: 'Missing sessionKey or message' })
+          return
+        }
+        const runId = `run_${Date.now().toString(36)}`
+        await runOpenClawGatewayCall('chat.send', {
+          sessionKey,
+          message,
+          deliver: payload?.deliver === true,
+          idempotencyKey: runId,
+        })
+        setJson(res, 200, { ok: true, runId })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/new') {
+        const payload = asRecord(await readJsonBody(req))
+        const label = normalizeText(payload?.label) || '新会话'
+        const sessionKey = buildOpenClawSessionKey()
+        await runOpenClawGatewayCall('sessions.patch', {
+          key: sessionKey,
+          label,
+        })
+        setJson(res, 200, { sessionKey })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/rename') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        const label = normalizeText(payload?.label)
+        if (!sessionKey || !label) {
+          setJson(res, 400, { error: 'Missing sessionKey or label' })
+          return
+        }
+        await runOpenClawGatewayCall('sessions.patch', {
+          key: sessionKey,
+          label,
+        })
+        setJson(res, 200, { ok: true })
         return
       }
 
