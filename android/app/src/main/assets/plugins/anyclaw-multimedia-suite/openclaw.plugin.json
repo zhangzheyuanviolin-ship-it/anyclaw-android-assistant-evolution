@@ -2,7 +2,7 @@
   "id": "anyclaw-multimedia-suite",
   "name": "AnyClaw Multimedia Suite",
   "description": "Android-friendly multimedia helper tools for ffmpeg/ffprobe and dependency bootstrap.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -20,6 +20,15 @@
       },
       "allowExec": {
         "type": "boolean"
+      },
+      "autoRepairOnLinkerError": {
+        "type": "boolean"
+      },
+      "ffmpegBinary": {
+        "type": "string"
+      },
+      "ffprobeBinary": {
+        "type": "string"
       }
     }
   }

@@ -1053,6 +1053,7 @@ H3
         if (!multimediaSuiteConfig.has("workspaceRoot")) multimediaSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
         if (!multimediaSuiteConfig.has("allowInstall")) multimediaSuiteConfig.put("allowInstall", true)
         if (!multimediaSuiteConfig.has("allowExec")) multimediaSuiteConfig.put("allowExec", true)
+        if (!multimediaSuiteConfig.has("autoRepairOnLinkerError")) multimediaSuiteConfig.put("autoRepairOnLinkerError", true)
 
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0) {

@@ -8,11 +8,28 @@ type RuntimeConfig = {
   workspaceRoot: string;
   allowInstall: boolean;
   allowExec: boolean;
+  autoRepairOnLinkerError: boolean;
+  ffmpegBinary?: string;
+  ffprobeBinary?: string;
+};
+
+type CommandResult = {
+  ok: boolean;
+  code: number;
+  stdout: string;
+  stderr: string;
+  error?: string;
+};
+
+type MediaExecResult = CommandResult & {
+  binary: string;
+  linkerIssue: boolean;
+  tried: Array<{ binary: string; ok: boolean; code: number; error?: string }>;
 };
 
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_WORKSPACE_ROOT = "~/.openclaw/workspace";
-const DEFAULT_INSTALL_PACKAGES = ["ffmpeg", "jq", "python", "nodejs-lts", "yt-dlp"];
+const DEFAULT_INSTALL_PACKAGES = ["ffmpeg", "libjpeg-turbo", "libjxl", "libjxl-jni", "jq", "python", "nodejs-lts", "yt-dlp"];
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -43,16 +60,14 @@ function stripInternalNoise(raw: string): string {
     const text = line.trim();
     if (!text) return false;
     if (/^WARNING:\s+apt\.real does not have a stable CLI interface/i.test(text)) return false;
-    if (/^WARNING:\s+linker:/i.test(text)) return false;
-    if (/^CANNOT LINK EXECUTABLE/i.test(text)) return false;
     if (/^ERROR\s+codex_core::/i.test(text)) return false;
     if (/^proot error:/i.test(text)) return false;
     if (/^\[openclaw-(gw|ui)\]/i.test(text)) return false;
     return true;
   });
   const cleaned = keep.join("\n").trim();
-  if (cleaned.length <= 3000) return cleaned;
-  return cleaned.slice(0, 3000) + "\n...(truncated)";
+  if (cleaned.length <= 4000) return cleaned;
+  return cleaned.slice(0, 4000) + "\n...(truncated)";
 }
 
 function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
@@ -65,12 +80,24 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
       : DEFAULT_WORKSPACE_ROOT;
   const allowInstall = cfg.allowInstall !== false;
   const allowExec = cfg.allowExec !== false;
+  const autoRepairOnLinkerError = cfg.autoRepairOnLinkerError !== false;
+  const ffmpegBinary = typeof cfg.ffmpegBinary === "string" ? resolvePath(cfg.ffmpegBinary) : "";
+  const ffprobeBinary = typeof cfg.ffprobeBinary === "string" ? resolvePath(cfg.ffprobeBinary) : "";
+
   return {
     timeoutMs,
     workspaceRoot: resolvePath(workspaceRootRaw),
     allowInstall,
-    allowExec
+    allowExec,
+    autoRepairOnLinkerError,
+    ffmpegBinary: ffmpegBinary || undefined,
+    ffprobeBinary: ffprobeBinary || undefined,
   };
+}
+
+function detectLinkerIssue(text: string): boolean {
+  const raw = String(text || "");
+  return /CANNOT LINK EXECUTABLE|cannot locate symbol|libjpeg-hyper|jsimd_huff_encode_one_block|library\s+"[^"]+"\s+not found/i.test(raw);
 }
 
 async function runCommand(
@@ -78,7 +105,7 @@ async function runCommand(
   args: string[],
   timeoutMs: number,
   cwd?: string,
-): Promise<{ ok: boolean; code: number; stdout: string; stderr: string; error?: string }> {
+): Promise<CommandResult> {
   return new Promise((resolveDone) => {
     let stdout = "";
     let stderr = "";
@@ -87,7 +114,7 @@ async function runCommand(
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
       cwd: cwd && existsSync(cwd) ? cwd : undefined,
-      env: process.env
+      env: process.env,
     });
 
     const timer = setTimeout(() => {
@@ -103,7 +130,7 @@ async function runCommand(
         code: -1,
         stdout: stripInternalNoise(stdout),
         stderr: stripInternalNoise(stderr),
-        error: "timeout"
+        error: "timeout",
       });
     }, timeoutMs);
 
@@ -123,7 +150,7 @@ async function runCommand(
         code: -1,
         stdout: stripInternalNoise(stdout),
         stderr: stripInternalNoise(stderr),
-        error: String(error)
+        error: String(error),
       });
     });
 
@@ -135,7 +162,7 @@ async function runCommand(
         ok: code === 0,
         code: typeof code === "number" ? code : -1,
         stdout: stripInternalNoise(stdout),
-        stderr: stripInternalNoise(stderr)
+        stderr: stripInternalNoise(stderr),
       });
     });
   });
@@ -151,10 +178,107 @@ function parseArgsJson(raw: string): string[] {
   return parsed.map((item) => String(item));
 }
 
-async function readVersion(command: string, args: string[], runtime: RuntimeConfig): Promise<string> {
-  const result = await runCommand(command, args, Math.min(runtime.timeoutMs, 20_000));
+function uniqueStrings(items: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const v = item.trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+function buildBinaryCandidates(binaryName: "ffmpeg" | "ffprobe", runtime: RuntimeConfig): string[] {
+  const configured = binaryName === "ffmpeg" ? (runtime.ffmpegBinary || "") : (runtime.ffprobeBinary || "");
+  const prefix = String(process.env.PREFIX || "").trim();
+  const fromPrefix = prefix ? `${prefix}/bin/${binaryName}` : "";
+  const fromWorkspace = `${runtime.workspaceRoot}/tools/ffmpeg/bin/${binaryName}`;
+  return uniqueStrings([configured, fromWorkspace, binaryName, fromPrefix]);
+}
+
+async function runMediaBinary(
+  binaryName: "ffmpeg" | "ffprobe",
+  args: string[],
+  timeoutMs: number,
+  cwd: string,
+  runtime: RuntimeConfig,
+): Promise<MediaExecResult> {
+  const candidates = buildBinaryCandidates(binaryName, runtime);
+  const tried: Array<{ binary: string; ok: boolean; code: number; error?: string }> = [];
+  let last: CommandResult = {
+    ok: false,
+    code: -1,
+    stdout: "",
+    stderr: "",
+    error: "binary_not_found",
+  };
+  let selected = candidates[0] || binaryName;
+
+  for (const candidate of candidates) {
+    selected = candidate;
+    const result = await runCommand(candidate, args, timeoutMs, cwd);
+    tried.push({ binary: candidate, ok: result.ok, code: result.code, error: result.error });
+    last = result;
+    if (result.ok) {
+      return {
+        ...result,
+        binary: candidate,
+        linkerIssue: false,
+        tried,
+      };
+    }
+    if (detectLinkerIssue(`${result.stdout}\n${result.stderr}\n${result.error || ""}`)) {
+      return {
+        ...result,
+        binary: candidate,
+        linkerIssue: true,
+        tried,
+      };
+    }
+  }
+
+  return {
+    ...last,
+    binary: selected,
+    linkerIssue: detectLinkerIssue(`${last.stdout}\n${last.stderr}\n${last.error || ""}`),
+    tried,
+  };
+}
+
+async function readVersion(binaryName: "ffmpeg" | "ffprobe", runtime: RuntimeConfig): Promise<{ version: string; binary: string; linkerIssue: boolean }> {
+  const result = await runMediaBinary(binaryName, ["-version"], Math.min(runtime.timeoutMs, 20_000), runtime.workspaceRoot, runtime);
   const source = (result.stdout || result.stderr || "").split(/\r?\n/).find((line) => line.trim().length > 0) || "";
-  return source.trim();
+  return {
+    version: source.trim(),
+    binary: result.binary,
+    linkerIssue: result.linkerIssue,
+  };
+}
+
+function buildRepairScript(packages: string[], updateIndex: boolean, deepRepair: boolean): string {
+  const pkgList = packages.join(" ");
+  const lines = [
+    "set +e",
+    updateIndex ? "(pkg update -y || apt-get update -y || true)" : "true",
+    `(pkg install -y ${pkgList} || apt-get install -y ${pkgList} || true)`,
+  ];
+
+  if (deepRepair) {
+    lines.push("(pkg reinstall -y libjpeg-turbo libjxl libjxl-jni ffmpeg || true)");
+    lines.push("(apt-get install --reinstall -y libjpeg-turbo libjxl libjxl-jni ffmpeg || true)");
+    lines.push("(pkg upgrade -y libjpeg-turbo libjxl libjxl-jni ffmpeg || true)");
+  }
+
+  lines.push("(ffmpeg -version >/dev/null 2>&1 || true)");
+  lines.push("(ffprobe -version >/dev/null 2>&1 || true)");
+  return lines.join("; ");
+}
+
+async function runRepair(runtime: RuntimeConfig, packages: string[], updateIndex: boolean, deepRepair: boolean, cwd: string): Promise<CommandResult> {
+  const script = buildRepairScript(packages, updateIndex, deepRepair);
+  return runCommand("sh", ["-lc", script], runtime.timeoutMs, cwd);
 }
 
 function createStatusTool(runtime: RuntimeConfig) {
@@ -168,22 +292,39 @@ function createStatusTool(runtime: RuntimeConfig) {
       properties: {}
     },
     execute: async () => {
-      const checks: Array<{ name: string; path: string; available: boolean; version: string }> = [];
-      const candidates = [
-        ["ffmpeg", ["-version"]],
-        ["ffprobe", ["-version"]],
-        ["yt-dlp", ["--version"]],
-        ["python3", ["--version"]],
-        ["node", ["--version"]],
-      ] as const;
+      const checks: Array<{ name: string; path: string; available: boolean; version: string; linkerIssue?: boolean }> = [];
+      const baseChecks = ["yt-dlp", "python3", "node"] as const;
 
-      for (const [name, versionArgs] of candidates) {
+      for (const name of baseChecks) {
         const probe = await runCommand("sh", ["-lc", `command -v ${name}`], 8000);
         const path = (probe.stdout || "").trim();
         const available = !!path;
-        const version = available ? await readVersion(name, [...versionArgs], runtime) : "";
+        let version = "";
+        if (available) {
+          const versionResult = await runCommand(name, ["--version"], 15_000, runtime.workspaceRoot);
+          const row = (versionResult.stdout || versionResult.stderr || "").split(/\r?\n/).find((line) => line.trim().length > 0) || "";
+          version = row.trim();
+        }
         checks.push({ name, path, available, version });
       }
+
+      const ffmpegVersion = await readVersion("ffmpeg", runtime);
+      checks.push({
+        name: "ffmpeg",
+        path: ffmpegVersion.binary,
+        available: ffmpegVersion.version.length > 0,
+        version: ffmpegVersion.version,
+        linkerIssue: ffmpegVersion.linkerIssue,
+      });
+
+      const ffprobeVersion = await readVersion("ffprobe", runtime);
+      checks.push({
+        name: "ffprobe",
+        path: ffprobeVersion.binary,
+        available: ffprobeVersion.version.length > 0,
+        version: ffprobeVersion.version,
+        linkerIssue: ffprobeVersion.linkerIssue,
+      });
 
       return jsonResult({
         ok: true,
@@ -191,6 +332,7 @@ function createStatusTool(runtime: RuntimeConfig) {
         workspaceRoot: runtime.workspaceRoot,
         allowInstall: runtime.allowInstall,
         allowExec: runtime.allowExec,
+        autoRepairOnLinkerError: runtime.autoRepairOnLinkerError,
         checks,
       });
     }
@@ -207,7 +349,8 @@ function createInstallTool(runtime: RuntimeConfig) {
       additionalProperties: false,
       properties: {
         packagesCsv: { type: "string", description: "Comma-separated package names" },
-        updateIndex: { type: "boolean", description: "Run package index update before install" }
+        updateIndex: { type: "boolean", description: "Run package index update before install" },
+        deepRepair: { type: "boolean", description: "Run reinstall and upgrade for ffmpeg/jpeg/jxl stack" }
       }
     },
     execute: async (_toolCallId: string, input: unknown) => {
@@ -222,25 +365,64 @@ function createInstallTool(runtime: RuntimeConfig) {
       const packagesCsv = (readStringParam(args, "packagesCsv") || "").trim();
       const updateIndexRaw = args.updateIndex;
       const updateIndex = updateIndexRaw === undefined ? true : Boolean(updateIndexRaw);
+      const deepRepairRaw = args.deepRepair;
+      const deepRepair = deepRepairRaw === undefined ? true : Boolean(deepRepairRaw);
       const packages = packagesCsv
         ? packagesCsv.split(",").map((item) => item.trim()).filter(Boolean)
         : DEFAULT_INSTALL_PACKAGES;
-      const pkgList = packages.join(" ");
-      const installScript = [
-        "set +e",
-        updateIndex ? "(pkg update -y || apt-get update -y || true)" : "true",
-        `(pkg install -y ${pkgList} || apt-get install -y ${pkgList})`,
-      ].join("; ");
-      const result = await runCommand("sh", ["-lc", installScript], runtime.timeoutMs, runtime.workspaceRoot);
+      const result = await runRepair(runtime, packages, updateIndex, deepRepair, runtime.workspaceRoot);
       return jsonResult({
         ok: result.ok,
         tool: "anyclaw_multimedia_install",
         updateIndex,
+        deepRepair,
         packages,
         code: result.code,
         stdout: result.stdout,
         stderr: result.stderr,
-        error: result.error
+        error: result.error,
+      });
+    }
+  };
+}
+
+function createDoctorTool(runtime: RuntimeConfig) {
+  return {
+    label: "AnyClaw Multimedia Doctor",
+    name: "anyclaw_multimedia_doctor",
+    description: "Diagnose ffmpeg linker issues and optionally auto-repair jpeg/jxl/ffmpeg stack.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        autoRepair: { type: "boolean", description: "Try auto repair when linker issue is detected" },
+        updateIndex: { type: "boolean" }
+      }
+    },
+    execute: async (_toolCallId: string, input: unknown) => {
+      const args = asObject(input);
+      const autoRepairRaw = args.autoRepair;
+      const autoRepair = autoRepairRaw === undefined ? true : Boolean(autoRepairRaw);
+      const updateIndexRaw = args.updateIndex;
+      const updateIndex = updateIndexRaw === undefined ? true : Boolean(updateIndexRaw);
+
+      const before = await runMediaBinary("ffmpeg", ["-version"], Math.min(runtime.timeoutMs, 20_000), runtime.workspaceRoot, runtime);
+      let repair: CommandResult | null = null;
+      let after: MediaExecResult | null = null;
+
+      if (before.linkerIssue && autoRepair && runtime.allowInstall) {
+        repair = await runRepair(runtime, DEFAULT_INSTALL_PACKAGES, updateIndex, true, runtime.workspaceRoot);
+        after = await runMediaBinary("ffmpeg", ["-version"], Math.min(runtime.timeoutMs, 20_000), runtime.workspaceRoot, runtime);
+      }
+
+      return jsonResult({
+        ok: after ? after.ok : before.ok,
+        tool: "anyclaw_multimedia_doctor",
+        linkerIssueDetected: before.linkerIssue,
+        attemptedRepair: !!repair,
+        before,
+        repair,
+        after,
       });
     }
   };
@@ -258,7 +440,8 @@ function createFfmpegExecTool(runtime: RuntimeConfig) {
       properties: {
         argsJson: { type: "string" },
         cwd: { type: "string" },
-        timeoutMs: { type: "number", minimum: 5000, maximum: 300000 }
+        timeoutMs: { type: "number", minimum: 5000, maximum: 300000 },
+        autoRepair: { type: "boolean", description: "Auto repair and retry when linker issue is detected" }
       }
     },
     execute: async (_toolCallId: string, input: unknown) => {
@@ -278,16 +461,43 @@ function createFfmpegExecTool(runtime: RuntimeConfig) {
         5000,
         300000,
       );
-      const result = await runCommand("ffmpeg", parsed, timeoutMs, cwd);
+      const autoRepairRaw = args.autoRepair;
+      const autoRepair = autoRepairRaw === undefined ? runtime.autoRepairOnLinkerError : Boolean(autoRepairRaw);
+
+      const first = await runMediaBinary("ffmpeg", parsed, timeoutMs, cwd, runtime);
+      if (first.ok || !first.linkerIssue || !autoRepair || !runtime.allowInstall) {
+        return jsonResult({
+          ok: first.ok,
+          tool: "anyclaw_ffmpeg_exec",
+          cwd,
+          args: parsed,
+          binary: first.binary,
+          tried: first.tried,
+          code: first.code,
+          stdout: first.stdout,
+          stderr: first.stderr,
+          error: first.error,
+          linkerIssue: first.linkerIssue,
+          attemptedRepair: false,
+        });
+      }
+
+      const repair = await runRepair(runtime, DEFAULT_INSTALL_PACKAGES, true, true, cwd);
+      const second = await runMediaBinary("ffmpeg", parsed, timeoutMs, cwd, runtime);
       return jsonResult({
-        ok: result.ok,
+        ok: second.ok,
         tool: "anyclaw_ffmpeg_exec",
         cwd,
         args: parsed,
-        code: result.code,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        error: result.error
+        binary: second.binary,
+        tried: second.tried,
+        code: second.code,
+        stdout: second.stdout,
+        stderr: second.stderr,
+        error: second.error,
+        linkerIssue: second.linkerIssue,
+        attemptedRepair: true,
+        repair,
       });
     }
   };
@@ -305,7 +515,8 @@ function createFfprobeExecTool(runtime: RuntimeConfig) {
       properties: {
         argsJson: { type: "string" },
         cwd: { type: "string" },
-        timeoutMs: { type: "number", minimum: 5000, maximum: 300000 }
+        timeoutMs: { type: "number", minimum: 5000, maximum: 300000 },
+        autoRepair: { type: "boolean", description: "Auto repair and retry when linker issue is detected" }
       }
     },
     execute: async (_toolCallId: string, input: unknown) => {
@@ -325,16 +536,43 @@ function createFfprobeExecTool(runtime: RuntimeConfig) {
         5000,
         300000,
       );
-      const result = await runCommand("ffprobe", parsed, timeoutMs, cwd);
+      const autoRepairRaw = args.autoRepair;
+      const autoRepair = autoRepairRaw === undefined ? runtime.autoRepairOnLinkerError : Boolean(autoRepairRaw);
+
+      const first = await runMediaBinary("ffprobe", parsed, timeoutMs, cwd, runtime);
+      if (first.ok || !first.linkerIssue || !autoRepair || !runtime.allowInstall) {
+        return jsonResult({
+          ok: first.ok,
+          tool: "anyclaw_ffprobe_exec",
+          cwd,
+          args: parsed,
+          binary: first.binary,
+          tried: first.tried,
+          code: first.code,
+          stdout: first.stdout,
+          stderr: first.stderr,
+          error: first.error,
+          linkerIssue: first.linkerIssue,
+          attemptedRepair: false,
+        });
+      }
+
+      const repair = await runRepair(runtime, DEFAULT_INSTALL_PACKAGES, true, true, cwd);
+      const second = await runMediaBinary("ffprobe", parsed, timeoutMs, cwd, runtime);
       return jsonResult({
-        ok: result.ok,
+        ok: second.ok,
         tool: "anyclaw_ffprobe_exec",
         cwd,
         args: parsed,
-        code: result.code,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        error: result.error
+        binary: second.binary,
+        tried: second.tried,
+        code: second.code,
+        stdout: second.stdout,
+        stderr: second.stderr,
+        error: second.error,
+        linkerIssue: second.linkerIssue,
+        attemptedRepair: true,
+        repair,
       });
     }
   };
@@ -350,12 +588,14 @@ export default {
       api.logger.info(
         "anyclaw-multimedia-suite loaded workspaceRoot=" + runtime.workspaceRoot +
           " allowInstall=" + String(runtime.allowInstall) +
-          " allowExec=" + String(runtime.allowExec)
+          " allowExec=" + String(runtime.allowExec) +
+          " autoRepairOnLinkerError=" + String(runtime.autoRepairOnLinkerError)
       );
     }
 
     api.registerTool(createStatusTool(runtime));
     api.registerTool(createInstallTool(runtime));
+    api.registerTool(createDoctorTool(runtime));
     api.registerTool(createFfmpegExecTool(runtime));
     api.registerTool(createFfprobeExecTool(runtime));
   }
