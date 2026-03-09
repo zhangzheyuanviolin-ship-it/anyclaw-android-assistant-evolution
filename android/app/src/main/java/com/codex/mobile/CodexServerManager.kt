@@ -32,6 +32,7 @@ class CodexServerManager(private val context: Context) {
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
         private const val ANYCLAW_RUNTIME_PLUGIN_ID = "anyclaw-runtime-suite"
+        private const val ANYCLAW_MULTIMEDIA_PLUGIN_ID = "anyclaw-multimedia-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT = 60
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_STEP = 40
@@ -986,6 +987,7 @@ H3
         ensureAnyClawGithubPlugin(paths.homeDir)
         ensureAnyClawDevicePlugin(paths.homeDir)
         ensureAnyClawRuntimePlugin(paths.homeDir)
+        ensureAnyClawMultimediaPlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
@@ -1044,6 +1046,14 @@ H3
             )
         }
 
+        val multimediaSuiteEntry = ensureObject(entries, ANYCLAW_MULTIMEDIA_PLUGIN_ID)
+        multimediaSuiteEntry.put("enabled", true)
+        val multimediaSuiteConfig = ensureObject(multimediaSuiteEntry, "config")
+        if (!multimediaSuiteConfig.has("timeoutSeconds")) multimediaSuiteConfig.put("timeoutSeconds", 90)
+        if (!multimediaSuiteConfig.has("workspaceRoot")) multimediaSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
+        if (!multimediaSuiteConfig.has("allowInstall")) multimediaSuiteConfig.put("allowInstall", true)
+        if (!multimediaSuiteConfig.has("allowExec")) multimediaSuiteConfig.put("allowExec", true)
+
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0) {
             if (!jsonArrayContains(allow, ANYCLAW_SEARCH_PLUGIN_ID)) {
@@ -1057,6 +1067,9 @@ H3
             }
             if (!jsonArrayContains(allow, ANYCLAW_RUNTIME_PLUGIN_ID)) {
                 allow.put(ANYCLAW_RUNTIME_PLUGIN_ID)
+            }
+            if (!jsonArrayContains(allow, ANYCLAW_MULTIMEDIA_PLUGIN_ID)) {
+                allow.put(ANYCLAW_MULTIMEDIA_PLUGIN_ID)
             }
         }
 
@@ -3337,6 +3350,23 @@ EOF
         val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_RUNTIME_PLUGIN_ID/index.ts", indexFile)
         if (manifestChanged || indexChanged) {
             Log.i(TAG, "Installed/updated plugin $ANYCLAW_RUNTIME_PLUGIN_ID at $pluginRoot")
+        }
+    }
+
+    private fun ensureAnyClawMultimediaPlugin(homeDir: String) {
+        val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_MULTIMEDIA_PLUGIN_ID")
+        if (!pluginRoot.exists()) {
+            pluginRoot.mkdirs()
+        }
+        val manifestFile = File(pluginRoot, "openclaw.plugin.json")
+        val indexFile = File(pluginRoot, "index.ts")
+        val manifestChanged = writeAssetIfChanged(
+            "plugins/$ANYCLAW_MULTIMEDIA_PLUGIN_ID/openclaw.plugin.json",
+            manifestFile,
+        )
+        val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_MULTIMEDIA_PLUGIN_ID/index.ts", indexFile)
+        if (manifestChanged || indexChanged) {
+            Log.i(TAG, "Installed/updated plugin $ANYCLAW_MULTIMEDIA_PLUGIN_ID at $pluginRoot")
         }
     }
 

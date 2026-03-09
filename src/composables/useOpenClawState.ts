@@ -5,6 +5,7 @@ import {
   listOpenClawSessions,
   readOpenClawHistory,
   renameOpenClawSession,
+  resetOpenClawSession,
   sendOpenClawMessage,
 } from '../api/openclawGateway'
 import type { UiLiveOverlay, UiMessage } from '../types/codex'
@@ -332,6 +333,23 @@ export function useOpenClawState() {
     }
   }
 
+  async function resetCurrentSession(): Promise<string> {
+    const currentSessionKey = selectedSessionKey.value.trim()
+    if (!currentSessionKey) {
+      throw new Error('重置会话失败：当前会话为空')
+    }
+    try {
+      const payload = await resetOpenClawSession(currentSessionKey)
+      await refreshSessions(payload.sessionKey)
+      await selectSession(payload.sessionKey)
+      lastError.value = ''
+      return payload.sessionKey
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : '重置会话失败'
+      throw error
+    }
+  }
+
   async function updateSessionTitle(sessionKey: string, title: string): Promise<void> {
     await renameOpenClawSession(sessionKey, title)
     await refreshSessions(sessionKey)
@@ -442,6 +460,7 @@ export function useOpenClawState() {
     selectSession,
     sendMessage,
     createSession,
+    resetCurrentSession,
     updateSessionTitle,
     toggleProcessView,
     loadOlderHistory,

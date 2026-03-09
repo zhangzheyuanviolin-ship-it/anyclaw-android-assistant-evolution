@@ -15,9 +15,19 @@
             type="button"
             class="openclaw-sidebar-button"
             :aria-label="t('openclaw_new_session')"
+            :disabled="isOpenClawSessionCreating"
             @click="onCreateOpenClawSession"
           >
             {{ t('openclaw_new_session') }}
+          </button>
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('openclaw_reset_session')"
+            :disabled="isOpenClawSessionCreating || !openClawSelectedSessionKey"
+            @click="onResetOpenClawSession"
+          >
+            {{ t('openclaw_reset_session') }}
           </button>
           <button
             type="button"
@@ -393,6 +403,7 @@ const {
   selectSession: selectOpenClawSession,
   sendMessage: sendOpenClawMessage,
   createSession: createOpenClawSession,
+  resetCurrentSession: resetCurrentOpenClawSession,
   updateSessionTitle: updateOpenClawSessionTitle,
   toggleProcessView: toggleOpenClawProcessView,
   loadOlderHistory: loadOlderOpenClawHistory,
@@ -412,6 +423,7 @@ const isSidebarSearchVisible = ref(false)
 const sidebarSearchInputRef = ref<HTMLInputElement | null>(null)
 const openClawSearchQuery = ref('')
 const openClawPendingRequests = ref<UiServerRequest[]>([])
+const isOpenClawSessionCreating = ref(false)
 
 const routeThreadId = computed(() => {
   const rawThreadId = route.params.threadId
@@ -709,15 +721,40 @@ function onRefreshOpenClaw(): void {
 
 function onCreateOpenClawSession(): void {
   void (async () => {
+    if (isOpenClawSessionCreating.value) return
+    isOpenClawSessionCreating.value = true
     try {
       const sessionKey = await createOpenClawSession()
       if (sessionKey) {
+        await selectOpenClawSession(sessionKey)
         await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
       }
     } catch (error) {
       if (typeof window !== 'undefined') {
         window.alert(error instanceof Error ? error.message : t('openclaw_create_session_failed'))
       }
+    } finally {
+      isOpenClawSessionCreating.value = false
+    }
+  })()
+}
+
+function onResetOpenClawSession(): void {
+  void (async () => {
+    if (isOpenClawSessionCreating.value) return
+    isOpenClawSessionCreating.value = true
+    try {
+      const sessionKey = await resetCurrentOpenClawSession()
+      if (sessionKey) {
+        await selectOpenClawSession(sessionKey)
+        await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
+      }
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        window.alert(error instanceof Error ? error.message : t('openclaw_reset_session_failed'))
+      }
+    } finally {
+      isOpenClawSessionCreating.value = false
     }
   })()
 }
