@@ -29,7 +29,7 @@ type MediaExecResult = CommandResult & {
 
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_WORKSPACE_ROOT = "~/.openclaw/workspace";
-const DEFAULT_INSTALL_PACKAGES = ["ffmpeg", "libjpeg-turbo", "libjxl", "libjxl-jni", "jq", "python", "nodejs-lts", "yt-dlp"];
+const DEFAULT_INSTALL_PACKAGES = ["ffmpeg", "libjpeg-turbo", "libjxl", "jq"];
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -259,16 +259,28 @@ async function readVersion(binaryName: "ffmpeg" | "ffprobe", runtime: RuntimeCon
 
 function buildRepairScript(packages: string[], updateIndex: boolean, deepRepair: boolean): string {
   const pkgList = packages.join(" ");
+  const prefix = String(process.env.PREFIX || "").trim();
+  const aptGet = prefix ? `${prefix}/bin/apt-get` : "apt-get";
+  const aptMark = prefix ? `${prefix}/bin/apt-mark` : "apt-mark";
+  const repairShebangs = prefix
+    ? [
+        `[ -f "${prefix}/bin/pkg.real" ] && sed -i "1s|^#!.*com\\.termux/files/usr/bin/bash|#!${prefix}/bin/bash|" "${prefix}/bin/pkg.real" || true`,
+        `[ -f "${prefix}/bin/apt-key" ] && sed -i "1s|^#!.*com\\.termux/files/usr/bin/sh|#!${prefix}/bin/sh|" "${prefix}/bin/apt-key" || true`,
+        `[ -f "${prefix}/bin/apt-get" ] && sed -i "1s|^#!.*com\\.termux/files/usr/bin/sh|#!${prefix}/bin/sh|" "${prefix}/bin/apt-get" || true`,
+      ].join("; ")
+    : "true";
   const lines = [
     "set +e",
-    updateIndex ? "(pkg update -y || apt-get update -y || true)" : "true",
-    `(pkg install -y ${pkgList} || apt-get install -y ${pkgList} || true)`,
+    repairShebangs,
+    updateIndex
+      ? `(DEBIAN_FRONTEND=noninteractive ${aptGet} update -y || DEBIAN_FRONTEND=noninteractive ${aptGet} update --allow-insecure-repositories || true)`
+      : "true",
+    `(DEBIAN_FRONTEND=noninteractive ${aptGet} install -y ${pkgList} || DEBIAN_FRONTEND=noninteractive ${aptGet} install --allow-unauthenticated -y ${pkgList} || true)`,
   ];
 
   if (deepRepair) {
-    lines.push("(pkg reinstall -y libjpeg-turbo libjxl libjxl-jni ffmpeg || true)");
-    lines.push("(apt-get install --reinstall -y libjpeg-turbo libjxl libjxl-jni ffmpeg || true)");
-    lines.push("(pkg upgrade -y libjpeg-turbo libjxl libjxl-jni ffmpeg || true)");
+    lines.push(`(DEBIAN_FRONTEND=noninteractive ${aptGet} install --reinstall -y libjpeg-turbo libjxl ffmpeg || DEBIAN_FRONTEND=noninteractive ${aptGet} install --reinstall --allow-unauthenticated -y libjpeg-turbo libjxl ffmpeg || true)`);
+    lines.push(`(${aptMark} hold nodejs nodejs-lts >/dev/null 2>&1 || true)`);
   }
 
   lines.push("(ffmpeg -version >/dev/null 2>&1 || true)");

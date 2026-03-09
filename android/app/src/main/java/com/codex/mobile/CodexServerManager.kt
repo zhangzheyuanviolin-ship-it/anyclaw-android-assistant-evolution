@@ -418,6 +418,8 @@ WEOF
 
         onProgress("Fixing git-core script shebangs…")
         fixGitCoreShebangs(prefix)
+        onProgress("Fixing prefix command shebangs…")
+        fixPrefixBinShebangs(prefix)
 
         onProgress("Patching make & cmake binaries…")
         patchBinaryTermuxPaths(prefix)
@@ -559,6 +561,31 @@ EOF
             echo "Git shebangs fixed"
         """.trimIndent()
         runInPrefix(cmd) { Log.d(TAG, "[fix-shebang] $it") }
+    }
+
+    /**
+     * Fix stale hardcoded shebangs copied from vanilla Termux path inside the
+     * current app-private prefix. These stale paths cause "Permission denied"
+     * even when script files are executable.
+     */
+    private fun fixPrefixBinShebangs(prefix: String) {
+        val cmd = """
+            for f in "$prefix/bin/pkg.real" "$prefix/bin/pkg" "$prefix/bin/apt-key" "$prefix/bin/apt-get" "$prefix/bin/apt"; do
+              [ ! -f "${'$'}f" ] && continue
+              head_line="$(head -1 "${'$'}f" 2>/dev/null || true)"
+              case "${'$'}head_line" in
+                *"/data/data/com.termux/files/usr/bin/bash"*)
+                  sed -i "1s|^#!.*com.termux/files/usr/bin/bash|#!$prefix/bin/bash|" "${'$'}f" || true
+                  ;;
+                *"/data/data/com.termux/files/usr/bin/sh"*)
+                  sed -i "1s|^#!.*com.termux/files/usr/bin/sh|#!$prefix/bin/sh|" "${'$'}f" || true
+                  ;;
+              esac
+              chmod 700 "${'$'}f" 2>/dev/null || true
+            done
+            echo "Prefix shebangs fixed"
+        """.trimIndent()
+        runInPrefix(cmd) { Log.d(TAG, "[fix-prefix-shebang] $it") }
     }
 
     /**
@@ -1139,6 +1166,8 @@ H3
     }
 
     fun runOpenClawPreflight(onProgress: (String) -> Unit): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        fixPrefixBinShebangs(paths.prefixDir)
         onProgress("Repairing OpenClaw toolchain links…")
         ensureOpenClawToolchain(onProgress)
         onProgress("Validating ar/ranlib preflight…")
