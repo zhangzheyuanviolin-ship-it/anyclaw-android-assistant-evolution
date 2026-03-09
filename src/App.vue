@@ -709,9 +709,15 @@ function onRefreshOpenClaw(): void {
 
 function onCreateOpenClawSession(): void {
   void (async () => {
-    const sessionKey = await createOpenClawSession()
-    if (sessionKey) {
-      await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
+    try {
+      const sessionKey = await createOpenClawSession()
+      if (sessionKey) {
+        await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
+      }
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        window.alert(error instanceof Error ? error.message : t('openclaw_create_session_failed'))
+      }
     }
   })()
 }

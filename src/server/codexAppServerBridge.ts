@@ -218,9 +218,55 @@ function readPositiveInt(value: string | null, fallback: number): number {
   return normalized
 }
 
-function buildOpenClawSessionKey(): string {
+function buildOpenClawSessionKey(currentSessionKey = ''): string {
+  const normalized = currentSessionKey.trim()
   const now = Date.now().toString(36)
-  return `agent:main:mobile-${now}`
+  const rand = Math.random().toString(36).slice(2, 8)
+  if (normalized.startsWith('agent:')) {
+    const parts = normalized.split(':')
+    const agent = normalizeText(parts[1]) || 'main'
+    return `agent:${agent}:mobile-${now}-${rand}`
+  }
+  return `agent:main:mobile-${now}-${rand}`
+}
+
+function parseOpenClawSessionRows(value: unknown): Array<Record<string, unknown>> {
+  const record = asRecord(value)
+  if (!record) return []
+  const sessions = record.sessions
+  if (!Array.isArray(sessions)) return []
+  return sessions.map((row) => asRecord(row)).filter((row): row is Record<string, unknown> => row !== null)
+}
+
+function findOpenClawSessionByKey(rows: Array<Record<string, unknown>>, key: string): Record<string, unknown> | null {
+  const target = key.trim()
+  if (!target) return null
+  for (const row of rows) {
+    const rowKey = normalizeText(row.key)
+    if (rowKey === target) return row
+  }
+  return null
+}
+
+function pickNewestOpenClawSessionKey(
+  rows: Array<Record<string, unknown>>,
+  excludedSessionKey: string,
+): string {
+  const excluded = excludedSessionKey.trim()
+  let bestKey = ''
+  let bestUpdatedAt = -1
+  for (const row of rows) {
+    const key = normalizeText(row.key)
+    if (!key || key === excluded) continue
+    const updatedAt = typeof row.updatedAt === 'number' && Number.isFinite(row.updatedAt)
+      ? row.updatedAt
+      : 0
+    if (updatedAt >= bestUpdatedAt) {
+      bestKey = key
+      bestUpdatedAt = updatedAt
+    }
+  }
+  return bestKey
 }
 
 function buildCapabilitySummary(statusRecord: Record<string, unknown> | null): string {
@@ -782,11 +828,50 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/new') {
         const payload = asRecord(await readJsonBody(req))
         const label = normalizeText(payload?.label) || '新会话'
-        const sessionKey = buildOpenClawSessionKey()
-        await runOpenClawGatewayCall('sessions.patch', {
-          key: sessionKey,
-          label,
-        })
+        const currentSessionKey = normalizeText(payload?.currentSessionKey)
+        let sessionKey = buildOpenClawSessionKey(currentSessionKey)
+        let created = false
+        try {
+          await runOpenClawGatewayCall('sessions.patch', {
+            key: sessionKey,
+            label,
+          })
+        } catch {
+          // Keep fallback path below for environments where direct patch cannot create a new session.
+        }
+        const listParams = {
+          limit: 400,
+          includeDerivedTitles: true,
+          includeLastMessage: true,
+          includeGlobal: true,
+          includeUnknown: true,
+        }
+        let sessionRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', listParams))
+        created = findOpenClawSessionByKey(sessionRows, sessionKey) !== null
+
+        if (!created && currentSessionKey) {
+          try {
+            await runOpenClawGatewayCall('chat.send', {
+              sessionKey: currentSessionKey,
+              message: '/new',
+              deliver: true,
+              idempotencyKey: `new_${Date.now().toString(36)}`,
+            })
+            await new Promise((resolve) => setTimeout(resolve, 260))
+            sessionRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', listParams))
+            const fallbackSessionKey = pickNewestOpenClawSessionKey(sessionRows, currentSessionKey)
+            if (fallbackSessionKey) {
+              sessionKey = fallbackSessionKey
+              created = true
+            }
+          } catch {
+            // Keep original error path if fallback cannot create a session.
+          }
+        }
+
+        if (!created) {
+          throw new Error('Failed to create OpenClaw session: session was not persisted')
+        }
         setJson(res, 200, { sessionKey })
         return
       }

@@ -118,13 +118,19 @@ export async function listOpenClawSessions(limit = 200): Promise<OpenClawSession
   return normalized
 }
 
-export async function createOpenClawSession(label?: string): Promise<{ sessionKey: string }> {
+export async function createOpenClawSession(
+  label?: string,
+  currentSessionKey?: string,
+): Promise<{ sessionKey: string }> {
   const payload = await requestOpenClaw<{ sessionKey?: string }>(
     '/openclaw-api/sessions/new',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: label?.trim() || '' }),
+      body: JSON.stringify({
+        label: label?.trim() || '',
+        currentSessionKey: currentSessionKey?.trim() || '',
+      }),
     },
     'Failed to create OpenClaw session',
   )

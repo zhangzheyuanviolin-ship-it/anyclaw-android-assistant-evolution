@@ -320,10 +320,16 @@ export function useOpenClawState() {
   }
 
   async function createSession(label?: string): Promise<string> {
-    const payload = await createOpenClawSession(label)
-    await refreshSessions(payload.sessionKey)
-    await selectSession(payload.sessionKey)
-    return payload.sessionKey
+    try {
+      const payload = await createOpenClawSession(label, selectedSessionKey.value)
+      await refreshSessions(payload.sessionKey)
+      await selectSession(payload.sessionKey)
+      lastError.value = ''
+      return payload.sessionKey
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : '创建会话失败'
+      throw error
+    }
   }
 
   async function updateSessionTitle(sessionKey: string, title: string): Promise<void> {
