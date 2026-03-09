@@ -248,6 +248,34 @@ function findOpenClawSessionByKey(rows: Array<Record<string, unknown>>, key: str
   return null
 }
 
+function collectOpenClawSessionLabels(rows: Array<Record<string, unknown>>): Set<string> {
+  const labels = new Set<string>()
+  for (const row of rows) {
+    const displayName = normalizeText(row.displayName)
+    if (displayName) labels.add(displayName)
+    const label = normalizeText(row.label)
+    if (label) labels.add(label)
+  }
+  return labels
+}
+
+function buildUniqueOpenClawSessionLabel(baseLabel: string, usedLabels: Set<string>): string {
+  const base = baseLabel.trim() || '新会话'
+  if (!usedLabels.has(base)) return base
+  for (let index = 2; index <= 500; index += 1) {
+    const candidate = `${base} ${index}`
+    if (!usedLabels.has(candidate)) {
+      return candidate
+    }
+  }
+  return `${base} ${Date.now().toString(36)}`
+}
+
+function isOpenClawLabelConflictError(error: unknown): boolean {
+  const message = getErrorMessage(error, '').toLowerCase()
+  return message.includes('label already in use')
+}
+
 function pickNewestOpenClawSessionKey(
   rows: Array<Record<string, unknown>>,
   excludedSessionKey: string,
@@ -281,20 +309,50 @@ async function createIndependentOpenClawSession(
   currentSessionKey: string,
   label: string,
 ): Promise<string> {
-  const sessionKey = buildOpenClawSessionKey(currentSessionKey)
-  await runOpenClawGatewayCall('sessions.patch', {
-    key: sessionKey,
-    label,
-  })
-
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const sessionRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS))
-    if (findOpenClawSessionByKey(sessionRows, sessionKey)) {
-      return sessionKey
-    }
-    await new Promise((resolve) => setTimeout(resolve, 220 + attempt * 120))
+  const baseLabel = label.trim() || '新会话'
+  const usedLabels = new Set<string>()
+  try {
+    const existingRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS))
+    const existingLabels = collectOpenClawSessionLabels(existingRows)
+    for (const rowLabel of existingLabels) usedLabels.add(rowLabel)
+  } catch {
+    // Continue with optimistic create path when listing sessions is temporarily unavailable.
   }
 
+  let lastError: unknown = null
+  for (let createAttempt = 0; createAttempt < 5; createAttempt += 1) {
+    const sessionKey = buildOpenClawSessionKey(currentSessionKey)
+    const uniqueLabel = buildUniqueOpenClawSessionLabel(baseLabel, usedLabels)
+    try {
+      await runOpenClawGatewayCall('sessions.patch', {
+        key: sessionKey,
+        label: uniqueLabel,
+      })
+    } catch (error) {
+      lastError = error
+      if (isOpenClawLabelConflictError(error)) {
+        usedLabels.add(uniqueLabel)
+        await new Promise((resolve) => setTimeout(resolve, 90 + createAttempt * 60))
+        continue
+      }
+      throw error
+    }
+
+    usedLabels.add(uniqueLabel)
+    for (let persistAttempt = 0; persistAttempt < 8; persistAttempt += 1) {
+      const sessionRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS))
+      if (findOpenClawSessionByKey(sessionRows, sessionKey)) {
+        return sessionKey
+      }
+      await new Promise((resolve) => setTimeout(resolve, 220 + persistAttempt * 120))
+    }
+    lastError = new Error('Failed to create OpenClaw session: session was not persisted')
+    await new Promise((resolve) => setTimeout(resolve, 140 + createAttempt * 80))
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError
+  }
   throw new Error('Failed to create OpenClaw session: session was not persisted')
 }
 
