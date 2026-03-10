@@ -880,7 +880,23 @@ H3
               exit 1
             fi
 
-            tar -xzf "${'$'}PACK_FILE" -C "${'$'}TMP_PACK_DIR" 2>&1 || true
+            python3 - <<'PY'
+            import os
+            import sys
+            import tarfile
+            pack_file = os.environ.get('PACK_FILE', '')
+            out_dir = os.environ.get('TMP_PACK_DIR', '')
+            if not pack_file or not out_dir:
+                print('davey-python-extract-env-missing')
+                sys.exit(1)
+            try:
+                with tarfile.open(pack_file, 'r:gz') as tf:
+                    tf.extractall(out_dir)
+                print('davey-python-extract:ok')
+            except Exception as error:
+                print(f'davey-python-extract:error:{error}')
+                sys.exit(1)
+            PY
             if [ ! -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" ]; then
               echo "davey-node-missing"
               exit 1
@@ -1375,8 +1391,7 @@ H3
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
         ensureOpenClawGatewayHistoryByteCap()
         if (!ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }) {
-            Log.e(TAG, "OpenClaw native binding repair failed before gateway startup")
-            return false
+            Log.w(TAG, "OpenClaw native binding repair failed before gateway startup; continuing because gateway can still run without the preflight cache")
         }
 
         // Kill any orphaned gateway processes and reset all device tokens.
