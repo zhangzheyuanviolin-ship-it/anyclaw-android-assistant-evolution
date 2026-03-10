@@ -760,82 +760,95 @@ H3
     }
 
     /**
-     * OpenClaw 2026.3.x requires the Android-specific davey native binding.
-     * npm optional dependency resolution can skip it on fresh installs.
+     * OpenClaw 2026.3.x bundles @snazzah/davey, but npm optional dependency
+     * resolution is unreliable in this Android/Termux environment:
+     * process.platform resolves to linux and libc resolves to null, so neither
+     * the Android nor Linux platform package can be installed normally.
+     *
+     * We work around this by:
+     * 1. Patching davey's env-var loader branch so it actually returns the
+     *    explicitly requested .node file instead of discarding it.
+     * 2. Fetching the Android native package tarball with npm pack.
+     * 3. Extracting davey.android-arm64.node into a stable app-private path.
      */
     private fun ensureOpenClawNativeBinding(onProgress: (String) -> Unit): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
         val openclawDir = "$prefix/lib/node_modules/openclaw"
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+        val nativeDir = "${paths.homeDir}/.openclaw-android/native/davey"
+        val nativeNode = "$nativeDir/davey.android-arm64.node"
         val cmd = """
             OPENCLAW_DIR="$openclawDir"
-            PREFIX_DIR="$prefix"
+            NPM_CLI="$npmCli"
+            NATIVE_DIR="$nativeDir"
+            NATIVE_NODE="$nativeNode"
+            DAVEY_JS="${'$'}OPENCLAW_DIR/node_modules/@snazzah/davey/index.js"
+            TMP_PACK_DIR="${paths.homeDir}/.openclaw-android/native/.davey-pack"
             if [ ! -d "${'$'}OPENCLAW_DIR" ]; then
               echo "openclaw-dir-missing"
               exit 0
             fi
 
-            pick_pkg() {
-              arch="${'$'}(uname -m 2>/dev/null || true)"
-              case "${'$'}arch" in
-                aarch64|arm64)
-                  echo "@snazzah/davey-android-arm64 davey-android-arm64"
-                  ;;
-                armv7l|armv8l|arm)
-                  echo "@snazzah/davey-android-arm-eabi davey-android-arm-eabi"
-                  ;;
-                *)
-                  echo ""
-                  ;;
-              esac
+            if [ ! -f "${'$'}DAVEY_JS" ]; then
+              echo "davey-wrapper-missing"
+              exit 1
+            fi
+
+            mkdir -p "${'$'}NATIVE_DIR" "${'$'}TMP_PACK_DIR"
+
+            DAVEY_JS="${'$'}DAVEY_JS" node <<'NODE'
+            const fs = require('fs')
+            const path = process.env.DAVEY_JS
+            let src = fs.readFileSync(path, 'utf8')
+            const before = '      nativeBinding = require(process.env.NAPI_RS_NATIVE_LIBRARY_PATH);'
+            const after = '      return require(process.env.NAPI_RS_NATIVE_LIBRARY_PATH)'
+            if (src.includes(after)) {
+              console.log('davey-loader-patched:already')
+              process.exit(0)
             }
+            if (!src.includes(before)) {
+              console.log('davey-loader-patched:pattern-missing')
+              process.exit(2)
+            }
+            src = src.replace(before, after)
+            fs.writeFileSync(path, src)
+            console.log('davey-loader-patched:ok')
+            NODE
+            patch_code="${'$'}?"
+            if [ "${'$'}patch_code" -ne 0 ] && [ "${'$'}patch_code" -ne 2 ]; then
+              exit "${'$'}patch_code"
+            fi
+            if [ "${'$'}patch_code" -eq 2 ]; then
+              echo "davey-loader-patched:pattern-missing"
+              exit 1
+            fi
 
-            picked="${'$'}(pick_pkg)"
-            if [ -z "${'$'}picked" ]; then
-              echo "davey-skip-unsupported-arch:${'$'}(uname -m 2>/dev/null || true)"
+            if [ -f "${'$'}NATIVE_NODE" ]; then
+              echo "davey-native-ready:cached"
               exit 0
             fi
 
-            PKG="${'$'}{picked%% *}"
-            PKG_DIR="${'$'}{picked##* }"
-            LOCAL_DIR="${'$'}OPENCLAW_DIR/node_modules/@snazzah/${'$'}PKG_DIR"
-            GLOBAL_DIR="${'$'}PREFIX_DIR/lib/node_modules/@snazzah/${'$'}PKG_DIR"
-            mkdir -p "${'$'}OPENCLAW_DIR/node_modules/@snazzah"
+            rm -rf "${'$'}TMP_PACK_DIR/package" "${'$'}TMP_PACK_DIR"/snazzah-davey-android-arm64-*.tgz 2>/dev/null
+            echo "davey-pack-fetch:@snazzah/davey-android-arm64@$OPENCLAW_DAVEY_VERSION"
+            node "${'$'}NPM_CLI" pack "@snazzah/davey-android-arm64@$OPENCLAW_DAVEY_VERSION" --pack-destination "${'$'}TMP_PACK_DIR" 2>&1 || true
 
-            if [ -d "${'$'}LOCAL_DIR" ]; then
-              echo "davey-binding-ready:local"
-              exit 0
+            PACK_FILE="${'$'}(ls "${'$'}TMP_PACK_DIR"/snazzah-davey-android-arm64-*.tgz 2>/dev/null | head -n 1)"
+            if [ -z "${'$'}PACK_FILE" ]; then
+              echo "davey-pack-missing"
+              exit 1
             fi
 
-            if [ -d "${'$'}GLOBAL_DIR" ]; then
-              ln -sfn "${'$'}GLOBAL_DIR" "${'$'}LOCAL_DIR"
-              if [ -d "${'$'}LOCAL_DIR" ]; then
-                echo "davey-binding-ready:linked-global"
-                exit 0
-              fi
+            tar -xzf "${'$'}PACK_FILE" -C "${'$'}TMP_PACK_DIR" 2>&1 || true
+            if [ ! -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" ]; then
+              echo "davey-node-missing"
+              exit 1
             fi
 
-            echo "davey-binding-install:${'$'}PKG@$OPENCLAW_DAVEY_VERSION"
-            node "$npmCli" install --prefix "${'$'}OPENCLAW_DIR" "${'$'}PKG@$OPENCLAW_DAVEY_VERSION" --no-save --fund=false --audit=false 2>&1 || true
-
-            if [ -d "${'$'}LOCAL_DIR" ]; then
-              echo "davey-binding-ready:installed-local"
-              exit 0
-            fi
-
-            node "$npmCli" install -g "${'$'}PKG@$OPENCLAW_DAVEY_VERSION" --save=false --fund=false --audit=false 2>&1 || true
-            if [ -d "${'$'}GLOBAL_DIR" ]; then
-              ln -sfn "${'$'}GLOBAL_DIR" "${'$'}LOCAL_DIR"
-            fi
-
-            if [ -d "${'$'}LOCAL_DIR" ] || [ -d "${'$'}GLOBAL_DIR" ]; then
-              echo "davey-binding-ready:installed-global"
-              exit 0
-            fi
-
-            echo "davey-binding-missing"
-            exit 1
+            cp -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" "${'$'}NATIVE_NODE"
+            chmod 700 "${'$'}NATIVE_NODE" 2>/dev/null || true
+            echo "davey-native-ready:installed"
+            exit 0
         """.trimIndent()
 
         val code = runInPrefix(cmd) {
@@ -3490,6 +3503,7 @@ EOF
             "GIT_TEMPLATE_DIR" to "${paths.prefixDir}/share/git-core/templates",
             "OPENSSL_CONF" to "${paths.prefixDir}/etc/tls/openssl.cnf",
             "NODE_OPTIONS" to "--openssl-config=${paths.prefixDir}/etc/tls/openssl.cnf --unhandled-rejections=none$bionicCompatOpt",
+            "NAPI_RS_NATIVE_LIBRARY_PATH" to "${paths.homeDir}/.openclaw-android/native/davey/davey.android-arm64.node",
             "CONTAINER" to "1",
         )
 
