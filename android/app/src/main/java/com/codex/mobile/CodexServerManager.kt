@@ -33,6 +33,7 @@ class CodexServerManager(private val context: Context) {
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
         private const val ANYCLAW_RUNTIME_PLUGIN_ID = "anyclaw-runtime-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
+        private const val OPENCLAW_DAVEY_VERSION = "0.1.10"
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT = 60
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_STEP = 40
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
@@ -698,6 +699,8 @@ H3
         // and allow device-auth bypass
         onProgress("Patching gateway for Android…")
         patchGatewayForAndroid()
+        onProgress("Repairing OpenClaw native bindings…")
+        ensureOpenClawNativeBinding(onProgress)
 
         return isOpenClawInstalled()
     }
@@ -734,6 +737,8 @@ H3
         onProgress("Re-applying OpenClaw Android patches…")
         patchOpenClawPaths()
         patchGatewayForAndroid()
+        onProgress("Repairing OpenClaw native bindings…")
+        ensureOpenClawNativeBinding(onProgress)
         return isOpenClawInstalled()
     }
 
@@ -752,6 +757,96 @@ H3
         if (!existing.contains("insteadOf = ssh://git@github.com")) {
             gitconfigFile.appendText("\n$desired\n")
         }
+    }
+
+    /**
+     * OpenClaw 2026.3.x requires the Android-specific davey native binding.
+     * npm optional dependency resolution can skip it on fresh installs.
+     */
+    private fun ensureOpenClawNativeBinding(onProgress: (String) -> Unit): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        val openclawDir = "$prefix/lib/node_modules/openclaw"
+        val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+        val cmd = """
+            OPENCLAW_DIR="$openclawDir"
+            PREFIX_DIR="$prefix"
+            if [ ! -d "${'$'}OPENCLAW_DIR" ]; then
+              echo "openclaw-dir-missing"
+              exit 0
+            fi
+
+            pick_pkg() {
+              arch="${'$'}(uname -m 2>/dev/null || true)"
+              case "${'$'}arch" in
+                aarch64|arm64)
+                  echo "@snazzah/davey-android-arm64 davey-android-arm64"
+                  ;;
+                armv7l|armv8l|arm)
+                  echo "@snazzah/davey-android-arm-eabi davey-android-arm-eabi"
+                  ;;
+                *)
+                  echo ""
+                  ;;
+              esac
+            }
+
+            picked="${'$'}(pick_pkg)"
+            if [ -z "${'$'}picked" ]; then
+              echo "davey-skip-unsupported-arch:${'$'}(uname -m 2>/dev/null || true)"
+              exit 0
+            fi
+
+            PKG="${'$'}{picked%% *}"
+            PKG_DIR="${'$'}{picked##* }"
+            LOCAL_DIR="${'$'}OPENCLAW_DIR/node_modules/@snazzah/${'$'}PKG_DIR"
+            GLOBAL_DIR="${'$'}PREFIX_DIR/lib/node_modules/@snazzah/${'$'}PKG_DIR"
+            mkdir -p "${'$'}OPENCLAW_DIR/node_modules/@snazzah"
+
+            if [ -d "${'$'}LOCAL_DIR" ]; then
+              echo "davey-binding-ready:local"
+              exit 0
+            fi
+
+            if [ -d "${'$'}GLOBAL_DIR" ]; then
+              ln -sfn "${'$'}GLOBAL_DIR" "${'$'}LOCAL_DIR"
+              if [ -d "${'$'}LOCAL_DIR" ]; then
+                echo "davey-binding-ready:linked-global"
+                exit 0
+              fi
+            fi
+
+            echo "davey-binding-install:${'$'}PKG@$OPENCLAW_DAVEY_VERSION"
+            node "$npmCli" install --prefix "${'$'}OPENCLAW_DIR" "${'$'}PKG@$OPENCLAW_DAVEY_VERSION" --no-save --fund=false --audit=false 2>&1 || true
+
+            if [ -d "${'$'}LOCAL_DIR" ]; then
+              echo "davey-binding-ready:installed-local"
+              exit 0
+            fi
+
+            node "$npmCli" install -g "${'$'}PKG@$OPENCLAW_DAVEY_VERSION" --save=false --fund=false --audit=false 2>&1 || true
+            if [ -d "${'$'}GLOBAL_DIR" ]; then
+              ln -sfn "${'$'}GLOBAL_DIR" "${'$'}LOCAL_DIR"
+            fi
+
+            if [ -d "${'$'}LOCAL_DIR" ] || [ -d "${'$'}GLOBAL_DIR" ]; then
+              echo "davey-binding-ready:installed-global"
+              exit 0
+            fi
+
+            echo "davey-binding-missing"
+            exit 1
+        """.trimIndent()
+
+        val code = runInPrefix(cmd) {
+            Log.d(TAG, "[openclaw-davey] $it")
+            onProgress(it)
+        }
+        if (code != 0) {
+            Log.w(TAG, "OpenClaw native binding repair failed with code=$code")
+            return false
+        }
+        return true
     }
 
     /**
@@ -1225,6 +1320,7 @@ H3
         val paths = BootstrapInstaller.getPaths(context)
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
         ensureOpenClawGatewayHistoryByteCap()
+        ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }
 
         // Kill any orphaned gateway processes and reset all device tokens.
         runInPrefix("""
