@@ -14,7 +14,7 @@ class ShizukuShellBridgeServer(
 
     companion object {
         private const val TAG = "ShizukuBridgeServer"
-        val BRIDGE_PORT: Int = AppLocalPorts.shizukuBridgePort
+        const val BRIDGE_PORT = 18926
     }
 
     @Volatile

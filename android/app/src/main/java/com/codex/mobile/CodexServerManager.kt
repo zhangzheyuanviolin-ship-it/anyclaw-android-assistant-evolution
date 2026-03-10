@@ -23,18 +23,16 @@ class CodexServerManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CodexServerManager"
-        val SERVER_PORT: Int = AppLocalPorts.codexServerPort
-        private val PROXY_PORT: Int = AppLocalPorts.codexProxyPort
+        const val SERVER_PORT = 18923
+        private const val PROXY_PORT = 18924
         private const val CODEX_VERSION = "0.104.0"
-        val OPENCLAW_GATEWAY_PORT: Int = AppLocalPorts.openClawGatewayPort
-        val OPENCLAW_CONTROL_UI_PORT: Int = AppLocalPorts.openClawControlUiPort
+        const val OPENCLAW_GATEWAY_PORT = 18789
+        const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
         private const val ANYCLAW_RUNTIME_PLUGIN_ID = "anyclaw-runtime-suite"
-        private const val ANYCLAW_MULTIMEDIA_PLUGIN_ID = "anyclaw-multimedia-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
-        private const val OPENCLAW_DAVEY_VERSION = "0.1.10"
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT = 60
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_STEP = 40
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
@@ -419,8 +417,6 @@ WEOF
 
         onProgress("Fixing git-core script shebangs…")
         fixGitCoreShebangs(prefix)
-        onProgress("Fixing prefix command shebangs…")
-        fixPrefixBinShebangs(prefix)
 
         onProgress("Patching make & cmake binaries…")
         patchBinaryTermuxPaths(prefix)
@@ -565,31 +561,6 @@ EOF
     }
 
     /**
-     * Fix stale hardcoded shebangs copied from vanilla Termux path inside the
-     * current app-private prefix. These stale paths cause "Permission denied"
-     * even when script files are executable.
-     */
-    private fun fixPrefixBinShebangs(prefix: String) {
-        val cmd = """
-            for f in "$prefix/bin/pkg.real" "$prefix/bin/pkg" "$prefix/bin/apt-key" "$prefix/bin/apt-get" "$prefix/bin/apt"; do
-              [ ! -f "${'$'}f" ] && continue
-              head_line="$(head -1 "${'$'}f" 2>/dev/null || true)"
-              case "${'$'}head_line" in
-                *"/data/data/com.termux/files/usr/bin/bash"*)
-                  sed -i "1s|^#!.*com.termux/files/usr/bin/bash|#!$prefix/bin/bash|" "${'$'}f" || true
-                  ;;
-                *"/data/data/com.termux/files/usr/bin/sh"*)
-                  sed -i "1s|^#!.*com.termux/files/usr/bin/sh|#!$prefix/bin/sh|" "${'$'}f" || true
-                  ;;
-              esac
-              chmod 700 "${'$'}f" 2>/dev/null || true
-            done
-            echo "Prefix shebangs fixed"
-        """.trimIndent()
-        runInPrefix(cmd) { Log.d(TAG, "[fix-prefix-shebang] $it") }
-    }
-
-    /**
      * Binary-patch the `make` and `cmake` ELF binaries to replace the
      * hardcoded Termux shell paths with /system/bin/sh (null-padded).
      * Without this, cmake's test-compile step and make's recipe execution
@@ -727,8 +698,6 @@ H3
         // and allow device-auth bypass
         onProgress("Patching gateway for Android…")
         patchGatewayForAndroid()
-        onProgress("Repairing OpenClaw native bindings…")
-        ensureOpenClawNativeBinding(onProgress)
 
         return isOpenClawInstalled()
     }
@@ -765,8 +734,6 @@ H3
         onProgress("Re-applying OpenClaw Android patches…")
         patchOpenClawPaths()
         patchGatewayForAndroid()
-        onProgress("Repairing OpenClaw native bindings…")
-        ensureOpenClawNativeBinding(onProgress)
         return isOpenClawInstalled()
     }
 
@@ -785,97 +752,6 @@ H3
         if (!existing.contains("insteadOf = ssh://git@github.com")) {
             gitconfigFile.appendText("\n$desired\n")
         }
-    }
-
-    /**
-     * OpenClaw 2026.3.x requires @snazzah/davey platform bindings on Android.
-     * npm optional-dependency resolution can miss this package on some installs,
-     * which causes gateway startup to fail with "Cannot find native binding".
-     */
-    private fun ensureOpenClawNativeBinding(onProgress: (String) -> Unit): Boolean {
-        val paths = BootstrapInstaller.getPaths(context)
-        val prefix = paths.prefixDir
-        val openclawDir = "$prefix/lib/node_modules/openclaw"
-        val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
-        val cmd = """
-            OPENCLAW_DIR="$openclawDir"
-            PREFIX_DIR="$prefix"
-            if [ ! -d "${'$'}OPENCLAW_DIR" ]; then
-              echo "openclaw-dir-missing"
-              exit 0
-            fi
-
-            pick_pkg() {
-              arch="${'$'}(uname -m 2>/dev/null || true)"
-              case "${'$'}arch" in
-                aarch64|arm64)
-                  echo "@snazzah/davey-android-arm64 davey-android-arm64"
-                  ;;
-                armv7l|armv8l|arm)
-                  echo "@snazzah/davey-android-arm-eabi davey-android-arm-eabi"
-                  ;;
-                *)
-                  echo ""
-                  ;;
-              esac
-            }
-
-            picked="${'$'}(pick_pkg)"
-            if [ -z "${'$'}picked" ]; then
-              echo "davey-skip-unsupported-arch:${'$'}(uname -m 2>/dev/null || true)"
-              exit 0
-            fi
-
-            PKG="${'$'}{picked%% *}"
-            PKG_DIR="${'$'}{picked##* }"
-            LOCAL_DIR="${'$'}OPENCLAW_DIR/node_modules/@snazzah/${'$'}PKG_DIR"
-            GLOBAL_DIR="${'$'}PREFIX_DIR/lib/node_modules/@snazzah/${'$'}PKG_DIR"
-            mkdir -p "${'$'}OPENCLAW_DIR/node_modules/@snazzah"
-
-            if [ -d "${'$'}LOCAL_DIR" ]; then
-              echo "davey-binding-ready:local"
-              exit 0
-            fi
-
-            if [ -d "${'$'}GLOBAL_DIR" ]; then
-              ln -sfn "${'$'}GLOBAL_DIR" "${'$'}LOCAL_DIR"
-              if [ -d "${'$'}LOCAL_DIR" ]; then
-                echo "davey-binding-ready:linked-global"
-                exit 0
-              fi
-            fi
-
-            echo "davey-binding-install:${'$'}PKG@$OPENCLAW_DAVEY_VERSION"
-            node "$npmCli" install --prefix "${'$'}OPENCLAW_DIR" "${'$'}PKG@$OPENCLAW_DAVEY_VERSION" --no-save --fund=false --audit=false 2>&1 || true
-
-            if [ -d "${'$'}LOCAL_DIR" ]; then
-              echo "davey-binding-ready:installed-local"
-              exit 0
-            fi
-
-            node "$npmCli" install -g "${'$'}PKG@$OPENCLAW_DAVEY_VERSION" --save=false --fund=false --audit=false 2>&1 || true
-            if [ -d "${'$'}GLOBAL_DIR" ]; then
-              ln -sfn "${'$'}GLOBAL_DIR" "${'$'}LOCAL_DIR"
-            fi
-
-            if [ -d "${'$'}LOCAL_DIR" ] || [ -d "${'$'}GLOBAL_DIR" ]; then
-              echo "davey-binding-ready:installed-global"
-              exit 0
-            fi
-
-            echo "davey-binding-missing"
-            exit 1
-        """.trimIndent()
-
-        val code = runInPrefix(cmd) {
-            Log.d(TAG, "[openclaw-davey] $it")
-            onProgress(it)
-        }
-        if (code != 0) {
-            Log.w(TAG, "OpenClaw native binding repair failed with code=$code")
-            return false
-        }
-        return true
     }
 
     /**
@@ -1110,7 +986,6 @@ H3
         ensureAnyClawGithubPlugin(paths.homeDir)
         ensureAnyClawDevicePlugin(paths.homeDir)
         ensureAnyClawRuntimePlugin(paths.homeDir)
-        ensureAnyClawMultimediaPlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
@@ -1120,7 +995,7 @@ H3
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
-        searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
+        if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
@@ -1161,22 +1036,13 @@ H3
         runtimeSuiteEntry.put("enabled", true)
         val runtimeSuiteConfig = ensureObject(runtimeSuiteEntry, "config")
         if (!runtimeSuiteConfig.has("timeoutSeconds")) runtimeSuiteConfig.put("timeoutSeconds", 30)
-        runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
+        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
         if (!runtimeSuiteConfig.has("runtimeDoctorPath")) {
             runtimeSuiteConfig.put(
                 "runtimeDoctorPath",
                 "${paths.homeDir}/.openclaw/workspace/scripts/runtime-env-doctor.sh",
             )
         }
-
-        val multimediaSuiteEntry = ensureObject(entries, ANYCLAW_MULTIMEDIA_PLUGIN_ID)
-        multimediaSuiteEntry.put("enabled", true)
-        val multimediaSuiteConfig = ensureObject(multimediaSuiteEntry, "config")
-        if (!multimediaSuiteConfig.has("timeoutSeconds")) multimediaSuiteConfig.put("timeoutSeconds", 90)
-        if (!multimediaSuiteConfig.has("workspaceRoot")) multimediaSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
-        if (!multimediaSuiteConfig.has("allowInstall")) multimediaSuiteConfig.put("allowInstall", true)
-        if (!multimediaSuiteConfig.has("allowExec")) multimediaSuiteConfig.put("allowExec", true)
-        if (!multimediaSuiteConfig.has("autoRepairOnLinkerError")) multimediaSuiteConfig.put("autoRepairOnLinkerError", true)
 
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0) {
@@ -1191,9 +1057,6 @@ H3
             }
             if (!jsonArrayContains(allow, ANYCLAW_RUNTIME_PLUGIN_ID)) {
                 allow.put(ANYCLAW_RUNTIME_PLUGIN_ID)
-            }
-            if (!jsonArrayContains(allow, ANYCLAW_MULTIMEDIA_PLUGIN_ID)) {
-                allow.put(ANYCLAW_MULTIMEDIA_PLUGIN_ID)
             }
         }
 
@@ -1262,8 +1125,6 @@ H3
     }
 
     fun runOpenClawPreflight(onProgress: (String) -> Unit): Boolean {
-        val paths = BootstrapInstaller.getPaths(context)
-        fixPrefixBinShebangs(paths.prefixDir)
         onProgress("Repairing OpenClaw toolchain links…")
         ensureOpenClawToolchain(onProgress)
         onProgress("Validating ar/ranlib preflight…")
@@ -1347,24 +1208,14 @@ H3
                 openClawGatewayProcess!!.exitValue()
                 openClawGatewayProcess = null
             } catch (_: IllegalThreadStateException) {
-                if (isOpenClawGatewayResponsive()) {
-                    Log.i(TAG, "OpenClaw gateway already running and responsive")
-                    return true
-                }
-                Log.w(TAG, "Gateway process is alive but health check failed; restarting")
-                try {
-                    openClawGatewayProcess?.destroyForcibly()
-                } catch (_: Exception) {
-                }
-                openClawGatewayProcess = null
-                Thread.sleep(320)
+                Log.i(TAG, "OpenClaw gateway already running")
+                return true
             }
         }
 
         val paths = BootstrapInstaller.getPaths(context)
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
         ensureOpenClawGatewayHistoryByteCap()
-        ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }
 
         // Kill any orphaned gateway processes and reset all device tokens.
         runInPrefix("""
@@ -1377,7 +1228,7 @@ H3
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 if echo "${'$'}cmdline" | grep -q "openclaw gateway run"; then
                     kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}"; then
+                elif echo "${'$'}cmdline" | grep -q "18789"; then
                     kill -9 ${'$'}pid 2>/dev/null
                 fi
             done
@@ -1418,63 +1269,14 @@ H3
         // Run it asynchronously with retries so slow startups still get cron/task registration.
         ensureHeartbeatBootstrapAsync(paths.homeDir)
 
-        if (waitForOpenClawGatewayReady(proc, timeoutMs = 22_000L, pollMs = 520L)) {
+        Thread.sleep(1200)
+        if (isOpenClawGatewayResponsive()) {
             Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
             return true
         }
 
         Log.w(TAG, "OpenClaw gateway process launched but not responsive yet")
-        logOpenClawGatewayDiagnostics("start-not-responsive")
         return false
-    }
-
-    private fun waitForOpenClawGatewayReady(
-        process: Process?,
-        timeoutMs: Long,
-        pollMs: Long,
-    ): Boolean {
-        val startAt = System.currentTimeMillis()
-        while (System.currentTimeMillis() - startAt < timeoutMs) {
-            if (isOpenClawGatewayResponsive()) {
-                return true
-            }
-            if (process != null) {
-                try {
-                    val code = process.exitValue()
-                    Log.w(TAG, "OpenClaw gateway process exited early with code=$code")
-                    return false
-                } catch (_: IllegalThreadStateException) {
-                    // still running
-                }
-            }
-            Thread.sleep(pollMs)
-        }
-        return isOpenClawGatewayResponsive()
-    }
-
-    private fun logOpenClawGatewayDiagnostics(reason: String) {
-        val paths = BootstrapInstaller.getPaths(context)
-        val cmd =
-            """
-            echo "[openclaw-gw-diagnose] reason=$reason"
-            echo "[openclaw-gw-diagnose] ts=${'$'}(date +%s)"
-            echo "[openclaw-gw-diagnose] openclaw=$(command -v openclaw || true)"
-            echo "[openclaw-gw-diagnose] node=$(command -v node || true)"
-            echo "[openclaw-gw-diagnose] shell=$(command -v sh || true)"
-            if [ -f "${paths.homeDir}/.openclaw/openclaw.json" ]; then
-              echo "[openclaw-gw-diagnose] openclaw.json(bind/auth):"
-              grep -E '"bind"|"auth"|"token"|"mode"' "${paths.homeDir}/.openclaw/openclaw.json" 2>/dev/null || true
-            fi
-            echo "[openclaw-gw-diagnose] port-listen:"
-            ( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | grep "${OPENCLAW_GATEWAY_PORT}" || true
-            echo "[openclaw-gw-diagnose] process-list:"
-            ps -A 2>/dev/null | grep -E 'openclaw|node' | grep -E 'gateway|${OPENCLAW_GATEWAY_PORT}' || true
-            echo "[openclaw-gw-diagnose] health-call:"
-            openclaw gateway call health --json --params '{}' 2>&1 || true
-            """.trimIndent()
-        runInPrefix(cmd) { line ->
-            Log.w(TAG, line)
-        }
     }
 
     /**
@@ -1563,7 +1365,7 @@ H3
                   'function patchChatHistoryRequest(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||typeof app.client.request!==\"function\"){return;}if(app.client.__anyclawReqPatched===\"1\"){return;}var orig=app.client.request.bind(app.client);app.client.request=function(method,params){try{if(method===\"chat.history\"&&params&&typeof params===\"object\"){var capped=getHistoryLimit();var wanted=Number(params.limit);if(!Number.isFinite(wanted)){wanted=capped;}if(wanted>capped){wanted=capped;}params=Object.assign({},params,{limit:wanted});}}catch(_){}return orig(method,params);};app.client.__anyclawReqPatched=\"1\";}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
                   'function wireNewSessionButton(){document.querySelectorAll(\"button\").forEach(function(btn){var label=normalizeSpace(btn.textContent||\"\");if(label!==\"New session\"&&label!==\"新建会话\"){return;}if(btn.dataset.anyclawNewBound===\"1\"){return;}btn.dataset.anyclawNewBound=\"1\";btn.addEventListener(\"click\",function(ev){try{ev.preventDefault();ev.stopPropagation();if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}}catch(_){}openNewSessionDirect();},true);if(isZh){replaceFirstTextNode(btn,\"新建会话\");}});}' +
-                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:$SERVER_PORT/\";});document.body.appendChild(btn);}' +
+                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:18923/\";});document.body.appendChild(btn);}' +
                   'function installTraceToggle(){var id=\"anyclaw-trace-toggle\";var btn=document.getElementById(id);var u=new URL(location.href);var isSimple=u.searchParams.get(\"simple\")!==\"0\";if(!btn){btn=document.createElement(\"button\");btn.id=id;btn.type=\"button\";btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"96px\";btn.style.zIndex=\"2147482998\";btn.style.padding=\"6px 10px\";btn.style.borderRadius=\"8px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.88)\";btn.style.color=\"#fff\";btn.style.fontSize=\"12px\";document.body.appendChild(btn);}btn.textContent=isZh?(isSimple?\"过程显示：关\":\"过程显示：开\"):(isSimple?\"Process view: off\":\"Process view: on\");btn.setAttribute(\"aria-label\",btn.textContent);btn.onclick=function(){var next=new URL(location.href);next.searchParams.set(\"simple\",isSimple?\"0\":\"1\");location.assign(next.toString());};}' +
                   'function runPatches(){patchChatHistoryRequest();localizeStatic();wireNewSessionButton();installBackButton();installTraceToggle();installHistoryControls();}' +
                   'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
@@ -1582,7 +1384,7 @@ H3
                   const normalizedPath = rawPath.endsWith('/') && rawPath.length > 1 ? rawPath.slice(0, -1) : rawPath;
                   if (normalizedPath !== '/' && normalizedPath !== '/index.html' && normalizedPath !== '/chat') return null;
                   let changed = false;
-                  if (urlObj.searchParams.get('gatewayUrl') !== localGatewayUrl) {
+                  if (!urlObj.searchParams.get('gatewayUrl')) {
                     urlObj.searchParams.set('gatewayUrl', localGatewayUrl);
                     changed = true;
                   }
@@ -1590,7 +1392,7 @@ H3
                     urlObj.searchParams.set('simple', '1');
                     changed = true;
                   }
-                  if (gatewayToken && urlObj.searchParams.get('token') !== gatewayToken) {
+                  if (gatewayToken && !urlObj.searchParams.get('token')) {
                     urlObj.searchParams.set('token', gatewayToken);
                     changed = true;
                   }
@@ -1713,20 +1515,11 @@ H3
 
     fun reconnectOpenClawGateway(): Boolean {
         configureOpenClawAuth()
-        var gatewayOk = startOpenClawGateway()
-        if (!gatewayOk) {
-            Log.w(TAG, "Gateway first reconnect attempt failed; retrying once")
-            disconnectOpenClawGateway()
-            Thread.sleep(460)
-            configureOpenClawAuth()
-            gatewayOk = startOpenClawGateway()
-        }
-        if (!gatewayOk) {
-            logOpenClawGatewayDiagnostics("reconnect-failed")
-            return false
-        }
+        val gatewayOk = startOpenClawGateway()
+        if (!gatewayOk) return false
         startOpenClawControlUiServer()
-        return waitForOpenClawGatewayReady(openClawGatewayProcess, timeoutMs = 10_000L, pollMs = 450L)
+        Thread.sleep(800)
+        return isOpenClawGatewayResponsive()
     }
 
     private fun ensureHeartbeatBootstrap() {
@@ -3480,23 +3273,6 @@ EOF
         }
     }
 
-    private fun ensureAnyClawMultimediaPlugin(homeDir: String) {
-        val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_MULTIMEDIA_PLUGIN_ID")
-        if (!pluginRoot.exists()) {
-            pluginRoot.mkdirs()
-        }
-        val manifestFile = File(pluginRoot, "openclaw.plugin.json")
-        val indexFile = File(pluginRoot, "index.ts")
-        val manifestChanged = writeAssetIfChanged(
-            "plugins/$ANYCLAW_MULTIMEDIA_PLUGIN_ID/openclaw.plugin.json",
-            manifestFile,
-        )
-        val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_MULTIMEDIA_PLUGIN_ID/index.ts", indexFile)
-        if (manifestChanged || indexChanged) {
-            Log.i(TAG, "Installed/updated plugin $ANYCLAW_MULTIMEDIA_PLUGIN_ID at $pluginRoot")
-        }
-    }
-
     private fun writeAssetIfChanged(assetPath: String, target: File): Boolean {
         return try {
             val bytes = context.assets.open(assetPath).use { it.readBytes() }
@@ -3541,7 +3317,6 @@ EOF
             "ANDROID_STORAGE" to "/sdcard",
             "EXTERNAL_STORAGE" to "/sdcard",
             "ANYCLAW_EXPORT_DIR" to "/sdcard/Download/AnyClaw",
-            "ANYCLAW_PROXY_PORT" to PROXY_PORT.toString(),
             "APT_CONFIG" to "${paths.prefixDir}/etc/apt/apt.conf",
             "DPKG_ADMINDIR" to "${paths.prefixDir}/var/lib/dpkg",
             "SSL_CERT_FILE" to "${paths.prefixDir}/etc/tls/cert.pem",

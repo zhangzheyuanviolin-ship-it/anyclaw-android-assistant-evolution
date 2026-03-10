@@ -3,7 +3,7 @@ const net = require("net");
 const fs = require("fs");
 const path = require("path");
 
-const PORT = Number(process.env.ANYCLAW_PROXY_PORT || "18924");
+const PORT = 18924;
 
 const pidFile = path.join(process.env.HOME || "/tmp", ".proxy.pid");
 fs.writeFileSync(pidFile, String(process.pid));
