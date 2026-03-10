@@ -735,7 +735,10 @@ H3
         onProgress("Patching gateway for Android…")
         patchGatewayForAndroid()
         onProgress("Repairing OpenClaw native bindings…")
-        ensureOpenClawNativeBinding(onProgress)
+        if (!ensureOpenClawNativeBinding(onProgress)) {
+            Log.e(TAG, "OpenClaw native binding repair failed during install")
+            return false
+        }
 
         return isOpenClawInstalled()
     }
@@ -773,7 +776,10 @@ H3
         patchOpenClawPaths()
         patchGatewayForAndroid()
         onProgress("Repairing OpenClaw native bindings…")
-        ensureOpenClawNativeBinding(onProgress)
+        if (!ensureOpenClawNativeBinding(onProgress)) {
+            Log.e(TAG, "OpenClaw native binding repair failed during version alignment")
+            return false
+        }
         return isOpenClawInstalled()
     }
 
@@ -1368,7 +1374,10 @@ H3
         val paths = BootstrapInstaller.getPaths(context)
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
         ensureOpenClawGatewayHistoryByteCap()
-        ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }
+        if (!ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }) {
+            Log.e(TAG, "OpenClaw native binding repair failed before gateway startup")
+            return false
+        }
 
         // Kill any orphaned gateway processes and reset all device tokens.
         runInPrefix("""

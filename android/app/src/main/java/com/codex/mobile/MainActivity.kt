@@ -369,6 +369,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runSetup() {
+        val hadOpenClawAtStart = serverManager.isOpenClawInstalled()
+
         // Step 1: Extract bootstrap
         if (!BootstrapInstaller.isBootstrapInstalled(this)) {
             updateStatus("Extracting environment…")
@@ -485,9 +487,17 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Codex authenticated")
         }
 
-        // Step 7: Start OpenClaw services in background so Codex chat page remains
-        // available even if gateway/bootstrap has a transient failure.
-        startOpenClawServicesAsync()
+        // Step 7: On a fresh install, complete one full OpenClaw bring-up pass
+        // before showing the UI so users do not need to restart the app to get
+        // a working gateway. Existing installs still use the async fast path.
+        val needsBlockingOpenClawBootstrap = !hadOpenClawAtStart && serverManager.isOpenClawInstalled()
+        if (needsBlockingOpenClawBootstrap) {
+            updateStatus("Finalizing OpenClaw…", "Completing first-run gateway setup")
+            startOpenClawServicesSync()
+        } else {
+            // Existing installs keep Codex page availability as the first priority.
+            startOpenClawServicesAsync()
+        }
 
         // Step 8: Start web server
         updateStatus("Starting server…")
@@ -523,31 +533,40 @@ class MainActivity : AppCompatActivity() {
     private fun startOpenClawServicesAsync() {
         if (!serverManager.isOpenClawInstalled()) return
         Thread {
-            try {
-                updateStatus("Running OpenClaw preflight…")
-                serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
-
-                updateStatus("Configuring OpenClaw…")
-                serverManager.configureOpenClawAuth()
-
-                updateStatus("Starting OpenClaw gateway…")
-                val gatewayOk = serverManager.startOpenClawGateway()
-                if (!gatewayOk) {
-                    Log.w(TAG, "OpenClaw gateway did not become responsive")
-                }
-
-                updateStatus("Starting OpenClaw Control UI…")
-                serverManager.startOpenClawControlUiServer()
-            } catch (error: Exception) {
-                Log.e(TAG, "OpenClaw async startup failed", error)
-            } finally {
-                runOnUiThread {
-                    if (webView.visibility == View.VISIBLE) {
-                        refreshGatewayStatusAsync(announce = true)
-                    }
+            startOpenClawServicesSync()
+            runOnUiThread {
+                if (webView.visibility == View.VISIBLE) {
+                    refreshGatewayStatusAsync(announce = true)
                 }
             }
         }.start()
+    }
+
+    private fun startOpenClawServicesSync(): Boolean {
+        if (!serverManager.isOpenClawInstalled()) return false
+        return try {
+            updateStatus("Running OpenClaw preflight…")
+            serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
+
+            updateStatus("Configuring OpenClaw…")
+            serverManager.configureOpenClawAuth()
+
+            updateStatus("Starting OpenClaw gateway…")
+            var gatewayOk = serverManager.startOpenClawGateway()
+            if (!gatewayOk) {
+                Log.w(TAG, "OpenClaw gateway did not become responsive on first attempt; retrying once")
+                updateDetail("Gateway retrying once…")
+                Thread.sleep(1200)
+                gatewayOk = serverManager.startOpenClawGateway()
+            }
+
+            updateStatus("Starting OpenClaw Control UI…")
+            serverManager.startOpenClawControlUiServer()
+            gatewayOk
+        } catch (error: Exception) {
+            Log.e(TAG, "OpenClaw startup failed", error)
+            false
+        }
     }
 
     private fun consumeLaunchUrlOrDefault(): String {
