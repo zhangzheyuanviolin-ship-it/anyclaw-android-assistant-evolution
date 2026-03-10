@@ -1208,8 +1208,17 @@ H3
                 openClawGatewayProcess!!.exitValue()
                 openClawGatewayProcess = null
             } catch (_: IllegalThreadStateException) {
-                Log.i(TAG, "OpenClaw gateway already running")
-                return true
+                if (isOpenClawGatewayResponsive()) {
+                    Log.i(TAG, "OpenClaw gateway already running and responsive")
+                    return true
+                }
+                Log.w(TAG, "Gateway process is alive but not responsive; restarting")
+                try {
+                    openClawGatewayProcess?.destroyForcibly()
+                } catch (_: Exception) {
+                }
+                openClawGatewayProcess = null
+                Thread.sleep(320)
             }
         }
 
@@ -1228,7 +1237,7 @@ H3
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 if echo "${'$'}cmdline" | grep -q "openclaw gateway run"; then
                     kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q "18789"; then
+                elif echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}"; then
                     kill -9 ${'$'}pid 2>/dev/null
                 fi
             done
@@ -1269,13 +1278,13 @@ H3
         // Run it asynchronously with retries so slow startups still get cron/task registration.
         ensureHeartbeatBootstrapAsync(paths.homeDir)
 
-        Thread.sleep(1200)
-        if (isOpenClawGatewayResponsive()) {
+        if (waitForOpenClawGatewayReady(proc, timeoutMs = 22_000L, pollMs = 520L)) {
             Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
             return true
         }
 
         Log.w(TAG, "OpenClaw gateway process launched but not responsive yet")
+        logOpenClawGatewayDiagnostics("start-not-responsive")
         return false
     }
 
@@ -1515,11 +1524,68 @@ H3
 
     fun reconnectOpenClawGateway(): Boolean {
         configureOpenClawAuth()
-        val gatewayOk = startOpenClawGateway()
-        if (!gatewayOk) return false
+        var gatewayOk = startOpenClawGateway()
+        if (!gatewayOk) {
+            Log.w(TAG, "Gateway first reconnect attempt failed; retrying once")
+            disconnectOpenClawGateway()
+            Thread.sleep(460)
+            configureOpenClawAuth()
+            gatewayOk = startOpenClawGateway()
+        }
+        if (!gatewayOk) {
+            logOpenClawGatewayDiagnostics("reconnect-failed")
+            return false
+        }
         startOpenClawControlUiServer()
-        Thread.sleep(800)
+        return waitForOpenClawGatewayReady(openClawGatewayProcess, timeoutMs = 10_000L, pollMs = 450L)
+    }
+
+    private fun waitForOpenClawGatewayReady(
+        process: Process?,
+        timeoutMs: Long,
+        pollMs: Long,
+    ): Boolean {
+        val startedAt = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startedAt < timeoutMs) {
+            if (isOpenClawGatewayResponsive()) {
+                return true
+            }
+            if (process != null) {
+                try {
+                    val code = process.exitValue()
+                    Log.w(TAG, "OpenClaw gateway exited before ready with code=$code")
+                    return false
+                } catch (_: IllegalThreadStateException) {
+                    // still running
+                }
+            }
+            Thread.sleep(pollMs)
+        }
         return isOpenClawGatewayResponsive()
+    }
+
+    private fun logOpenClawGatewayDiagnostics(reason: String) {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd =
+            """
+            echo "[openclaw-gw-diagnose] reason=$reason"
+            echo "[openclaw-gw-diagnose] ts=${'$'}(date +%s)"
+            echo "[openclaw-gw-diagnose] openclaw=$(command -v openclaw || true)"
+            echo "[openclaw-gw-diagnose] node=$(command -v node || true)"
+            if [ -f "${paths.homeDir}/.openclaw/openclaw.json" ]; then
+              echo "[openclaw-gw-diagnose] openclaw.json(bind/auth):"
+              grep -E '"bind"|"auth"|"token"|"mode"' "${paths.homeDir}/.openclaw/openclaw.json" 2>/dev/null || true
+            fi
+            echo "[openclaw-gw-diagnose] port-listen:"
+            ( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | grep "${OPENCLAW_GATEWAY_PORT}" || true
+            echo "[openclaw-gw-diagnose] process-list:"
+            ps -A 2>/dev/null | grep -E 'openclaw|node' | grep -E 'gateway|${OPENCLAW_GATEWAY_PORT}' || true
+            echo "[openclaw-gw-diagnose] health-call:"
+            openclaw gateway call health --json --params '{}' 2>&1 || true
+            """.trimIndent()
+        runInPrefix(cmd) { line ->
+            Log.w(TAG, line)
+        }
     }
 
     private fun ensureHeartbeatBootstrap() {
