@@ -1,9 +1,10 @@
 package com.codex.mobile
 
 object AppLocalPorts {
-    private val isTestPackage: Boolean =
-        BuildConfig.APPLICATION_ID == "com.codex.mobile.pocketlobster.test"
-
+    // This branch currently builds the temporary test package only.
+    // Keep the port offset explicit here so the test app never collides
+    // with the original package when both are installed side by side.
+    private const val isTestPackage: Boolean = true
     private const val TEST_OFFSET = 10_000
     private val offset: Int = if (isTestPackage) TEST_OFFSET else 0
 
