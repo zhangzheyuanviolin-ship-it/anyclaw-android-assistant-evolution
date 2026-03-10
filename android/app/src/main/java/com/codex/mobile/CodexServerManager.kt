@@ -5,6 +5,7 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.SecureRandom
@@ -86,6 +87,40 @@ class CodexServerManager(private val context: Context) {
             line = reader.readLine()
         }
         return proc.waitFor()
+    }
+
+    private fun startProcessLogThread(proc: Process, label: String) {
+        Thread {
+            try {
+                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                    while (true) {
+                        val line =
+                            try {
+                                reader.readLine()
+                            } catch (_: InterruptedIOException) {
+                                Log.i(TAG, "$label reader interrupted during shutdown")
+                                break
+                            } catch (error: Exception) {
+                                Log.w(TAG, "$label reader stopped: ${error.message}")
+                                break
+                            }
+                        if (line == null) break
+                        Log.d(TAG, "[$label] $line")
+                    }
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "$label log thread failed: ${error.message}")
+            } finally {
+                try {
+                    Log.i(TAG, "$label exited with code: ${proc.waitFor()}")
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    Log.i(TAG, "$label wait interrupted")
+                } catch (error: Exception) {
+                    Log.w(TAG, "$label wait failed: ${error.message}")
+                }
+            }
+        }.start()
     }
 
     /**
@@ -1372,16 +1407,7 @@ H3
 
         val proc = pb.start()
         openClawGatewayProcess = proc
-
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-gw] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
-        }.start()
+        startProcessLogThread(proc, "openclaw-gw")
 
         // Heartbeat bootstrap must not depend on a short fixed gateway warmup window.
         // Run it asynchronously with retries so slow startups still get cron/task registration.
@@ -1580,16 +1606,7 @@ H3
 
         val proc = pb.start()
         openClawControlUiProcess = proc
-
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-ui] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
-        }.start()
+        startProcessLogThread(proc, "openclaw-ui")
 
         Thread.sleep(1000)
         Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
@@ -2071,16 +2088,7 @@ WEOF
 
         val proc = pb.start()
         proxyProcess = proc
-
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[proxy] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "Proxy exited with code: ${proc.waitFor()}")
-        }.start()
+        startProcessLogThread(proc, "proxy")
 
         Thread.sleep(800)
         Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$PROXY_PORT")
@@ -2282,16 +2290,7 @@ WEOF
 
         val proc = pb.start()
         serverProcess = proc
-
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[server] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "Server process exited with code: ${proc.waitFor()}")
-        }.start()
+        startProcessLogThread(proc, "server")
 
         return true
     }
