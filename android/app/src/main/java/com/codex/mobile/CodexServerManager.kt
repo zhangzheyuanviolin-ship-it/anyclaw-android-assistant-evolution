@@ -23,11 +23,11 @@ class CodexServerManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CodexServerManager"
-        const val SERVER_PORT = 18923
-        private const val PROXY_PORT = 18924
+        val SERVER_PORT: Int = AppLocalPorts.codexServerPort
+        private val PROXY_PORT: Int = AppLocalPorts.codexProxyPort
         private const val CODEX_VERSION = "0.104.0"
-        const val OPENCLAW_GATEWAY_PORT = 18789
-        const val OPENCLAW_CONTROL_UI_PORT = 19001
+        val OPENCLAW_GATEWAY_PORT: Int = AppLocalPorts.openClawGatewayPort
+        val OPENCLAW_CONTROL_UI_PORT: Int = AppLocalPorts.openClawControlUiPort
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
@@ -1120,7 +1120,7 @@ H3
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
-        if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
+        searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
@@ -1161,7 +1161,7 @@ H3
         runtimeSuiteEntry.put("enabled", true)
         val runtimeSuiteConfig = ensureObject(runtimeSuiteEntry, "config")
         if (!runtimeSuiteConfig.has("timeoutSeconds")) runtimeSuiteConfig.put("timeoutSeconds", 30)
-        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
+        runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
         if (!runtimeSuiteConfig.has("runtimeDoctorPath")) {
             runtimeSuiteConfig.put(
                 "runtimeDoctorPath",
@@ -1377,7 +1377,7 @@ H3
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 if echo "${'$'}cmdline" | grep -q "openclaw gateway run"; then
                     kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q "18789"; then
+                elif echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}"; then
                     kill -9 ${'$'}pid 2>/dev/null
                 fi
             done
@@ -1563,7 +1563,7 @@ H3
                   'function patchChatHistoryRequest(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||typeof app.client.request!==\"function\"){return;}if(app.client.__anyclawReqPatched===\"1\"){return;}var orig=app.client.request.bind(app.client);app.client.request=function(method,params){try{if(method===\"chat.history\"&&params&&typeof params===\"object\"){var capped=getHistoryLimit();var wanted=Number(params.limit);if(!Number.isFinite(wanted)){wanted=capped;}if(wanted>capped){wanted=capped;}params=Object.assign({},params,{limit:wanted});}}catch(_){}return orig(method,params);};app.client.__anyclawReqPatched=\"1\";}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
                   'function wireNewSessionButton(){document.querySelectorAll(\"button\").forEach(function(btn){var label=normalizeSpace(btn.textContent||\"\");if(label!==\"New session\"&&label!==\"新建会话\"){return;}if(btn.dataset.anyclawNewBound===\"1\"){return;}btn.dataset.anyclawNewBound=\"1\";btn.addEventListener(\"click\",function(ev){try{ev.preventDefault();ev.stopPropagation();if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}}catch(_){}openNewSessionDirect();},true);if(isZh){replaceFirstTextNode(btn,\"新建会话\");}});}' +
-                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:18923/\";});document.body.appendChild(btn);}' +
+                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:$SERVER_PORT/\";});document.body.appendChild(btn);}' +
                   'function installTraceToggle(){var id=\"anyclaw-trace-toggle\";var btn=document.getElementById(id);var u=new URL(location.href);var isSimple=u.searchParams.get(\"simple\")!==\"0\";if(!btn){btn=document.createElement(\"button\");btn.id=id;btn.type=\"button\";btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"96px\";btn.style.zIndex=\"2147482998\";btn.style.padding=\"6px 10px\";btn.style.borderRadius=\"8px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.88)\";btn.style.color=\"#fff\";btn.style.fontSize=\"12px\";document.body.appendChild(btn);}btn.textContent=isZh?(isSimple?\"过程显示：关\":\"过程显示：开\"):(isSimple?\"Process view: off\":\"Process view: on\");btn.setAttribute(\"aria-label\",btn.textContent);btn.onclick=function(){var next=new URL(location.href);next.searchParams.set(\"simple\",isSimple?\"0\":\"1\");location.assign(next.toString());};}' +
                   'function runPatches(){patchChatHistoryRequest();localizeStatic();wireNewSessionButton();installBackButton();installTraceToggle();installHistoryControls();}' +
                   'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
@@ -1582,7 +1582,7 @@ H3
                   const normalizedPath = rawPath.endsWith('/') && rawPath.length > 1 ? rawPath.slice(0, -1) : rawPath;
                   if (normalizedPath !== '/' && normalizedPath !== '/index.html' && normalizedPath !== '/chat') return null;
                   let changed = false;
-                  if (!urlObj.searchParams.get('gatewayUrl')) {
+                  if (urlObj.searchParams.get('gatewayUrl') !== localGatewayUrl) {
                     urlObj.searchParams.set('gatewayUrl', localGatewayUrl);
                     changed = true;
                   }
@@ -1590,7 +1590,7 @@ H3
                     urlObj.searchParams.set('simple', '1');
                     changed = true;
                   }
-                  if (gatewayToken && !urlObj.searchParams.get('token')) {
+                  if (gatewayToken && urlObj.searchParams.get('token') !== gatewayToken) {
                     urlObj.searchParams.set('token', gatewayToken);
                     changed = true;
                   }
@@ -3541,6 +3541,7 @@ EOF
             "ANDROID_STORAGE" to "/sdcard",
             "EXTERNAL_STORAGE" to "/sdcard",
             "ANYCLAW_EXPORT_DIR" to "/sdcard/Download/AnyClaw",
+            "ANYCLAW_PROXY_PORT" to PROXY_PORT.toString(),
             "APT_CONFIG" to "${paths.prefixDir}/etc/apt/apt.conf",
             "DPKG_ADMINDIR" to "${paths.prefixDir}/var/lib/dpkg",
             "SSL_CERT_FILE" to "${paths.prefixDir}/etc/tls/cert.pem",
