@@ -118,20 +118,54 @@ export async function listOpenClawSessions(limit = 200): Promise<OpenClawSession
   return normalized
 }
 
-export async function createOpenClawSession(label?: string): Promise<{ sessionKey: string }> {
+export async function createOpenClawSession(
+  label?: string,
+  currentSessionKey?: string,
+): Promise<{ sessionKey: string }> {
   const payload = await requestOpenClaw<{ sessionKey?: string }>(
-    '/openclaw-api/sessions/new',
+    '/openclaw-api/sessions/new-independent',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: label?.trim() || '' }),
+      body: JSON.stringify({
+        label: label?.trim() || '',
+        currentSessionKey: currentSessionKey?.trim() || '',
+      }),
     },
     'Failed to create OpenClaw session',
+    35_000,
   )
 
   const sessionKey = readString(payload.sessionKey).trim()
   if (!sessionKey) {
     throw new Error('Failed to create OpenClaw session: missing session key')
+  }
+
+  return { sessionKey }
+}
+
+export async function resetOpenClawSession(currentSessionKey: string): Promise<{ sessionKey: string }> {
+  const nextSessionKey = currentSessionKey.trim()
+  if (!nextSessionKey) {
+    throw new Error('Failed to reset OpenClaw session: missing current session key')
+  }
+
+  const payload = await requestOpenClaw<{ sessionKey?: string }>(
+    '/openclaw-api/sessions/reset',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentSessionKey: nextSessionKey,
+      }),
+    },
+    'Failed to reset OpenClaw session',
+    20_000,
+  )
+
+  const sessionKey = readString(payload.sessionKey).trim()
+  if (!sessionKey) {
+    throw new Error('Failed to reset OpenClaw session: missing session key')
   }
 
   return { sessionKey }

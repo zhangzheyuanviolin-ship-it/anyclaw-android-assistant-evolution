@@ -218,9 +218,106 @@ function readPositiveInt(value: string | null, fallback: number): number {
   return normalized
 }
 
-function buildOpenClawSessionKey(): string {
+function buildOpenClawSessionKey(currentSessionKey = ''): string {
+  const normalized = currentSessionKey.trim()
   const now = Date.now().toString(36)
-  return `agent:main:mobile-${now}`
+  const rand = Math.random().toString(36).slice(2, 8)
+  if (normalized.startsWith('agent:')) {
+    const parts = normalized.split(':')
+    const agent = normalizeText(parts[1]) || 'main'
+    return `agent:${agent}:mobile-${now}-${rand}`
+  }
+  return `agent:main:mobile-${now}-${rand}`
+}
+
+function parseOpenClawSessionRows(value: unknown): Array<Record<string, unknown>> {
+  const record = asRecord(value)
+  if (!record) return []
+  const sessions = record.sessions
+  if (!Array.isArray(sessions)) return []
+  return sessions.map((row) => asRecord(row)).filter((row): row is Record<string, unknown> => row !== null)
+}
+
+function findOpenClawSessionByKey(rows: Array<Record<string, unknown>>, key: string): Record<string, unknown> | null {
+  const target = key.trim()
+  if (!target) return null
+  for (const row of rows) {
+    const rowKey = normalizeText(row.key)
+    if (rowKey === target) return row
+  }
+  return null
+}
+
+function pickNewestOpenClawSessionKey(
+  rows: Array<Record<string, unknown>>,
+  excludedSessionKey: string,
+): string {
+  const excluded = excludedSessionKey.trim()
+  let bestKey = ''
+  let bestUpdatedAt = -1
+  for (const row of rows) {
+    const key = normalizeText(row.key)
+    if (!key || key === excluded) continue
+    const updatedAt = typeof row.updatedAt === 'number' && Number.isFinite(row.updatedAt)
+      ? row.updatedAt
+      : 0
+    if (updatedAt >= bestUpdatedAt) {
+      bestKey = key
+      bestUpdatedAt = updatedAt
+    }
+  }
+  return bestKey
+}
+
+const OPENCLAW_SESSION_LIST_PARAMS = {
+  limit: 400,
+  includeDerivedTitles: true,
+  includeLastMessage: true,
+  includeGlobal: true,
+  includeUnknown: true,
+}
+
+async function createIndependentOpenClawSession(
+  currentSessionKey: string,
+  label: string,
+): Promise<string> {
+  const sessionKey = buildOpenClawSessionKey(currentSessionKey)
+  await runOpenClawGatewayCall('sessions.patch', {
+    key: sessionKey,
+    label,
+  })
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const sessionRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS))
+    if (findOpenClawSessionByKey(sessionRows, sessionKey)) {
+      return sessionKey
+    }
+    await new Promise((resolve) => setTimeout(resolve, 220 + attempt * 120))
+  }
+
+  throw new Error('Failed to create OpenClaw session: session was not persisted')
+}
+
+async function resetCurrentOpenClawSession(currentSessionKey: string): Promise<string> {
+  const current = currentSessionKey.trim()
+  if (!current) {
+    throw new Error('Failed to reset OpenClaw session: missing current session key')
+  }
+
+  await runOpenClawGatewayCall('chat.send', {
+    sessionKey: current,
+    message: '/new',
+    deliver: true,
+    idempotencyKey: `reset_${Date.now().toString(36)}`,
+  })
+  await new Promise((resolve) => setTimeout(resolve, 280))
+
+  const sessionRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS))
+  if (findOpenClawSessionByKey(sessionRows, current)) {
+    return current
+  }
+  const fallbackSessionKey = pickNewestOpenClawSessionKey(sessionRows, '')
+  return fallbackSessionKey || current
 }
 
 function buildCapabilitySummary(statusRecord: Record<string, unknown> | null): string {
@@ -779,14 +876,19 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         return
       }
 
-      if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/new') {
+      if (req.method === 'POST' && (url.pathname === '/openclaw-api/sessions/new-independent' || url.pathname === '/openclaw-api/sessions/new')) {
         const payload = asRecord(await readJsonBody(req))
         const label = normalizeText(payload?.label) || '新会话'
-        const sessionKey = buildOpenClawSessionKey()
-        await runOpenClawGatewayCall('sessions.patch', {
-          key: sessionKey,
-          label,
-        })
+        const currentSessionKey = normalizeText(payload?.currentSessionKey)
+        const sessionKey = await createIndependentOpenClawSession(currentSessionKey, label)
+        setJson(res, 200, { sessionKey })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/reset') {
+        const payload = asRecord(await readJsonBody(req))
+        const currentSessionKey = normalizeText(payload?.currentSessionKey)
+        const sessionKey = await resetCurrentOpenClawSession(currentSessionKey)
         setJson(res, 200, { sessionKey })
         return
       }
