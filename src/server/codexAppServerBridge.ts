@@ -281,21 +281,51 @@ async function createIndependentOpenClawSession(
   currentSessionKey: string,
   label: string,
 ): Promise<string> {
-  const sessionKey = buildOpenClawSessionKey(currentSessionKey)
-  await runOpenClawGatewayCall('sessions.patch', {
-    key: sessionKey,
-    label,
-  })
+  let sessionKey = buildOpenClawSessionKey(currentSessionKey)
+  let created = false
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const sessionRows = parseOpenClawSessionRows(await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS))
-    if (findOpenClawSessionByKey(sessionRows, sessionKey)) {
-      return sessionKey
-    }
-    await new Promise((resolve) => setTimeout(resolve, 220 + attempt * 120))
+  try {
+    await runOpenClawGatewayCall('sessions.patch', {
+      key: sessionKey,
+      label,
+    })
+  } catch {
+    // Some gateway builds reject duplicate labels during patch creation.
+    // Keep the fallback path below so independent session creation still works.
   }
 
-  throw new Error('Failed to create OpenClaw session: session was not persisted')
+  let sessionRows = parseOpenClawSessionRows(
+    await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS),
+  )
+  created = findOpenClawSessionByKey(sessionRows, sessionKey) !== null
+
+  if (!created && currentSessionKey) {
+    try {
+      await runOpenClawGatewayCall('chat.send', {
+        sessionKey: currentSessionKey,
+        message: '/new',
+        deliver: true,
+        idempotencyKey: `new_${Date.now().toString(36)}`,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 260))
+      sessionRows = parseOpenClawSessionRows(
+        await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS),
+      )
+      const fallbackSessionKey = pickNewestOpenClawSessionKey(sessionRows, currentSessionKey)
+      if (fallbackSessionKey) {
+        sessionKey = fallbackSessionKey
+        created = true
+      }
+    } catch {
+      // Keep original error path if fallback cannot create a session.
+    }
+  }
+
+  if (!created) {
+    throw new Error('Failed to create OpenClaw session: session was not persisted')
+  }
+
+  return sessionKey
 }
 
 async function resetCurrentOpenClawSession(currentSessionKey: string): Promise<string> {
