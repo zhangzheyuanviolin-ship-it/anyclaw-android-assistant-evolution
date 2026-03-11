@@ -1,6 +1,7 @@
 package com.codex.mobile
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -11,6 +12,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
 import android.view.View
@@ -69,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingCameraCaptureUri: Uri? = null
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -102,7 +105,20 @@ class MainActivity : AppCompatActivity() {
             val callback = filePathCallback
             filePathCallback = null
             if (callback == null) return@registerForActivityResult
-            val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            val parsed = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            if (result.resultCode != RESULT_OK) {
+                cleanupPendingCameraCapture()
+                callback.onReceiveValue(null)
+                return@registerForActivityResult
+            }
+
+            val cameraUri = pendingCameraCaptureUri
+            pendingCameraCaptureUri = null
+            val uris = when {
+                parsed != null && parsed.isNotEmpty() -> parsed
+                cameraUri != null -> arrayOf(cameraUri)
+                else -> null
+            }
             callback.onReceiveValue(uris)
         }
 
@@ -191,6 +207,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         cancelOpenClawWatchdog()
         stopGatewayStatusMonitor()
+        cleanupPendingCameraCapture()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
         shizukuBridgeServer?.stop()
@@ -300,6 +317,35 @@ class MainActivity : AppCompatActivity() {
                 this@MainActivity.filePathCallback?.onReceiveValue(null)
                 this@MainActivity.filePathCallback = filePathCallback
 
+                if (isCameraCaptureRequest(fileChooserParams)) {
+                    val cameraIntent = createCameraCaptureIntent()
+                    if (cameraIntent == null) {
+                        this@MainActivity.filePathCallback?.onReceiveValue(null)
+                        this@MainActivity.filePathCallback = null
+                        Toast.makeText(
+                            this@MainActivity,
+                            "无法打开相机拍照",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        return false
+                    }
+                    return try {
+                        fileChooserLauncher.launch(cameraIntent)
+                        true
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Failed to launch camera chooser: ${error.message}")
+                        cleanupPendingCameraCapture()
+                        this@MainActivity.filePathCallback?.onReceiveValue(null)
+                        this@MainActivity.filePathCallback = null
+                        Toast.makeText(
+                            this@MainActivity,
+                            "无法启动拍照附件",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        false
+                    }
+                }
+
                 val chooserIntent =
                     try {
                         fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
@@ -337,6 +383,46 @@ class MainActivity : AppCompatActivity() {
                     false
                 }
             }
+        }
+    }
+
+    private fun isCameraCaptureRequest(params: WebChromeClient.FileChooserParams?): Boolean {
+        if (params == null || !params.isCaptureEnabled) return false
+        val accepts = params.acceptTypes
+        if (accepts.isNullOrEmpty()) return true
+        for (raw in accepts) {
+            val normalized = raw?.trim()?.lowercase().orEmpty()
+            if (normalized.isEmpty()) continue
+            if (normalized == "image/*" || normalized == "*/*" || normalized.startsWith("image/")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun createCameraCaptureIntent(): Intent? {
+        cleanupPendingCameraCapture()
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "pocketlobster_${System.currentTimeMillis()}.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PocketLobster")
+            }
+        }
+        val imageUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        pendingCameraCaptureUri = imageUri
+        return Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, imageUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+    }
+
+    private fun cleanupPendingCameraCapture() {
+        val uri = pendingCameraCaptureUri ?: return
+        pendingCameraCaptureUri = null
+        try {
+            contentResolver.delete(uri, null, null)
+        } catch (_: Exception) {
         }
     }
 

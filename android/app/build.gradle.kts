@@ -46,6 +46,7 @@ android {
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
 <<<<<<< HEAD
+<<<<<<< HEAD
         versionCode = 114
         versionName = "0.3.60-beta-v114-stageA-bootstrap-resilience-p0"
     }

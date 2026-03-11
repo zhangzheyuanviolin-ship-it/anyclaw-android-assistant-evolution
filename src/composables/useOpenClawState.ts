@@ -17,7 +17,6 @@ import type {
   OpenClawContentItem,
   OpenClawHistoryMessage,
   OpenClawImageAttachment,
-  OpenClawLocalFileAttachment,
   OpenClawSessionSummary,
 } from '../types/openclaw'
 
@@ -287,14 +286,25 @@ function readFileAsBase64(file: File): Promise<string> {
   })
 }
 
-function appendUploadedFilePathsToMessage(message: string, paths: string[]): string {
+function appendUploadedAttachmentPathsToMessage(
+  message: string,
+  imagePaths: string[],
+  filePaths: string[],
+): string {
   const trimmed = message.trim()
-  if (paths.length === 0) return trimmed
-  const fileSection = ['已附加本地文件路径：', ...paths].join('\n')
-  if (trimmed.length === 0) {
-    return `${fileSection}\n\n请先读取以上文件后继续。`
+  const sections: string[] = []
+  if (imagePaths.length > 0) {
+    sections.push(['已附加图片路径：', ...imagePaths].join('\n'))
   }
-  return `${trimmed}\n\n${fileSection}`
+  if (filePaths.length > 0) {
+    sections.push(['已附加本地文件路径：', ...filePaths].join('\n'))
+  }
+  if (sections.length === 0) return trimmed
+  const attachmentSection = sections.join('\n\n')
+  if (trimmed.length === 0) {
+    return `${attachmentSection}\n\n请先读取以上附件后继续。`
+  }
+  return `${trimmed}\n\n${attachmentSection}`
 }
 
 function normalizeComposerInput(input: string | OpenClawComposerSubmitPayload): {
@@ -500,18 +510,27 @@ export function useOpenClawState() {
     lastSendAtMs = Date.now()
 
     try {
-      const imageAttachments: OpenClawImageAttachment[] = []
-      const fileAttachments = normalized.attachments.filter(
-        (row): row is OpenClawLocalFileAttachment => row.type === 'file',
+      const imageAttachments = normalized.attachments.filter(
+        (row): row is OpenClawComposerImageAttachment => row.type === 'image',
       )
-      for (const attachment of normalized.attachments) {
-        if (attachment.type !== 'image') continue
-        const parsed = toImageAttachment(attachment)
-        if (parsed) imageAttachments.push(parsed)
+
+      const uploadedImagePaths: string[] = []
+      for (const imageAttachment of imageAttachments) {
+        const parsed = toImageAttachment(imageAttachment)
+        if (!parsed) {
+          throw new Error(`图片编码失败：${imageAttachment.name}`)
+        }
+        const uploaded = await uploadOpenClawAttachment({
+          fileName: imageAttachment.name,
+          mimeType: parsed.mimeType,
+          contentBase64: parsed.content,
+        })
+        uploadedImagePaths.push(uploaded.path)
       }
 
-      const uploadedPaths: string[] = []
-      for (const fileAttachment of fileAttachments) {
+      const uploadedFilePaths: string[] = []
+      for (const fileAttachment of normalized.attachments) {
+        if (fileAttachment.type !== 'file') continue
         if (fileAttachment.sizeBytes > OPENCLAW_FILE_UPLOAD_MAX_BYTES) {
           throw new Error(`文件超过大小限制（15MB）：${fileAttachment.name}`)
         }
@@ -521,15 +540,17 @@ export function useOpenClawState() {
           mimeType: fileAttachment.mimeType,
           contentBase64,
         })
-        uploadedPaths.push(uploaded.path)
+        uploadedFilePaths.push(uploaded.path)
       }
-
-      const message = appendUploadedFilePathsToMessage(normalized.text, uploadedPaths)
+      const message = appendUploadedAttachmentPathsToMessage(
+        normalized.text,
+        uploadedImagePaths,
+        uploadedFilePaths,
+      )
       await sendOpenClawMessage({
         sessionKey,
         message,
         deliver: false,
-        attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
       })
       await refreshHistory()
       await refreshSessions(sessionKey)
