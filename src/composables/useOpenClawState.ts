@@ -26,7 +26,6 @@ const HISTORY_DEFAULT = 60
 const HISTORY_MIN = 20
 const HISTORY_MAX = 400
 const HISTORY_STEP = 40
-const POLL_INTERVAL_MS = 2500
 const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
 
@@ -105,6 +104,55 @@ function normalizeImageDataUrl(content: string, mimeType: string): string {
   return `data:${normalizedMime};base64,${trimmedContent}`
 }
 
+function summarizeForSignature(value: string, head = 80, tail = 24): string {
+  const trimmed = value.trim()
+  if (trimmed.length <= head + tail + 12) return trimmed
+  return `${trimmed.slice(0, head)}|${trimmed.length}|${trimmed.slice(-tail)}`
+}
+
+function hashSignature(value: string): string {
+  let hash = 2166136261
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i)
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function buildContentSignature(items: OpenClawContentItem[]): string {
+  const rows: string[] = []
+  for (const item of items) {
+    const type = typeof item.type === 'string' ? item.type : ''
+    if (type === 'text') {
+      rows.push(`text:${summarizeForSignature(typeof item.text === 'string' ? item.text : '')}`)
+      continue
+    }
+    if (type === 'thinking') {
+      rows.push(`thinking:${summarizeForSignature(typeof item.thinking === 'string' ? item.thinking : '')}`)
+      continue
+    }
+    if (type === 'toolCall') {
+      rows.push(
+        `toolCall:${typeof item.name === 'string' ? item.name : ''}:${summarizeForSignature(safeJsonStringify(item.arguments, 240))}`,
+      )
+      continue
+    }
+    if (type === 'image') {
+      const sourceData = typeof item.source?.data === 'string' ? item.source.data : ''
+      const url = typeof item.url === 'string' ? item.url : ''
+      rows.push(`image:${summarizeForSignature(sourceData || url, 48, 16)}`)
+      continue
+    }
+    if (type === 'image_url') {
+      const url = typeof item.image_url?.url === 'string' ? item.image_url.url : ''
+      rows.push(`image_url:${summarizeForSignature(url, 60, 18)}`)
+      continue
+    }
+    rows.push(`other:${type}`)
+  }
+  return hashSignature(rows.join('||'))
+}
+
 function extractImageSegments(items: OpenClawContentItem[]): string[] {
   const urls: string[] = []
   for (const item of items) {
@@ -147,14 +195,43 @@ function hasAssistantTextAfter(messages: OpenClawHistoryMessage[], sinceMs: numb
   return false
 }
 
+function hasAnyTimestampAtOrAfter(messages: OpenClawHistoryMessage[], sinceMs: number): boolean {
+  for (const row of messages) {
+    const timestamp = typeof row.timestamp === 'number' ? row.timestamp : 0
+    if (timestamp >= sinceMs && timestamp > 0) return true
+  }
+  return false
+}
+
+function hasAssistantOrToolOutputAfter(messages: OpenClawHistoryMessage[], sinceMs: number): boolean {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const row = messages[index]
+    const timestamp = typeof row.timestamp === 'number' ? row.timestamp : 0
+    if (timestamp > 0 && timestamp < sinceMs) continue
+    if (row.role !== 'assistant' && row.role !== 'toolResult') continue
+    const items = readContentItems(row.content)
+    const text = extractTextSegments(items, ['text'])
+    const images = extractImageSegments(items)
+    if (text.length > 0 || images.length > 0) return true
+  }
+  return false
+}
+
 function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolean): UiMessage[] {
   const output: UiMessage[] = []
+  const dedupe = new Map<string, number>()
 
   for (let index = 0; index < messages.length; index += 1) {
     const row = messages[index]
-    const timestamp = typeof row.timestamp === 'number' ? row.timestamp : Date.now() + index
-    const baseId = `${timestamp}:${index}`
+    const timestamp = typeof row.timestamp === 'number' && Number.isFinite(row.timestamp)
+      ? Math.floor(row.timestamp)
+      : 0
     const content = readContentItems(row.content)
+    const toolName = typeof row.toolName === 'string' ? row.toolName.trim() : ''
+    const rowBase = `${row.role}:${timestamp > 0 ? String(timestamp) : 'na'}:${toolName}:${row.isError ? '1' : '0'}:${buildContentSignature(content)}`
+    const rowSeen = (dedupe.get(rowBase) ?? 0) + 1
+    dedupe.set(rowBase, rowSeen)
+    const baseId = `${rowBase}:${rowSeen}`
 
     if (row.role === 'user') {
       const text = extractTextSegments(content, ['text'])
@@ -239,6 +316,13 @@ function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolea
   }
 
   return output
+}
+
+function buildUiMessagesSignature(rows: UiMessage[]): string {
+  if (rows.length === 0) return 'empty'
+  return rows
+    .map((row) => `${row.id}:${row.text.length}:${row.images?.length ?? 0}`)
+    .join('|')
 }
 
 function estimateBase64DecodedBytes(base64: string): number {
@@ -338,8 +422,11 @@ export function useOpenClawState() {
 
   let pollTimer: number | null = null
   let pollInFlight = false
+  let pollLoopEnabled = false
   let lastSendAtMs = 0
   let pollTick = 0
+  let lastRenderedSignature = 'empty'
+  let pendingBaselineSignature = 'empty'
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
@@ -426,9 +513,21 @@ export function useOpenClawState() {
         sessionKey,
         limit: historyLimit.value,
       })
-      messages.value = toUiMessages(payload.messages, showProcess.value)
-      if (pendingRun.value && hasAssistantTextAfter(payload.messages, lastSendAtMs)) {
-        pendingRun.value = false
+      const nextMessages = toUiMessages(payload.messages, showProcess.value)
+      const nextSignature = buildUiMessagesSignature(nextMessages)
+      const historyChanged = nextSignature !== lastRenderedSignature
+      if (historyChanged) {
+        messages.value = nextMessages
+        lastRenderedSignature = nextSignature
+      }
+
+      if (pendingRun.value && historyChanged) {
+        const hasTimedOutput = hasAssistantTextAfter(payload.messages, lastSendAtMs) ||
+          hasAssistantOrToolOutputAfter(payload.messages, lastSendAtMs)
+        const hasTimestampEvidence = hasAnyTimestampAtOrAfter(payload.messages, lastSendAtMs)
+        if (hasTimedOutput || (!hasTimestampEvidence && nextSignature !== pendingBaselineSignature)) {
+          pendingRun.value = false
+        }
       }
       lastError.value = ''
     } catch (error) {
@@ -451,6 +550,8 @@ export function useOpenClawState() {
 
     selectedSessionKey.value = nextSession
     messages.value = []
+    lastRenderedSignature = 'empty'
+    pendingBaselineSignature = 'empty'
     pendingRun.value = false
     await refreshHistory()
   }
@@ -508,6 +609,7 @@ export function useOpenClawState() {
     isSendingMessage.value = true
     pendingRun.value = true
     lastSendAtMs = Date.now()
+    pendingBaselineSignature = lastRenderedSignature
 
     try {
       const imageAttachments = normalized.attachments.filter(
@@ -553,8 +655,8 @@ export function useOpenClawState() {
         deliver: false,
       })
       await refreshHistory()
-      await refreshSessions(sessionKey)
-      await refreshHealth()
+      void refreshSessions(sessionKey)
+      void refreshHealth()
       lastError.value = ''
     } catch (error) {
       pendingRun.value = false
@@ -608,16 +710,38 @@ export function useOpenClawState() {
     }
   }
 
+  function computePollDelayMs(): number {
+    if (pendingRun.value) return 1200
+    if (lastError.value.length > 0) return 4200
+    return 2600
+  }
+
+  function scheduleNextPoll(initialDelayMs?: number): void {
+    if (typeof window === 'undefined') return
+    if (!pollLoopEnabled) return
+    if (pollTimer !== null) {
+      window.clearTimeout(pollTimer)
+      pollTimer = null
+    }
+    const delay = Math.max(300, initialDelayMs ?? computePollDelayMs())
+    pollTimer = window.setTimeout(async () => {
+      pollTimer = null
+      await pollOnce()
+      scheduleNextPoll()
+    }, delay)
+  }
+
   function startPolling(): void {
-    if (pollTimer !== null || typeof window === 'undefined') return
-    pollTimer = window.setInterval(() => {
-      void pollOnce()
-    }, POLL_INTERVAL_MS)
+    if (pollLoopEnabled || typeof window === 'undefined') return
+    pollLoopEnabled = true
+    scheduleNextPoll(350)
   }
 
   function stopPolling(): void {
-    if (pollTimer === null || typeof window === 'undefined') return
-    window.clearInterval(pollTimer)
+    if (typeof window === 'undefined') return
+    pollLoopEnabled = false
+    if (pollTimer === null) return
+    window.clearTimeout(pollTimer)
     pollTimer = null
   }
 
