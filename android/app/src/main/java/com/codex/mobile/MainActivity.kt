@@ -17,6 +17,7 @@ import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.ValueCallback
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -67,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -93,6 +95,15 @@ class MainActivity : AppCompatActivity() {
             } else {
                 showStoragePermissionDialog()
             }
+        }
+
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val callback = filePathCallback
+            filePathCallback = null
+            if (callback == null) return@registerForActivityResult
+            val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            callback.onReceiveValue(uris)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -180,6 +191,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         cancelOpenClawWatchdog()
         stopGatewayStatusMonitor()
+        filePathCallback?.onReceiveValue(null)
+        filePathCallback = null
         shizukuBridgeServer?.stop()
         shizukuBridgeServer = null
         serverManager.stopServer()
@@ -275,6 +288,54 @@ class MainActivity : AppCompatActivity() {
             override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
                 Log.d(TAG, "[WebView] ${msg.sourceId()}:${msg.lineNumber()} ${msg.message()}")
                 return true
+            }
+
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                if (filePathCallback == null) return false
+
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+
+                val chooserIntent =
+                    try {
+                        fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                        }
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Failed to create file chooser intent: ${error.message}")
+                        null
+                    }
+
+                if (chooserIntent == null) {
+                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                    this@MainActivity.filePathCallback = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "无法打开附件选择器",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    return false
+                }
+
+                return try {
+                    fileChooserLauncher.launch(chooserIntent)
+                    true
+                } catch (error: Exception) {
+                    Log.w(TAG, "Failed to launch file chooser: ${error.message}")
+                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                    this@MainActivity.filePathCallback = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "无法启动附件选择器",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    false
+                }
             }
         }
     }
