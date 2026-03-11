@@ -150,9 +150,15 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
     throw new Error(`Invalid OpenClaw gateway method: ${method}`)
   }
 
+  const timeoutMs = (() => {
+    if (normalizedMethod === 'chat.history') return 35_000
+    if (normalizedMethod === 'chat.send') return 25_000
+    if (normalizedMethod.startsWith('sessions.')) return 20_000
+    return 12_000
+  })()
   const serializedParams = JSON.stringify(params ?? {})
   const command =
-    `openclaw gateway call ${normalizedMethod} --json --params ${shellQuote(serializedParams)} 2>&1`
+    `openclaw gateway call ${normalizedMethod} --json --timeout ${timeoutMs} --params ${shellQuote(serializedParams)} 2>&1`
 
   const runCommandOnce = () =>
     new Promise<string>((resolve, reject) => {
@@ -195,7 +201,9 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
     const normalized = message.toLowerCase()
     return normalized.includes('gateway closed (1006') ||
       normalized.includes('abnormal closure') ||
-      normalized.includes('connection is not open')
+      normalized.includes('connection is not open') ||
+      normalized.includes('request timeout') ||
+      normalized.includes('etimedout')
   }
 
   let output = ''
