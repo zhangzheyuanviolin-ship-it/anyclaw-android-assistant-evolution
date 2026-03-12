@@ -400,7 +400,7 @@ WEOF
         // All packages needed for native compilation (koffi) in one batch.
         // Split into groups to avoid apt-get download failures on missing pkgs.
         val pkgGroups = listOf(
-            "git make cmake clang binutils binutils-bin lld",
+            "git make cmake clang binutils lld",
             "libllvm libedit libffi ndk-sysroot ndk-multilib libcompiler-rt",
             "libarchive libxml2 liblzma libcurl libuv libnghttp2 libnghttp3",
             "rhash jsoncpp",
@@ -469,14 +469,20 @@ WEOF
         val cmd = """
             set -e
 
-            if [ ! -x "$prefix/libexec/binutils/ar" ] || [ ! -x "$prefix/libexec/binutils/ranlib" ]; then
-              echo "binutils missing, attempting targeted repair..."
+            MISSING_TOOLS=""
+            for tool in git make cmake clang; do
+              if ! command -v "${'$'}tool" >/dev/null 2>&1; then
+                MISSING_TOOLS="${'$'}MISSING_TOOLS ${'$'}tool"
+              fi
+            done
+            if [ ! -x "$prefix/libexec/binutils/ar" ] || [ ! -x "$prefix/libexec/binutils/ranlib" ] || [ -n "${'$'}MISSING_TOOLS" ]; then
+              echo "toolchain components missing:${'$'}MISSING_TOOLS; attempting targeted repair..."
               cd "$prefix/tmp" || exit 1
               apt-get update --allow-insecure-repositories 2>&1 || true
-              apt-get download --allow-unauthenticated binutils binutils-bin 2>&1 || true
+              apt-get download --allow-unauthenticated binutils lld git make cmake clang 2>&1 || true
               rm -rf _binutils_stage
               mkdir -p _binutils_stage
-              for deb in binutils*.deb binutils-bin*.deb; do
+              for deb in binutils*.deb lld*.deb git*.deb make*.deb cmake*.deb clang*.deb; do
                 [ -f "${'$'}deb" ] && dpkg-deb -x "${'$'}deb" _binutils_stage/ 2>&1 || true
               done
               if [ -d "_binutils_stage/data/data/com.termux/files/usr" ]; then
@@ -565,13 +571,23 @@ EOF
     }
 
     private fun runExternalRecoveryScripts(onProgress: (String) -> Unit) {
+        val paths = BootstrapInstaller.getPaths(context)
         val cmd = """
             set +e
+            BASH_BIN="${paths.prefixDir}/bin/bash"
             if [ -f /sdcard/Download/CodexExports/termux_pkg_repair.sh ]; then
-              sh /sdcard/Download/CodexExports/termux_pkg_repair.sh 2>&1
+              if [ -x "${'$'}BASH_BIN" ]; then
+                "${'$'}BASH_BIN" /sdcard/Download/CodexExports/termux_pkg_repair.sh 2>&1
+              else
+                sh /sdcard/Download/CodexExports/termux_pkg_repair.sh 2>&1
+              fi
             fi
             if [ -f /sdcard/Download/CodexExports/tls_doctor.sh ]; then
-              sh /sdcard/Download/CodexExports/tls_doctor.sh 2>&1
+              if [ -x "${'$'}BASH_BIN" ]; then
+                "${'$'}BASH_BIN" /sdcard/Download/CodexExports/tls_doctor.sh 2>&1
+              else
+                sh /sdcard/Download/CodexExports/tls_doctor.sh 2>&1
+              fi
             fi
             exit 0
         """.trimIndent()
@@ -688,6 +704,21 @@ H3
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+        val prereqCheckCmd =
+            """
+            missing=""
+            for tool in node git make cmake clang ar ranlib; do
+              if ! command -v "${'$'}tool" >/dev/null 2>&1; then
+                missing="${'$'}missing ${'$'}tool"
+              fi
+            done
+            if [ -n "${'$'}missing" ]; then
+              echo "openclaw-prereq-missing:${'$'}missing"
+              exit 1
+            fi
+            echo "openclaw-prereq-ok"
+            exit 0
+            """.trimIndent()
 
         // Create directories OpenClaw expects
         runInPrefix("mkdir -p $prefix/tmp/openclaw ${paths.homeDir}/.openclaw-android/patches ${paths.homeDir}/.openclaw")
@@ -705,6 +736,17 @@ H3
 
         // Configure git to use HTTPS instead of SSH (ssh not available in prefix)
         configureGitHttps(paths)
+
+        onProgress("Verifying OpenClaw prerequisites…")
+        val prereqOkBefore = runInPrefix(prereqCheckCmd, onOutput = { onProgress(it) }) == 0
+        if (!prereqOkBefore) {
+            onProgress("OpenClaw prerequisites missing, repairing toolchain…")
+            ensureOpenClawToolchain(onProgress)
+            if (runInPrefix(prereqCheckCmd, onOutput = { onProgress(it) }) != 0) {
+                Log.e(TAG, "OpenClaw prerequisite check failed after repair")
+                return false
+            }
+        }
 
         // Clean npm cache to avoid stale git clones
         runInPrefix("node $npmCli cache clean --force 2>&1") { Log.d(TAG, "[npm-cache] $it") }
