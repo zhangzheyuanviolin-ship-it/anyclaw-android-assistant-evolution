@@ -153,6 +153,7 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
   const timeoutMs = (() => {
     if (normalizedMethod === 'chat.history') return 35_000
     if (normalizedMethod === 'chat.send') return 25_000
+    if (normalizedMethod === 'agent.wait') return 12_000
     if (normalizedMethod.startsWith('sessions.')) return 20_000
     return 12_000
   })()
@@ -996,15 +997,17 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey and message/attachments' })
           return
         }
-        const runId = `run_${Date.now().toString(36)}`
-        await runOpenClawGatewayCall('chat.send', {
+        const idempotencyKey = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+        const sendResult = await runOpenClawGatewayCall('chat.send', {
           sessionKey,
           message,
           deliver: payload?.deliver === true,
-          idempotencyKey: runId,
+          idempotencyKey,
           attachments: attachments.length > 0 ? attachments : undefined,
         })
-        setJson(res, 200, { ok: true, runId })
+        const sendRecord = asRecord(sendResult)
+        const runId = normalizeText(sendRecord?.runId) || idempotencyKey
+        setJson(res, 200, { ok: sendRecord?.ok !== false, runId })
         return
       }
 
@@ -1028,6 +1031,30 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           ok: record?.ok !== false,
           aborted: record?.aborted === true,
           runIds,
+        })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/run-status') {
+        const payload = asRecord(await readJsonBody(req))
+        const runId = normalizeText(payload?.runId)
+        const timeoutMsRaw = Number(payload?.timeoutMs)
+        const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(0, Math.floor(timeoutMsRaw)) : 0
+        if (!runId) {
+          setJson(res, 400, { error: 'Missing runId' })
+          return
+        }
+        const result = await runOpenClawGatewayCall('agent.wait', {
+          runId,
+          timeoutMs,
+        })
+        const record = asRecord(result)
+        setJson(res, 200, {
+          runId: normalizeText(record?.runId) || runId,
+          status: normalizeText(record?.status) || 'timeout',
+          startedAt: typeof record?.startedAt === 'number' ? record.startedAt : undefined,
+          endedAt: typeof record?.endedAt === 'number' ? record.endedAt : undefined,
+          error: record?.error,
         })
         return
       }

@@ -66,6 +66,19 @@ export type OpenClawAbortResponse = {
   runIds: string[]
 }
 
+export type OpenClawRunStatusRequest = {
+  runId: string
+  timeoutMs?: number
+}
+
+export type OpenClawRunStatusResponse = {
+  runId: string
+  status: string
+  startedAt?: number
+  endedAt?: number
+  error?: unknown
+}
+
 export type OpenClawImageAttachment = {
   type: 'image'
   mimeType: string

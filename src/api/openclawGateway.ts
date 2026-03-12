@@ -4,6 +4,8 @@ import type {
   OpenClawImageAttachment,
   OpenClawHistoryRequest,
   OpenClawHistoryResponse,
+  OpenClawRunStatusRequest,
+  OpenClawRunStatusResponse,
   OpenClawSendRequest,
   OpenClawSendResponse,
   OpenClawSessionSummary,
@@ -284,6 +286,36 @@ export async function abortOpenClawRun(request: OpenClawAbortRequest): Promise<O
     runIds: Array.isArray(payload?.runIds)
       ? payload.runIds.filter((row): row is string => typeof row === 'string')
       : [],
+  }
+}
+
+export async function getOpenClawRunStatus(request: OpenClawRunStatusRequest): Promise<OpenClawRunStatusResponse> {
+  const runId = request.runId.trim()
+  if (!runId) {
+    throw new Error('OpenClaw run status requires runId')
+  }
+  const timeoutMs = typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)
+    ? Math.max(0, Math.floor(request.timeoutMs))
+    : 0
+  const payload = await requestOpenClaw<OpenClawRunStatusResponse>(
+    '/openclaw-api/run-status',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        runId,
+        timeoutMs,
+      }),
+    },
+    'Failed to read OpenClaw run status',
+    12_000,
+  )
+  return {
+    runId: readString(payload?.runId).trim() || runId,
+    status: readString(payload?.status).trim().toLowerCase() || 'timeout',
+    startedAt: readNumber(payload?.startedAt) || undefined,
+    endedAt: readNumber(payload?.endedAt) || undefined,
+    error: payload?.error,
   }
 }
 

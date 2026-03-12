@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import {
   abortOpenClawRun,
   createOpenClawSession,
+  getOpenClawRunStatus,
   getOpenClawHealth,
   listOpenClawSessions,
   readOpenClawHistory,
@@ -29,8 +30,8 @@ const HISTORY_MAX = 400
 const HISTORY_STEP = 40
 const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
-const PENDING_RUN_MIN_ACTIVE_MS = 2_000
-const PENDING_RUN_IDLE_CLEAR_MS = 3_600
+const PENDING_RUN_FALLBACK_MIN_ACTIVE_MS = 45_000
+const PENDING_RUN_FALLBACK_IDLE_CLEAR_MS = 15_000
 
 type SessionSelectOptions = {
   syncHistory?: boolean
@@ -197,6 +198,20 @@ function hasAssistantOrToolOutputAfter(messages: OpenClawHistoryMessage[], since
     if (text.length > 0 || images.length > 0) return true
   }
   return false
+}
+
+function isRunTerminalStatus(status: string): boolean {
+  const normalized = status.trim().toLowerCase()
+  return normalized === 'done' ||
+    normalized === 'ok' ||
+    normalized === 'success' ||
+    normalized === 'succeeded' ||
+    normalized === 'completed' ||
+    normalized === 'aborted' ||
+    normalized === 'cancelled' ||
+    normalized === 'canceled' ||
+    normalized === 'failed' ||
+    normalized === 'error'
 }
 
 function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolean): UiMessage[] {
@@ -413,6 +428,7 @@ export function useOpenClawState() {
   let cancelPendingAfterSend = false
   let pendingOutputObserved = false
   let pendingLastHistoryChangeAtMs = 0
+  let activeRunId = ''
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
@@ -509,6 +525,7 @@ export function useOpenClawState() {
       }
 
       if (pendingRun.value) {
+        if (!activeRunId) {
         const now = Date.now()
         if (historyChanged) {
           pendingLastHistoryChangeAtMs = now
@@ -518,8 +535,13 @@ export function useOpenClawState() {
         }
         const idleMs = now - pendingLastHistoryChangeAtMs
         const activeMs = now - lastSendAtMs
-        if (pendingOutputObserved && activeMs >= PENDING_RUN_MIN_ACTIVE_MS && idleMs >= PENDING_RUN_IDLE_CLEAR_MS) {
+        if (
+          pendingOutputObserved &&
+          activeMs >= PENDING_RUN_FALLBACK_MIN_ACTIVE_MS &&
+          idleMs >= PENDING_RUN_FALLBACK_IDLE_CLEAR_MS
+        ) {
           pendingRun.value = false
+        }
         }
       }
       lastError.value = ''
@@ -548,6 +570,7 @@ export function useOpenClawState() {
     cancelPendingAfterSend = false
     pendingOutputObserved = false
     pendingLastHistoryChangeAtMs = 0
+    activeRunId = ''
     pendingRun.value = false
     await refreshHistory()
   }
@@ -647,17 +670,19 @@ export function useOpenClawState() {
         uploadedImagePaths,
         uploadedFilePaths,
       )
-      await sendOpenClawMessage({
+      const sendResult = await sendOpenClawMessage({
         sessionKey,
         message,
         deliver: false,
       })
+      activeRunId = sendResult.runId.trim()
       if (cancelPendingAfterSend) {
         cancelPendingAfterSend = false
         await abortOpenClawRun({ sessionKey })
         pendingRun.value = false
         pendingOutputObserved = false
         pendingLastHistoryChangeAtMs = 0
+        activeRunId = ''
         await refreshHistory({ silent: true })
         lastError.value = ''
         return
@@ -671,6 +696,7 @@ export function useOpenClawState() {
       pendingRun.value = false
       pendingOutputObserved = false
       pendingLastHistoryChangeAtMs = 0
+      activeRunId = ''
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
@@ -691,6 +717,7 @@ export function useOpenClawState() {
       pendingRun.value = false
       pendingOutputObserved = false
       pendingLastHistoryChangeAtMs = 0
+      activeRunId = ''
       await refreshHistory({ silent: true })
       void refreshSessions(sessionKey)
       void refreshHealth()
@@ -735,6 +762,22 @@ export function useOpenClawState() {
 
     pollInFlight = true
     try {
+      if (pendingRun.value && activeRunId) {
+        try {
+          const status = await getOpenClawRunStatus({
+            runId: activeRunId,
+            timeoutMs: 0,
+          })
+          if (isRunTerminalStatus(status.status)) {
+            pendingRun.value = false
+            pendingOutputObserved = false
+            pendingLastHistoryChangeAtMs = 0
+            activeRunId = ''
+          }
+        } catch {
+          // Keep polling history even if run-status lookup is transiently unavailable.
+        }
+      }
       pollTick += 1
       if (pollTick % 3 === 0) {
         await refreshSessions(selectedSessionKey.value)

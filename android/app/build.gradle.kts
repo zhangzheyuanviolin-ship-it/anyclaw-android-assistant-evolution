@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 107
-        versionName = "0.3.57-beta-v107-testpkg-openclaw-cancel-state-fix-p0"
+        versionCode = 108
+        versionName = "0.3.58-beta-v108-testpkg-openclaw-cancel-state-fix-p1"
     }
 
     signingConfigs {
