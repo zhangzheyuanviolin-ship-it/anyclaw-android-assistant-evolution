@@ -261,9 +261,11 @@
 
               <OpenClawComposer
                 :session-key="openClawSelectedSessionKey"
-                :disabled="isOpenClawSendingMessage"
+                :is-task-running="openClawIsRunInProgress"
+                :is-cancelling-task="isOpenClawCancellingRun"
                 :placeholder="t('openclaw_send_placeholder')"
                 :send-label="t('openclaw_send_button')"
+                :cancel-label="t('openclaw_cancel_button')"
                 :attach-label="t('openclaw_attach_button')"
                 :attach-camera-label="t('openclaw_attach_camera')"
                 :attach-gallery-label="t('openclaw_attach_gallery')"
@@ -272,6 +274,7 @@
                 :image-tag-label="t('openclaw_attach_image_tag')"
                 :file-tag-label="t('openclaw_attach_file_tag')"
                 @submit="onSubmitOpenClawMessage"
+                @cancel="onCancelOpenClawRun"
               />
             </div>
           </template>
@@ -402,6 +405,8 @@ const {
   isLoadingSessions: isOpenClawLoadingSessions,
   isLoadingMessages: isOpenClawLoadingMessages,
   isSendingMessage: isOpenClawSendingMessage,
+  isCancellingRun: isOpenClawCancellingRun,
+  isRunInProgress: openClawIsRunInProgress,
   liveOverlay: openClawLiveOverlay,
   lastError: openClawLastError,
   initialize: initializeOpenClaw,
@@ -410,6 +415,7 @@ const {
   refreshHistory: refreshOpenClawHistory,
   selectSession: selectOpenClawSession,
   sendMessage: sendOpenClawMessage,
+  cancelCurrentRun: cancelCurrentOpenClawRun,
   createSession: createOpenClawSession,
   resetCurrentSession: resetCurrentOpenClawSession,
   updateSessionTitle: updateOpenClawSessionTitle,
@@ -783,6 +789,10 @@ function onRenameOpenClawSession(sessionKey: string): void {
 
 function onSubmitOpenClawMessage(payload: OpenClawComposerSubmitPayload): void {
   void sendOpenClawMessage(payload)
+}
+
+function onCancelOpenClawRun(): void {
+  void cancelCurrentOpenClawRun()
 }
 
 function onIgnoreThreadScrollState(): void {

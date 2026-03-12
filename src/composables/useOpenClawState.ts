@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import {
+  abortOpenClawRun,
   createOpenClawSession,
   getOpenClawHealth,
   listOpenClawSessions,
@@ -414,6 +415,7 @@ export function useOpenClawState() {
   const isLoadingSessions = ref(false)
   const isLoadingMessages = ref(false)
   const isSendingMessage = ref(false)
+  const isCancellingRun = ref(false)
   const healthOk = ref(false)
   const showProcess = ref(readStorageBoolean(SHOW_PROCESS_STORAGE_KEY, false))
   const historyLimit = ref(readStorageNumber(HISTORY_LIMIT_STORAGE_KEY, HISTORY_DEFAULT))
@@ -427,12 +429,14 @@ export function useOpenClawState() {
   let pollTick = 0
   let lastRenderedSignature = 'empty'
   let pendingBaselineSignature = 'empty'
+  let cancelPendingAfterSend = false
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
   )
 
   const selectedSessionTitle = computed(() => selectedSession.value?.title ?? '')
+  const isRunInProgress = computed(() => pendingRun.value || isSendingMessage.value || isCancellingRun.value)
 
   const liveOverlay = computed<UiLiveOverlay | null>(() => {
     if (pendingRun.value) {
@@ -552,6 +556,7 @@ export function useOpenClawState() {
     messages.value = []
     lastRenderedSignature = 'empty'
     pendingBaselineSignature = 'empty'
+    cancelPendingAfterSend = false
     pendingRun.value = false
     await refreshHistory()
   }
@@ -654,16 +659,48 @@ export function useOpenClawState() {
         message,
         deliver: false,
       })
+      if (cancelPendingAfterSend) {
+        cancelPendingAfterSend = false
+        await abortOpenClawRun({ sessionKey })
+        pendingRun.value = false
+        await refreshHistory({ silent: true })
+        lastError.value = ''
+        return
+      }
       await refreshHistory()
       void refreshSessions(sessionKey)
       void refreshHealth()
       lastError.value = ''
     } catch (error) {
+      cancelPendingAfterSend = false
       pendingRun.value = false
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
       isSendingMessage.value = false
+    }
+  }
+
+  async function cancelCurrentRun(): Promise<void> {
+    const sessionKey = selectedSessionKey.value.trim()
+    if (!sessionKey) return
+    if (isCancellingRun.value) return
+    if (isSendingMessage.value) {
+      cancelPendingAfterSend = true
+    }
+    isCancellingRun.value = true
+    try {
+      await abortOpenClawRun({ sessionKey })
+      pendingRun.value = false
+      await refreshHistory({ silent: true })
+      void refreshSessions(sessionKey)
+      void refreshHealth()
+      lastError.value = ''
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : '取消任务失败'
+      throw error
+    } finally {
+      isCancellingRun.value = false
     }
   }
 
@@ -757,6 +794,8 @@ export function useOpenClawState() {
     isLoadingSessions,
     isLoadingMessages,
     isSendingMessage,
+    isCancellingRun,
+    isRunInProgress,
     liveOverlay,
     lastError,
     initialize,
@@ -765,6 +804,7 @@ export function useOpenClawState() {
     refreshHistory,
     selectSession,
     sendMessage,
+    cancelCurrentRun,
     createSession,
     resetCurrentSession,
     updateSessionTitle,

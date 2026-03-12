@@ -1,4 +1,6 @@
 import type {
+  OpenClawAbortRequest,
+  OpenClawAbortResponse,
   OpenClawImageAttachment,
   OpenClawHistoryRequest,
   OpenClawHistoryResponse,
@@ -252,6 +254,36 @@ export async function sendOpenClawMessage(request: OpenClawSendRequest): Promise
   return {
     ok: payload?.ok === true,
     runId: readString(payload?.runId),
+  }
+}
+
+export async function abortOpenClawRun(request: OpenClawAbortRequest): Promise<OpenClawAbortResponse> {
+  const sessionKey = request.sessionKey.trim()
+  const runId = (request.runId ?? '').trim()
+  if (!sessionKey) {
+    throw new Error('OpenClaw abort requires session key')
+  }
+
+  const payload = await requestOpenClaw<OpenClawAbortResponse>(
+    '/openclaw-api/abort',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionKey,
+        runId: runId || undefined,
+      }),
+    },
+    'Failed to cancel OpenClaw run',
+    15_000,
+  )
+
+  return {
+    ok: payload?.ok === true,
+    aborted: payload?.aborted === true,
+    runIds: Array.isArray(payload?.runIds)
+      ? payload.runIds.filter((row): row is string => typeof row === 'string')
+      : [],
   }
 }
 

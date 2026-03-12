@@ -10,7 +10,7 @@
         :disabled="disabled || !sessionKey"
         :aria-label="placeholder"
         @focus="onFocusInput"
-        @keydown.enter.exact.prevent="onSubmit"
+        @keydown.enter.exact.prevent="onEnterSubmit"
       />
 
       <div class="openclaw-composer-attach-wrap">
@@ -54,11 +54,12 @@
 
       <button
         class="openclaw-composer-submit"
-        type="submit"
-        :aria-label="sendLabel"
-        :disabled="disabled || !sessionKey || (draft.trim().length === 0 && attachments.length === 0)"
+        type="button"
+        :aria-label="isTaskRunning ? cancelLabel : sendLabel"
+        :disabled="isPrimaryActionDisabled"
+        @click="onPrimaryAction"
       >
-        {{ sendLabel }}
+        {{ isTaskRunning ? cancelLabel : sendLabel }}
       </button>
     </div>
 
@@ -111,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type {
   OpenClawComposerAttachment,
   OpenClawComposerImageAttachment,
@@ -124,8 +125,11 @@ const FILE_SIZE_LIMIT_BYTES = 15_000_000
 const props = defineProps<{
   sessionKey: string
   disabled?: boolean
+  isTaskRunning?: boolean
+  isCancellingTask?: boolean
   placeholder: string
   sendLabel: string
+  cancelLabel: string
   attachLabel: string
   attachCameraLabel: string
   attachGalleryLabel: string
@@ -137,6 +141,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   submit: [payload: OpenClawComposerSubmitPayload]
+  cancel: []
 }>()
 
 const draft = ref('')
@@ -147,6 +152,13 @@ const galleryPickerRef = ref<HTMLInputElement | null>(null)
 const filesPickerRef = ref<HTMLInputElement | null>(null)
 const isAttachmentMenuOpen = ref(false)
 const attachments = ref<OpenClawComposerAttachment[]>([])
+
+const isPrimaryActionDisabled = computed(() => {
+  if (props.isTaskRunning) {
+    return !!props.disabled || !props.sessionKey || !!props.isCancellingTask
+  }
+  return !!props.disabled || !props.sessionKey || (draft.value.trim().length === 0 && attachments.value.length === 0)
+})
 
 function moveCursorToEnd(): void {
   const input = composerInputRef.value
@@ -303,6 +315,7 @@ function onSelectGenericFiles(event: Event): void {
 }
 
 function onSubmit(): void {
+  if (props.isTaskRunning) return
   const text = draft.value.trim()
   const hasAttachments = attachments.value.length > 0
   if ((!text && !hasAttachments) || props.disabled || !props.sessionKey) return
@@ -313,6 +326,19 @@ function onSubmit(): void {
   draft.value = ''
   attachments.value = []
   isAttachmentMenuOpen.value = false
+}
+
+function onPrimaryAction(): void {
+  if (props.isTaskRunning) {
+    emit('cancel')
+    return
+  }
+  onSubmit()
+}
+
+function onEnterSubmit(): void {
+  if (props.isTaskRunning) return
+  onSubmit()
 }
 
 function onWindowPointerDown(event: PointerEvent): void {

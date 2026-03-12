@@ -1008,6 +1008,30 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         return
       }
 
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/abort') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        const runId = normalizeText(payload?.runId)
+        if (!sessionKey) {
+          setJson(res, 400, { error: 'Missing sessionKey' })
+          return
+        }
+        const result = await runOpenClawGatewayCall('chat.abort', {
+          sessionKey,
+          runId: runId || undefined,
+        })
+        const record = asRecord(result)
+        const runIds = Array.isArray(record?.runIds)
+          ? record.runIds.filter((row) => typeof row === 'string')
+          : []
+        setJson(res, 200, {
+          ok: record?.ok !== false,
+          aborted: record?.aborted === true,
+          runIds,
+        })
+        return
+      }
+
       if (req.method === 'POST' && url.pathname === '/openclaw-api/attachments/upload') {
         const payload = asRecord(await readJsonBody(req))
         const fileName = sanitizeOpenClawUploadFileName(normalizeText(payload?.fileName))

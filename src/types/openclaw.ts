@@ -55,6 +55,17 @@ export type OpenClawSendResponse = {
   runId: string
 }
 
+export type OpenClawAbortRequest = {
+  sessionKey: string
+  runId?: string
+}
+
+export type OpenClawAbortResponse = {
+  ok: boolean
+  aborted: boolean
+  runIds: string[]
+}
+
 export type OpenClawImageAttachment = {
   type: 'image'
   mimeType: string
