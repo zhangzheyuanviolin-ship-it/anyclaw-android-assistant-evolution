@@ -865,9 +865,30 @@ H3
               exit 1
             fi
 
+            verify_davey_load() {
+              DAVEY_JS="${'$'}DAVEY_JS" NAPI_RS_NATIVE_LIBRARY_PATH="${'$'}NATIVE_NODE" node <<'NODE'
+              try {
+                const daveyPath = process.env.DAVEY_JS || ''
+                if (!daveyPath) {
+                  console.log('davey-verify:path-missing')
+                  process.exit(1)
+                }
+                require(daveyPath)
+                console.log('davey-verify:ok')
+              } catch (error) {
+                console.log('davey-verify:fail:' + String(error && error.message ? error.message : error))
+                process.exit(1)
+              }
+NODE
+            }
+
             if [ -f "${'$'}NATIVE_NODE" ]; then
-              echo "davey-native-ready:cached"
-              exit 0
+              if verify_davey_load >/dev/null 2>&1; then
+                echo "davey-native-ready:cached"
+                exit 0
+              fi
+              echo "davey-native-ready:cached-invalid"
+              rm -f "${'$'}NATIVE_NODE" 2>/dev/null || true
             fi
 
             rm -rf "${'$'}TMP_PACK_DIR/package" "${'$'}TMP_PACK_DIR"/snazzah-davey-android-arm64-*.tgz 2>/dev/null
@@ -904,8 +925,12 @@ H3
 
             cp -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" "${'$'}NATIVE_NODE"
             chmod 700 "${'$'}NATIVE_NODE" 2>/dev/null || true
-            echo "davey-native-ready:installed"
-            exit 0
+            if verify_davey_load >/dev/null 2>&1; then
+              echo "davey-native-ready:installed"
+              exit 0
+            fi
+            echo "davey-native-ready:verify-failed"
+            exit 1
         """.trimIndent()
 
         val code = runInPrefix(cmd) {
@@ -917,6 +942,61 @@ H3
             return false
         }
         return true
+    }
+
+    private fun verifyOpenClawCliLoad(onProgress: (String) -> Unit): Boolean {
+        val code = runInPrefix(
+            """
+            if ! command -v openclaw >/dev/null 2>&1; then
+              echo "openclaw-cli-missing"
+              exit 1
+            fi
+            openclaw --version >/dev/null 2>&1
+            if [ "${'$'}?" -ne 0 ]; then
+              echo "openclaw-cli-load-failed"
+              openclaw --version 2>&1 | head -n 6
+              exit 1
+            fi
+            echo "openclaw-cli-load-ok"
+            exit 0
+            """.trimIndent(),
+            onOutput = {
+                Log.d(TAG, "[openclaw-cli-check] $it")
+                onProgress(it)
+            },
+        )
+        return code == 0
+    }
+
+    private fun ensureOpenClawRuntimeReady(onProgress: (String) -> Unit): Boolean {
+        if (!isOpenClawInstalled()) return false
+        val paths = BootstrapInstaller.getPaths(context)
+        val npmCli = "${paths.prefixDir}/lib/node_modules/npm/bin/npm-cli.js"
+
+        for (attempt in 1..3) {
+            onProgress("Verifying OpenClaw native runtime (${attempt}/3)…")
+            val nativeOk = ensureOpenClawNativeBinding(onProgress)
+            val cliOk = if (nativeOk) verifyOpenClawCliLoad(onProgress) else false
+            if (nativeOk && cliOk) {
+                return true
+            }
+
+            onProgress("OpenClaw runtime repair needed (${attempt}/3)…")
+            val reinstallCode = runInPrefix(
+                "node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+                onOutput = { onProgress(it) },
+            )
+            if (reinstallCode != 0) {
+                Log.w(TAG, "OpenClaw reinstall failed during runtime repair attempt=$attempt code=$reinstallCode")
+            }
+
+            patchOpenClawPaths()
+            patchGatewayForAndroid()
+            Thread.sleep((260L * attempt).coerceAtMost(1200L))
+        }
+
+        Log.e(TAG, "OpenClaw runtime failed strict readiness checks after retries")
+        return false
     }
 
     /**
@@ -1390,8 +1470,10 @@ H3
         val paths = BootstrapInstaller.getPaths(context)
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
         ensureOpenClawGatewayHistoryByteCap()
-        if (!ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }) {
-            Log.w(TAG, "OpenClaw native binding repair failed before gateway startup; continuing because gateway can still run without the preflight cache")
+        if (!ensureOpenClawRuntimeReady { Log.d(TAG, "[openclaw-runtime] $it") }) {
+            Log.e(TAG, "OpenClaw runtime is not ready; refusing to start gateway")
+            logOpenClawGatewayDiagnostics("runtime-not-ready")
+            return false
         }
 
         // Kill any orphaned gateway processes and reset all device tokens.
