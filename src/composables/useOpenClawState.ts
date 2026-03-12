@@ -29,6 +29,8 @@ const HISTORY_MAX = 400
 const HISTORY_STEP = 40
 const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
+const PENDING_RUN_MIN_ACTIVE_MS = 2_000
+const PENDING_RUN_IDLE_CLEAR_MS = 3_600
 
 type SessionSelectOptions = {
   syncHistory?: boolean
@@ -181,27 +183,6 @@ function extractImageSegments(items: OpenClawContentItem[]): string[] {
     }
   }
   return urls
-}
-
-function hasAssistantTextAfter(messages: OpenClawHistoryMessage[], sinceMs: number): boolean {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const row = messages[index]
-    const timestamp = typeof row.timestamp === 'number' ? row.timestamp : 0
-    if (timestamp < sinceMs) continue
-    if (row.role !== 'assistant') continue
-    const items = readContentItems(row.content)
-    const text = extractTextSegments(items, ['text'])
-    if (text.length > 0) return true
-  }
-  return false
-}
-
-function hasAnyTimestampAtOrAfter(messages: OpenClawHistoryMessage[], sinceMs: number): boolean {
-  for (const row of messages) {
-    const timestamp = typeof row.timestamp === 'number' ? row.timestamp : 0
-    if (timestamp >= sinceMs && timestamp > 0) return true
-  }
-  return false
 }
 
 function hasAssistantOrToolOutputAfter(messages: OpenClawHistoryMessage[], sinceMs: number): boolean {
@@ -430,6 +411,8 @@ export function useOpenClawState() {
   let lastRenderedSignature = 'empty'
   let pendingBaselineSignature = 'empty'
   let cancelPendingAfterSend = false
+  let pendingOutputObserved = false
+  let pendingLastHistoryChangeAtMs = 0
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
@@ -525,11 +508,17 @@ export function useOpenClawState() {
         lastRenderedSignature = nextSignature
       }
 
-      if (pendingRun.value && historyChanged) {
-        const hasTimedOutput = hasAssistantTextAfter(payload.messages, lastSendAtMs) ||
-          hasAssistantOrToolOutputAfter(payload.messages, lastSendAtMs)
-        const hasTimestampEvidence = hasAnyTimestampAtOrAfter(payload.messages, lastSendAtMs)
-        if (hasTimedOutput || (!hasTimestampEvidence && nextSignature !== pendingBaselineSignature)) {
+      if (pendingRun.value) {
+        const now = Date.now()
+        if (historyChanged) {
+          pendingLastHistoryChangeAtMs = now
+        }
+        if (hasAssistantOrToolOutputAfter(payload.messages, lastSendAtMs)) {
+          pendingOutputObserved = true
+        }
+        const idleMs = now - pendingLastHistoryChangeAtMs
+        const activeMs = now - lastSendAtMs
+        if (pendingOutputObserved && activeMs >= PENDING_RUN_MIN_ACTIVE_MS && idleMs >= PENDING_RUN_IDLE_CLEAR_MS) {
           pendingRun.value = false
         }
       }
@@ -557,6 +546,8 @@ export function useOpenClawState() {
     lastRenderedSignature = 'empty'
     pendingBaselineSignature = 'empty'
     cancelPendingAfterSend = false
+    pendingOutputObserved = false
+    pendingLastHistoryChangeAtMs = 0
     pendingRun.value = false
     await refreshHistory()
   }
@@ -615,6 +606,8 @@ export function useOpenClawState() {
     pendingRun.value = true
     lastSendAtMs = Date.now()
     pendingBaselineSignature = lastRenderedSignature
+    pendingOutputObserved = false
+    pendingLastHistoryChangeAtMs = lastSendAtMs
 
     try {
       const imageAttachments = normalized.attachments.filter(
@@ -663,6 +656,8 @@ export function useOpenClawState() {
         cancelPendingAfterSend = false
         await abortOpenClawRun({ sessionKey })
         pendingRun.value = false
+        pendingOutputObserved = false
+        pendingLastHistoryChangeAtMs = 0
         await refreshHistory({ silent: true })
         lastError.value = ''
         return
@@ -674,6 +669,8 @@ export function useOpenClawState() {
     } catch (error) {
       cancelPendingAfterSend = false
       pendingRun.value = false
+      pendingOutputObserved = false
+      pendingLastHistoryChangeAtMs = 0
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
@@ -692,6 +689,8 @@ export function useOpenClawState() {
     try {
       await abortOpenClawRun({ sessionKey })
       pendingRun.value = false
+      pendingOutputObserved = false
+      pendingLastHistoryChangeAtMs = 0
       await refreshHistory({ silent: true })
       void refreshSessions(sessionKey)
       void refreshHealth()
