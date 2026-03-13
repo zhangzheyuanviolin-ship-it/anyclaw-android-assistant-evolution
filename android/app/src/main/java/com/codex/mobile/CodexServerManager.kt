@@ -386,6 +386,13 @@ class CodexServerManager(private val context: Context) {
             """.trimIndent(),
         )
 
+        onProgress("Normalizing runtime paths…")
+        patchOpenClawPaths()
+        ensureRuntimeDoctorScripts()
+        runInPrefix(
+            "${paths.homeDir}/.openclaw/workspace/scripts/runtime-env-doctor.sh --repair --json >/dev/null 2>&1 || true",
+        )
+
         writeBundledRuntimeState(manifest, actualSha)
         return isNodeInstalled() && isCodexInstalled() && isPlatformBinaryInstalled() && isOpenClawInstalled()
     }
@@ -1257,6 +1264,8 @@ H3
             # Fix the openclaw.mjs shebang
             if [ -f "${'$'}ODIR/openclaw.mjs" ]; then
                 sed -i "1s|#!/usr/bin/env node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
+                sed -i "1s|^#!/data/.*/files/usr/bin/node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
+                sed -i "1s|^#!/data/.*/files/usr/bin/env node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
             fi
 
             # Patch /tmp -> $prefix/tmp
@@ -3191,6 +3200,7 @@ set -eu
 
 PREFIX="${'$'}{PREFIX:-__PREFIX__}"
 HOME_DIR="${'$'}{HOME:-__HOME__}"
+FILES_DIR="${'$'}{FILES_DIR:-__FILES__}"
 STATE_DIR="${'$'}HOME_DIR/.openclaw-android/state"
 OUT_JSON="${'$'}STATE_DIR/runtime-health.json"
 PROBE=0
@@ -3218,16 +3228,28 @@ repair_prefix() {
   [ -x "${'$'}py" ] || return 0
   "${'$'}py" - <<'PY'
 import os
+import re
 from pathlib import Path
 
-OLD = b"/data/data/com.termux"
-NEW = b"/data/user/0/com.codex.mobile.beta"
+prefix = Path(os.environ.get("PREFIX", "__PREFIX__"))
+home_dir = Path(os.environ.get("HOME", "__HOME__"))
+files_dir = Path(os.environ.get("FILES_DIR", "__FILES__"))
+app_base = files_dir.parent
+
+legacy_termux = b"/data/data/com.termux"
+target_base = app_base.as_posix().encode()
+target_files = files_dir.as_posix().encode()
+target_shebang_prefix = b"#!" + target_files + b"/usr/bin/"
+
+shebang_any_pkg = re.compile(rb"^#!/data/(?:data|user/0)/[^/\n]+/files/usr/bin/")
+any_pkg_files = re.compile(rb"/data/(?:data|user/0)/[^/\s'\\\"]+/files")
 
 roots = [
-    Path("/data/user/0/com.codex.mobile.beta/files/usr/bin"),
-    Path("/data/user/0/com.codex.mobile.beta/files/usr/libexec"),
-    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/scripts"),
-    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/.git/hooks"),
+    prefix / "bin",
+    prefix / "libexec",
+    prefix / "lib/node_modules/openclaw",
+    home_dir / ".openclaw/workspace/scripts",
+    home_dir / ".openclaw/workspace/.git/hooks",
 ]
 
 patched = 0
@@ -3244,11 +3266,34 @@ for root in roots:
         except Exception:
             failed += 1
             continue
-        if OLD not in data:
+        # Skip non-script binary payloads.
+        if b"\x00" in data[:4096] and not data.startswith(b"#!"):
             continue
-        if not (data.startswith(b"#!") or b"com.termux/files/usr" in data[:8192]):
+        if not (
+            data.startswith(b"#!")
+            or legacy_termux in data
+            or b"/files/usr/bin/" in data[:8192]
+            or b"/files/usr/" in data[:8192]
+        ):
             continue
-        new_data = data.replace(OLD, NEW)
+
+        new_data = data
+        if legacy_termux in new_data:
+            new_data = new_data.replace(legacy_termux, target_base)
+
+        if new_data.startswith(b"#!"):
+            nl = new_data.find(b"\n")
+            if nl < 0:
+                nl = len(new_data)
+            first = new_data[:nl]
+            rest = new_data[nl:]
+            first2 = shebang_any_pkg.sub(target_shebang_prefix, first)
+            if first2 != first:
+                new_data = first2 + rest
+
+        if b"/files/usr/" in new_data:
+            new_data = any_pkg_files.sub(target_files, new_data)
+
         if new_data == data:
             continue
         try:
@@ -3332,6 +3377,7 @@ EOF
 
             sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
             sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
+            sed -i "s#__FILES__#${paths.filesDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
             chmod 700 "${'$'}scripts/runtime-env-doctor.sh" 2>/dev/null || true
             "${'$'}scripts/runtime-env-doctor.sh" --probe --json > "${'$'}state_dir/runtime-health.json" 2>/dev/null || true
             echo "runtime-doctor-ready"

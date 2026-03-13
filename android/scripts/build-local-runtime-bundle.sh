@@ -78,6 +78,12 @@ rm -rf "$STAGE_DIR/files/usr/lib/node_modules/openclaw/docs" \
        "$STAGE_DIR/files/usr/lib/node_modules/openclaw/.github" \
        "$STAGE_DIR/files/usr/lib/node_modules/openclaw/.changeset" 2>/dev/null || true
 
+echo "Normalizing OpenClaw launcher shebang..."
+if [ -f "$STAGE_DIR/files/usr/lib/node_modules/openclaw/openclaw.mjs" ]; then
+  /system/bin/sed -i '1s|^#!/data/.*/files/usr/bin/node|#!/usr/bin/env node|' \
+    "$STAGE_DIR/files/usr/lib/node_modules/openclaw/openclaw.mjs" || true
+fi
+
 echo "Copying git runtime support..."
 copy_if_exists "$SOURCE_PREFIX/libexec/git-core" "$STAGE_DIR/files/usr/libexec/git-core"
 copy_if_exists "$SOURCE_PREFIX/share/git-core/templates" "$STAGE_DIR/files/usr/share/git-core/templates"
