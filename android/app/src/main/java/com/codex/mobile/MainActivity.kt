@@ -509,6 +509,10 @@ class MainActivity : AppCompatActivity() {
                 runSetup()
             } catch (e: Exception) {
                 Log.e(TAG, "Setup failed", e)
+                try {
+                    serverManager.reportBootstrapFailure("core.setup", e.message ?: "unknown")
+                } catch (_: Exception) {
+                }
                 runOnUiThread {
                     showError(e.message ?: "Unknown error")
                 }
@@ -517,7 +521,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runSetup() {
-        val hadOpenClawAtStart = serverManager.isOpenClawInstalled()
+        checkpoint("core.bootstrap", "started", "setup-begin")
 
         // Step 1: Extract bootstrap
         if (!BootstrapInstaller.isBootstrapInstalled(this)) {
@@ -525,23 +529,9 @@ class MainActivity : AppCompatActivity() {
             BootstrapInstaller.install(this) { msg -> updateStatus(msg) }
         }
         updateStatus("Environment ready")
+        checkpoint("core.bootstrap", "ok", "bootstrap-ready")
 
-        // Step 1b: Install proot (needed for dpkg/apt-get path remapping)
-        if (!serverManager.isProotInstalled()) {
-            updateStatus("Installing proot…", "Needed for package management")
-            val prootOk = serverManager.installProot { msg -> updateDetail(msg) }
-            if (!prootOk) {
-                throw RuntimeException("Failed to install proot")
-            }
-        }
-        updateStatus("proot ready")
-
-        // Step 1c: Repair apt trust chain, then prepare resilient package manager scripts/wrappers.
-        serverManager.ensureAptTrustChain()
-        serverManager.ensurePackageRecoveryScripts()
-        serverManager.ensurePackageManagerWrappers()
-
-        // Step 2: Install Node.js
+        // Step 2: Core runtime only (must stay small and deterministic)
         if (!serverManager.isNodeInstalled()) {
             updateStatus("Installing Node.js (first run)…", "This may take a few minutes")
             val nodeOk = serverManager.installNode { msg -> updateDetail(msg) }
@@ -550,40 +540,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updateStatus("Node.js ready")
-
-        // Step 2b: Install Python
-        if (!serverManager.isPythonInstalled()) {
-            updateStatus("Installing Python…")
-            val pyOk = serverManager.installPython { msg -> updateDetail(msg) }
-            if (!pyOk) {
-                Log.w(TAG, "Python install failed — continuing without it")
-            }
-        }
-
-        // Step 2c: Install bionic-compat.js (Android platform shim for Node.js)
-        serverManager.ensureBionicCompat()
-
-        // Step 2d: Install OpenClaw
-        if (!serverManager.isOpenClawInstalled()) {
-            updateStatus("Installing build dependencies…")
-            serverManager.installOpenClawDeps { msg -> updateDetail(msg) }
-
-            updateStatus("Installing OpenClaw…", "This may take several minutes")
-            val openclawOk = serverManager.installOpenClaw { msg -> updateDetail(msg) }
-            if (!openclawOk) {
-                Log.w(TAG, "OpenClaw install failed — continuing without it")
-            } else {
-                updateStatus("OpenClaw installed")
-            }
-        }
-
-        if (serverManager.isOpenClawInstalled()) {
-            updateStatus("Checking OpenClaw version…")
-            val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
-            if (!versionOk) {
-                Log.w(TAG, "OpenClaw version alignment failed — continuing with current install")
-            }
-        }
+        checkpoint("core.node", "ok", "node-ready")
 
         // Step 3: Install Codex CLI
         if (!serverManager.isCodexInstalled()) {
@@ -593,6 +550,7 @@ class MainActivity : AppCompatActivity() {
                 throw RuntimeException("Failed to install Codex")
             }
         }
+        checkpoint("core.codex", "ok", "codex-ready")
 
         // Ensure codex wrapper script exists
         serverManager.ensureCodexWrapperScript()
@@ -610,6 +568,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         updateStatus("Codex ready")
+        checkpoint("core.platform", "ok", "platform-ready")
 
         // Step 3c: Write full-access config, create default workspace, and bridge shared storage paths
         serverManager.ensureFullAccessConfig()
@@ -635,19 +594,7 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Codex authenticated")
         }
 
-        // Step 7: On a fresh install, complete one full OpenClaw bring-up pass
-        // before showing the UI so users do not need to restart the app to get
-        // a working gateway. Existing installs still use the async fast path.
-        val needsBlockingOpenClawBootstrap = !hadOpenClawAtStart && serverManager.isOpenClawInstalled()
-        if (needsBlockingOpenClawBootstrap) {
-            updateStatus("Finalizing OpenClaw…", "Completing first-run gateway setup")
-            startOpenClawServicesSync()
-        } else {
-            // Existing installs keep Codex page availability as the first priority.
-            startOpenClawServicesAsync()
-        }
-
-        // Step 8: Start web server
+        // Step 6: Start web server first, independent from OpenClaw enhancement path.
         updateStatus("Starting server…")
         val started = serverManager.startServer()
         if (!started) {
@@ -660,8 +607,9 @@ class MainActivity : AppCompatActivity() {
         if (!ready) {
             throw RuntimeException("Server did not start in time")
         }
+        checkpoint("core.server", "ok", "server-ready")
 
-        // Step 10: Show web UI
+        // Step 7: Show web UI immediately (baseline available even if enhancement fails).
         runOnUiThread {
             showLoading(false)
             webView.visibility = View.VISIBLE
@@ -676,6 +624,10 @@ class MainActivity : AppCompatActivity() {
             startGatewayStatusMonitor()
             webView.loadUrl(consumeLaunchUrlOrDefault())
         }
+        checkpoint("core.ui", "ok", "ui-ready")
+
+        // Step 8: OpenClaw and package enhancements are always async and non-blocking.
+        startEnhancedSetupFlow()
     }
 
     private fun startOpenClawServicesAsync() {
@@ -690,11 +642,111 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun startEnhancedSetupFlow() {
+        Thread {
+            checkpoint("enhanced", "started", "openclaw-and-tools")
+            try {
+                var gatewayOk = false
+                val openClawPresentAtStart = serverManager.isOpenClawInstalled()
+                if (openClawPresentAtStart) {
+                    // Existing installs should keep gateway availability fast.
+                    gatewayOk = startOpenClawServicesSync()
+                    checkpoint(
+                        "enhanced.gateway.fastpath",
+                        if (gatewayOk) "ok" else "failed",
+                        if (gatewayOk) "gateway-ready" else "gateway-fastpath-failed",
+                    )
+                }
+
+                // Keep package-manager recovery assets present on every boot.
+                serverManager.ensureAptTrustChain()
+                serverManager.ensurePackageRecoveryScripts()
+                serverManager.ensurePackageManagerWrappers()
+                checkpoint("enhanced.pkg", "ok", "recovery-assets-ready")
+
+                if (!serverManager.isProotInstalled()) {
+                    updateStatus("Installing proot…", "Needed for package management")
+                    val prootOk = serverManager.installProot { msg -> updateDetail(msg) }
+                    if (!prootOk) {
+                        throw RuntimeException("Failed to install proot")
+                    }
+                }
+                checkpoint("enhanced.proot", "ok", "proot-ready")
+
+                if (!serverManager.isPythonInstalled()) {
+                    updateStatus("Installing Python…")
+                    val pyOk = serverManager.installPython { msg -> updateDetail(msg) }
+                    if (!pyOk) {
+                        Log.w(TAG, "Python install failed — continuing without it")
+                    }
+                }
+                serverManager.ensureBionicCompat()
+                checkpoint("enhanced.runtime", "ok", "python-bionic-ready")
+
+                if (!serverManager.isOpenClawInstalled()) {
+                    updateStatus("Installing build dependencies…")
+                    serverManager.installOpenClawDeps { msg -> updateDetail(msg) }
+
+                    updateStatus("Installing OpenClaw…", "This may take several minutes")
+                    val openclawOk = serverManager.installOpenClaw { msg -> updateDetail(msg) }
+                    if (!openclawOk) {
+                        checkpoint("enhanced.openclaw.install", "failed", "openclaw-install-failed")
+                    } else {
+                        updateStatus("OpenClaw installed")
+                        checkpoint("enhanced.openclaw.install", "ok", "openclaw-installed")
+                    }
+                } else {
+                    checkpoint("enhanced.openclaw.install", "ok", "already-installed")
+                }
+
+                if (!serverManager.isOpenClawInstalled()) {
+                    checkpoint("enhanced.gateway", "failed", "openclaw-not-installed")
+                } else {
+                    updateStatus("Checking OpenClaw version…")
+                    val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
+                    if (!versionOk) {
+                        Log.w(TAG, "OpenClaw version alignment failed — continuing with current install")
+                    }
+                    checkpoint(
+                        "enhanced.openclaw.version",
+                        if (versionOk) "ok" else "warn",
+                        if (versionOk) "version-aligned" else "version-align-failed",
+                    )
+
+                    if (!gatewayOk) {
+                        gatewayOk = startOpenClawServicesSync()
+                    }
+                    checkpoint(
+                        "enhanced.gateway",
+                        if (gatewayOk) "ok" else "failed",
+                        if (gatewayOk) "gateway-ready" else "gateway-start-failed",
+                    )
+                }
+            } catch (error: Exception) {
+                Log.e(TAG, "Enhanced setup failed", error)
+                checkpoint("enhanced", "failed", error.message ?: "enhanced-setup-failed")
+            } finally {
+                runOnUiThread {
+                    if (webView.visibility == View.VISIBLE) {
+                        refreshGatewayStatusAsync(announce = true)
+                    }
+                }
+            }
+        }.start()
+    }
+
     private fun startOpenClawServicesSync(): Boolean {
         if (!serverManager.isOpenClawInstalled()) return false
         return try {
             updateStatus("Running OpenClaw preflight…")
             serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
+
+            updateStatus("Verifying OpenClaw runtime…")
+            val runtimeOk = serverManager.ensureOpenClawRuntimeReady { msg -> updateDetail(msg) }
+            if (!runtimeOk) {
+                Log.w(TAG, "OpenClaw runtime readiness check failed")
+                return false
+            }
 
             updateStatus("Configuring OpenClaw…")
             serverManager.configureOpenClawAuth()
@@ -714,6 +766,14 @@ class MainActivity : AppCompatActivity() {
         } catch (error: Exception) {
             Log.e(TAG, "OpenClaw startup failed", error)
             false
+        }
+    }
+
+    private fun checkpoint(stage: String, status: String, detail: String) {
+        try {
+            serverManager.reportBootstrapCheckpoint(stage, status, detail)
+        } catch (error: Exception) {
+            Log.w(TAG, "checkpoint failed for $stage/$status: ${error.message}")
         }
     }
 

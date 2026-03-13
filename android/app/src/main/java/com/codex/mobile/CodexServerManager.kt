@@ -132,6 +132,92 @@ class CodexServerManager(private val context: Context) {
         return sb.toString().trim()
     }
 
+    private fun ensureRuntimeStateDir(paths: BootstrapInstaller.Paths): File {
+        val dir = File(paths.homeDir, ".openclaw-android/state")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
+    }
+
+    private fun appendJsonLine(file: File, payload: JSONObject) {
+        try {
+            file.parentFile?.mkdirs()
+            file.appendText(payload.toString() + "\n")
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to append jsonl ${file.absolutePath}: ${error.message}")
+        }
+    }
+
+    fun reportBootstrapCheckpoint(stage: String, status: String, detail: String = "") {
+        val paths = BootstrapInstaller.getPaths(context)
+        val stateDir = ensureRuntimeStateDir(paths)
+        val now = System.currentTimeMillis()
+
+        val payload = JSONObject().apply {
+            put("timestampMs", now)
+            put("stage", stage.trim())
+            put("status", status.trim())
+            put("detail", detail.trim())
+            put("openclawInstalled", isOpenClawInstalled())
+            put("nodeInstalled", isNodeInstalled())
+            put("codexInstalled", isCodexInstalled())
+            put("platformBinaryInstalled", isPlatformBinaryInstalled())
+        }
+
+        try {
+            File(stateDir, "bootstrap-status.json").writeText(payload.toString(2))
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to write bootstrap-status.json: ${error.message}")
+        }
+        appendJsonLine(File(stateDir, "bootstrap-events.jsonl"), payload)
+    }
+
+    fun reportBootstrapFailure(stage: String, detail: String) {
+        reportBootstrapCheckpoint(stage = stage, status = "failed", detail = detail)
+    }
+
+    fun writeGatewayDiagnosticSnapshot(reason: String) {
+        val paths = BootstrapInstaller.getPaths(context)
+        val stateDir = ensureRuntimeStateDir(paths)
+        val now = System.currentTimeMillis()
+
+        val payload = JSONObject().apply {
+            put("timestampMs", now)
+            put("reason", reason.trim())
+            put("openclawPath", runCapture("command -v openclaw || true"))
+            put("openclawVersion", runCapture("openclaw --version 2>&1 | head -n 1 || true"))
+            put("gatewayHealth", runCapture("openclaw gateway call health --json --params '{}' 2>&1 || true"))
+            put(
+                "gatewayListening",
+                runCapture(
+                    "( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | grep '${OPENCLAW_GATEWAY_PORT}' || true",
+                ),
+            )
+            put(
+                "relevantProcesses",
+                runCapture(
+                    "ps -A 2>/dev/null | grep -E 'openclaw|node' | grep -E 'gateway|${OPENCLAW_GATEWAY_PORT}|${OPENCLAW_CONTROL_UI_PORT}' || true",
+                ),
+            )
+        }
+
+        try {
+            File(stateDir, "gateway-diagnostics.json").writeText(payload.toString(2))
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to write gateway-diagnostics.json: ${error.message}")
+        }
+        appendJsonLine(
+            File(stateDir, "bootstrap-events.jsonl"),
+            JSONObject().apply {
+                put("timestampMs", now)
+                put("stage", "gateway")
+                put("status", "diagnostic")
+                put("detail", reason.trim())
+            },
+        )
+    }
+
     // ── Install checks ─────────────────────────────────────────────────────
 
     fun isProotInstalled(): Boolean {
@@ -1355,6 +1441,41 @@ H3
         return runOpenClawToolchainPreflight(onProgress)
     }
 
+    fun ensureOpenClawRuntimeReady(onProgress: (String) -> Unit): Boolean {
+        if (!isOpenClawInstalled()) {
+            onProgress("OpenClaw runtime missing")
+            return false
+        }
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        onProgress("Verifying OpenClaw runtime prerequisites…")
+        ensureOpenClawToolchain(onProgress)
+        ensureGitAvailableForOpenClaw(onProgress)
+
+        onProgress("Verifying OpenClaw native binding…")
+        if (!ensureOpenClawNativeBinding(onProgress)) {
+            writeGatewayDiagnosticSnapshot("runtime-native-binding-failed")
+            return false
+        }
+
+        val verifyCmd =
+            """
+            set -e
+            command -v openclaw >/dev/null 2>&1
+            [ -f "$prefix/lib/node_modules/openclaw/package.json" ]
+            [ -d "$prefix/lib/node_modules/openclaw/dist/control-ui" ]
+            openclaw --version >/dev/null 2>&1
+            echo "openclaw-runtime-ok"
+            """.trimIndent()
+        val code = runInPrefix(verifyCmd, onOutput = { onProgress(it) })
+        if (code != 0) {
+            writeGatewayDiagnosticSnapshot("runtime-verify-failed")
+            return false
+        }
+        return true
+    }
+
     /**
      * Keep gateway chat history payload bounded on mobile to reduce ANR risk on
      * large transcripts. We patch all gateway-cli bundles shipped with OpenClaw
@@ -1444,6 +1565,7 @@ H3
         ensureOpenClawGatewayHistoryByteCap()
         if (!ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }) {
             Log.e(TAG, "OpenClaw native binding repair failed before gateway startup")
+            writeGatewayDiagnosticSnapshot("start-native-binding-failed")
             return false
         }
 
@@ -1497,6 +1619,7 @@ H3
 
         Log.w(TAG, "OpenClaw gateway process launched but not responsive yet")
         logOpenClawGatewayDiagnostics("start-not-responsive")
+        writeGatewayDiagnosticSnapshot("start-not-responsive")
         return false
     }
 
@@ -1737,6 +1860,7 @@ H3
         }
         if (!gatewayOk) {
             logOpenClawGatewayDiagnostics("reconnect-failed")
+            writeGatewayDiagnosticSnapshot("reconnect-failed")
             return false
         }
         startOpenClawControlUiServer()
