@@ -475,7 +475,15 @@ WEOF
                 MISSING_TOOLS="${'$'}MISSING_TOOLS ${'$'}tool"
               fi
             done
-            if [ ! -x "$prefix/libexec/binutils/ar" ] || [ ! -x "$prefix/libexec/binutils/ranlib" ] || [ -n "${'$'}MISSING_TOOLS" ]; then
+            HAVE_AR=0
+            HAVE_RANLIB=0
+            if [ -x "$prefix/libexec/binutils/ar" ] || [ -x "$prefix/bin/ar" ] || [ -x "$prefix/bin/gar" ]; then
+              HAVE_AR=1
+            fi
+            if [ -x "$prefix/libexec/binutils/ranlib" ] || [ -x "$prefix/bin/ranlib" ] || [ -x "$prefix/bin/granlib" ]; then
+              HAVE_RANLIB=1
+            fi
+            if [ "${'$'}HAVE_AR" -ne 1 ] || [ "${'$'}HAVE_RANLIB" -ne 1 ] || [ -n "${'$'}MISSING_TOOLS" ]; then
               echo "toolchain components missing:${'$'}MISSING_TOOLS; attempting targeted repair..."
               cd "$prefix/tmp" || exit 1
               apt-get update --allow-insecure-repositories 2>&1 || true
@@ -519,6 +527,16 @@ WEOF
 
             fix_tool ar llvm-ar || true
             fix_tool ranlib llvm-ranlib || true
+
+            # Newer Termux binutils can expose GNU tools as gar/granlib.
+            # Create compatibility aliases so native builds that expect
+            # ar/ranlib continue to work in fresh installs.
+            if [ ! -x "$prefix/bin/ar" ] && [ -x "$prefix/bin/gar" ]; then
+              ln -sf gar "$prefix/bin/ar"
+            fi
+            if [ ! -x "$prefix/bin/ranlib" ] && [ -x "$prefix/bin/granlib" ]; then
+              ln -sf granlib "$prefix/bin/ranlib"
+            fi
 
             if [ -x "$prefix/bin/ld.lld" ]; then
               ln -sf ld.lld "$prefix/bin/ld"
