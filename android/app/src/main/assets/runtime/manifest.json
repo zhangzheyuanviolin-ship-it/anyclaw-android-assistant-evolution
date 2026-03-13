@@ -2,11 +2,13 @@
   "schemaVersion": 1,
   "bundleVersion": "2026.3.2-offline-r1",
   "archiveName": "runtime-core.tar.gz",
-  "archiveSize": 273267643,
-  "archiveSha256": "8fc856fe832f62a9cb9ac39e427cd02dd08eca398b313d1d188589b3408e6981",
+  "archiveSize": 448266263,
+  "archiveSha256": "a92f499edcb2da073cdb235f61f8998861bfbe29aa93502d4e36a1a024d4514c",
   "parts": [
     "runtime-core.tar.gz.part-aaa",
     "runtime-core.tar.gz.part-aab",
-    "runtime-core.tar.gz.part-aac"
+    "runtime-core.tar.gz.part-aac",
+    "runtime-core.tar.gz.part-aad",
+    "runtime-core.tar.gz.part-aae"
   ]
 }
