@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 111
-        versionName = "0.3.60-beta-v111-testpkg-openclaw-gar-granlib-compat-p0"
+        versionCode = 112
+        versionName = "0.3.60-beta-v112-testpkg-openclaw-native-binding-heredoc-fix-p0"
     }
 
     signingConfigs {

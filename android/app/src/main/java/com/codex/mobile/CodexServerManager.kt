@@ -939,7 +939,7 @@ H3
                 console.log('davey-verify:fail:' + String(error && error.message ? error.message : error))
                 process.exit(1)
               }
-NODE
+            NODE
             }
 
             if [ -f "${'$'}NATIVE_NODE" ]; then
