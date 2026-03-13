@@ -400,7 +400,7 @@ WEOF
         // All packages needed for native compilation (koffi) in one batch.
         // Split into groups to avoid apt-get download failures on missing pkgs.
         val pkgGroups = listOf(
-            "git make cmake clang binutils lld",
+            "git make cmake clang binutils binutils-bin lld",
             "libllvm libedit libffi ndk-sysroot ndk-multilib libcompiler-rt",
             "libarchive libxml2 liblzma libcurl libuv libnghttp2 libnghttp3",
             "rhash jsoncpp",
@@ -469,28 +469,14 @@ WEOF
         val cmd = """
             set -e
 
-            MISSING_TOOLS=""
-            for tool in git make cmake clang; do
-              if ! command -v "${'$'}tool" >/dev/null 2>&1; then
-                MISSING_TOOLS="${'$'}MISSING_TOOLS ${'$'}tool"
-              fi
-            done
-            HAVE_AR=0
-            HAVE_RANLIB=0
-            if [ -x "$prefix/libexec/binutils/ar" ] || [ -x "$prefix/bin/ar" ] || [ -x "$prefix/bin/gar" ]; then
-              HAVE_AR=1
-            fi
-            if [ -x "$prefix/libexec/binutils/ranlib" ] || [ -x "$prefix/bin/ranlib" ] || [ -x "$prefix/bin/granlib" ]; then
-              HAVE_RANLIB=1
-            fi
-            if [ "${'$'}HAVE_AR" -ne 1 ] || [ "${'$'}HAVE_RANLIB" -ne 1 ] || [ -n "${'$'}MISSING_TOOLS" ]; then
-              echo "toolchain components missing:${'$'}MISSING_TOOLS; attempting targeted repair..."
+            if [ ! -x "$prefix/libexec/binutils/ar" ] || [ ! -x "$prefix/libexec/binutils/ranlib" ]; then
+              echo "binutils missing, attempting targeted repair..."
               cd "$prefix/tmp" || exit 1
               apt-get update --allow-insecure-repositories 2>&1 || true
-              apt-get download --allow-unauthenticated binutils lld git make cmake clang 2>&1 || true
+              apt-get download --allow-unauthenticated binutils binutils-bin 2>&1 || true
               rm -rf _binutils_stage
               mkdir -p _binutils_stage
-              for deb in binutils*.deb lld*.deb git*.deb make*.deb cmake*.deb clang*.deb; do
+              for deb in binutils*.deb binutils-bin*.deb; do
                 [ -f "${'$'}deb" ] && dpkg-deb -x "${'$'}deb" _binutils_stage/ 2>&1 || true
               done
               if [ -d "_binutils_stage/data/data/com.termux/files/usr" ]; then
@@ -527,16 +513,6 @@ WEOF
 
             fix_tool ar llvm-ar || true
             fix_tool ranlib llvm-ranlib || true
-
-            # Newer Termux binutils can expose GNU tools as gar/granlib.
-            # Create compatibility aliases so native builds that expect
-            # ar/ranlib continue to work in fresh installs.
-            if [ ! -x "$prefix/bin/ar" ] && [ -x "$prefix/bin/gar" ]; then
-              ln -sf gar "$prefix/bin/ar"
-            fi
-            if [ ! -x "$prefix/bin/ranlib" ] && [ -x "$prefix/bin/granlib" ]; then
-              ln -sf granlib "$prefix/bin/ranlib"
-            fi
 
             if [ -x "$prefix/bin/ld.lld" ]; then
               ln -sf ld.lld "$prefix/bin/ld"
@@ -589,23 +565,13 @@ EOF
     }
 
     private fun runExternalRecoveryScripts(onProgress: (String) -> Unit) {
-        val paths = BootstrapInstaller.getPaths(context)
         val cmd = """
             set +e
-            BASH_BIN="${paths.prefixDir}/bin/bash"
             if [ -f /sdcard/Download/CodexExports/termux_pkg_repair.sh ]; then
-              if [ -x "${'$'}BASH_BIN" ]; then
-                "${'$'}BASH_BIN" /sdcard/Download/CodexExports/termux_pkg_repair.sh 2>&1
-              else
-                sh /sdcard/Download/CodexExports/termux_pkg_repair.sh 2>&1
-              fi
+              sh /sdcard/Download/CodexExports/termux_pkg_repair.sh 2>&1
             fi
             if [ -f /sdcard/Download/CodexExports/tls_doctor.sh ]; then
-              if [ -x "${'$'}BASH_BIN" ]; then
-                "${'$'}BASH_BIN" /sdcard/Download/CodexExports/tls_doctor.sh 2>&1
-              else
-                sh /sdcard/Download/CodexExports/tls_doctor.sh 2>&1
-              fi
+              sh /sdcard/Download/CodexExports/tls_doctor.sh 2>&1
             fi
             exit 0
         """.trimIndent()
@@ -722,21 +688,6 @@ H3
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
-        val prereqCheckCmd =
-            """
-            missing=""
-            for tool in node git make cmake clang ar ranlib; do
-              if ! command -v "${'$'}tool" >/dev/null 2>&1; then
-                missing="${'$'}missing ${'$'}tool"
-              fi
-            done
-            if [ -n "${'$'}missing" ]; then
-              echo "openclaw-prereq-missing:${'$'}missing"
-              exit 1
-            fi
-            echo "openclaw-prereq-ok"
-            exit 0
-            """.trimIndent()
 
         // Create directories OpenClaw expects
         runInPrefix("mkdir -p $prefix/tmp/openclaw ${paths.homeDir}/.openclaw-android/patches ${paths.homeDir}/.openclaw")
@@ -754,17 +705,6 @@ H3
 
         // Configure git to use HTTPS instead of SSH (ssh not available in prefix)
         configureGitHttps(paths)
-
-        onProgress("Verifying OpenClaw prerequisites…")
-        val prereqOkBefore = runInPrefix(prereqCheckCmd, onOutput = { onProgress(it) }) == 0
-        if (!prereqOkBefore) {
-            onProgress("OpenClaw prerequisites missing, repairing toolchain…")
-            ensureOpenClawToolchain(onProgress)
-            if (runInPrefix(prereqCheckCmd, onOutput = { onProgress(it) }) != 0) {
-                Log.e(TAG, "OpenClaw prerequisite check failed after repair")
-                return false
-            }
-        }
 
         // Clean npm cache to avoid stale git clones
         runInPrefix("node $npmCli cache clean --force 2>&1") { Log.d(TAG, "[npm-cache] $it") }
@@ -925,30 +865,9 @@ H3
               exit 1
             fi
 
-            verify_davey_load() {
-              DAVEY_JS="${'$'}DAVEY_JS" NAPI_RS_NATIVE_LIBRARY_PATH="${'$'}NATIVE_NODE" node <<'NODE'
-              try {
-                const daveyPath = process.env.DAVEY_JS || ''
-                if (!daveyPath) {
-                  console.log('davey-verify:path-missing')
-                  process.exit(1)
-                }
-                require(daveyPath)
-                console.log('davey-verify:ok')
-              } catch (error) {
-                console.log('davey-verify:fail:' + String(error && error.message ? error.message : error))
-                process.exit(1)
-              }
-            NODE
-            }
-
             if [ -f "${'$'}NATIVE_NODE" ]; then
-              if verify_davey_load >/dev/null 2>&1; then
-                echo "davey-native-ready:cached"
-                exit 0
-              fi
-              echo "davey-native-ready:cached-invalid"
-              rm -f "${'$'}NATIVE_NODE" 2>/dev/null || true
+              echo "davey-native-ready:cached"
+              exit 0
             fi
 
             rm -rf "${'$'}TMP_PACK_DIR/package" "${'$'}TMP_PACK_DIR"/snazzah-davey-android-arm64-*.tgz 2>/dev/null
@@ -961,23 +880,7 @@ H3
               exit 1
             fi
 
-            python3 - <<'PY'
-            import os
-            import sys
-            import tarfile
-            pack_file = os.environ.get('PACK_FILE', '')
-            out_dir = os.environ.get('TMP_PACK_DIR', '')
-            if not pack_file or not out_dir:
-                print('davey-python-extract-env-missing')
-                sys.exit(1)
-            try:
-                with tarfile.open(pack_file, 'r:gz') as tf:
-                    tf.extractall(out_dir)
-                print('davey-python-extract:ok')
-            except Exception as error:
-                print(f'davey-python-extract:error:{error}')
-                sys.exit(1)
-            PY
+            tar -xzf "${'$'}PACK_FILE" -C "${'$'}TMP_PACK_DIR" 2>&1 || true
             if [ ! -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" ]; then
               echo "davey-node-missing"
               exit 1
@@ -985,12 +888,8 @@ H3
 
             cp -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" "${'$'}NATIVE_NODE"
             chmod 700 "${'$'}NATIVE_NODE" 2>/dev/null || true
-            if verify_davey_load >/dev/null 2>&1; then
-              echo "davey-native-ready:installed"
-              exit 0
-            fi
-            echo "davey-native-ready:verify-failed"
-            exit 1
+            echo "davey-native-ready:installed"
+            exit 0
         """.trimIndent()
 
         val code = runInPrefix(cmd) {
@@ -1002,61 +901,6 @@ H3
             return false
         }
         return true
-    }
-
-    private fun verifyOpenClawCliLoad(onProgress: (String) -> Unit): Boolean {
-        val code = runInPrefix(
-            """
-            if ! command -v openclaw >/dev/null 2>&1; then
-              echo "openclaw-cli-missing"
-              exit 1
-            fi
-            openclaw --version >/dev/null 2>&1
-            if [ "${'$'}?" -ne 0 ]; then
-              echo "openclaw-cli-load-failed"
-              openclaw --version 2>&1 | head -n 6
-              exit 1
-            fi
-            echo "openclaw-cli-load-ok"
-            exit 0
-            """.trimIndent(),
-            onOutput = {
-                Log.d(TAG, "[openclaw-cli-check] $it")
-                onProgress(it)
-            },
-        )
-        return code == 0
-    }
-
-    private fun ensureOpenClawRuntimeReady(onProgress: (String) -> Unit): Boolean {
-        if (!isOpenClawInstalled()) return false
-        val paths = BootstrapInstaller.getPaths(context)
-        val npmCli = "${paths.prefixDir}/lib/node_modules/npm/bin/npm-cli.js"
-
-        for (attempt in 1..3) {
-            onProgress("Verifying OpenClaw native runtime (${attempt}/3)…")
-            val nativeOk = ensureOpenClawNativeBinding(onProgress)
-            val cliOk = if (nativeOk) verifyOpenClawCliLoad(onProgress) else false
-            if (nativeOk && cliOk) {
-                return true
-            }
-
-            onProgress("OpenClaw runtime repair needed (${attempt}/3)…")
-            val reinstallCode = runInPrefix(
-                "node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-                onOutput = { onProgress(it) },
-            )
-            if (reinstallCode != 0) {
-                Log.w(TAG, "OpenClaw reinstall failed during runtime repair attempt=$attempt code=$reinstallCode")
-            }
-
-            patchOpenClawPaths()
-            patchGatewayForAndroid()
-            Thread.sleep((260L * attempt).coerceAtMost(1200L))
-        }
-
-        Log.e(TAG, "OpenClaw runtime failed strict readiness checks after retries")
-        return false
     }
 
     /**
@@ -1530,9 +1374,8 @@ H3
         val paths = BootstrapInstaller.getPaths(context)
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
         ensureOpenClawGatewayHistoryByteCap()
-        if (!ensureOpenClawRuntimeReady { Log.d(TAG, "[openclaw-runtime] $it") }) {
-            Log.e(TAG, "OpenClaw runtime is not ready; refusing to start gateway")
-            logOpenClawGatewayDiagnostics("runtime-not-ready")
+        if (!ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }) {
+            Log.e(TAG, "OpenClaw native binding repair failed before gateway startup")
             return false
         }
 

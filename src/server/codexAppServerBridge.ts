@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -9,10 +9,6 @@ const shellPath = prefixBin ? join(prefixBin, 'sh') : '/bin/sh'
 const homeDir = process.env.HOME ?? ''
 const promptInjectionPath = homeDir ? join(homeDir, '.openclaw-android', 'state', 'prompt-injection.json') : ''
 const shizukuStatusPath = homeDir ? join(homeDir, '.openclaw-android', 'capabilities', 'shizuku.json') : ''
-const OPENCLAW_UPLOAD_DIR = homeDir
-  ? join(homeDir, '.openclaw', 'workspace', 'uploads')
-  : join(process.cwd(), '.openclaw', 'workspace', 'uploads')
-const OPENCLAW_UPLOAD_MAX_BYTES = 15_000_000
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -150,16 +146,9 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
     throw new Error(`Invalid OpenClaw gateway method: ${method}`)
   }
 
-  const timeoutMs = (() => {
-    if (normalizedMethod === 'chat.history') return 35_000
-    if (normalizedMethod === 'chat.send') return 25_000
-    if (normalizedMethod === 'agent.wait') return 12_000
-    if (normalizedMethod.startsWith('sessions.')) return 20_000
-    return 12_000
-  })()
   const serializedParams = JSON.stringify(params ?? {})
   const command =
-    `openclaw gateway call ${normalizedMethod} --json --timeout ${timeoutMs} --params ${shellQuote(serializedParams)} 2>&1`
+    `openclaw gateway call ${normalizedMethod} --json --params ${shellQuote(serializedParams)} 2>&1`
 
   const runCommandOnce = () =>
     new Promise<string>((resolve, reject) => {
@@ -202,9 +191,7 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
     const normalized = message.toLowerCase()
     return normalized.includes('gateway closed (1006') ||
       normalized.includes('abnormal closure') ||
-      normalized.includes('connection is not open') ||
-      normalized.includes('request timeout') ||
-      normalized.includes('etimedout')
+      normalized.includes('connection is not open')
   }
 
   let output = ''
@@ -228,62 +215,6 @@ function readPositiveInt(value: string | null, fallback: number): number {
   if (!Number.isFinite(parsed)) return fallback
   const normalized = Math.floor(parsed)
   if (normalized < 1) return fallback
-  return normalized
-}
-
-function sanitizeOpenClawUploadFileName(fileName: string): string {
-  const trimmed = fileName.trim()
-  const base = trimmed.length > 0 ? trimmed : 'attachment.bin'
-  const collapsed = base
-    .replace(/[/\\]/gu, '_')
-    .replace(/[^\p{L}\p{N}._-]/gu, '_')
-    .replace(/_+/gu, '_')
-    .slice(0, 120)
-  return collapsed.length > 0 ? collapsed : 'attachment.bin'
-}
-
-function decodeStrictBase64(value: string): Buffer {
-  const normalized = value.replace(/\s+/gu, '').trim()
-  if (!normalized || normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(normalized)) {
-    throw new Error('Invalid base64 payload')
-  }
-  const decoded = Buffer.from(normalized, 'base64')
-  if (decoded.length < 1) {
-    throw new Error('Empty attachment payload')
-  }
-  return decoded
-}
-
-function normalizeOpenClawAttachments(value: unknown): Array<{
-  type: 'image'
-  mimeType: string
-  fileName?: string
-  content: string
-}> {
-  if (!Array.isArray(value)) return []
-  const normalized: Array<{
-    type: 'image'
-    mimeType: string
-    fileName?: string
-    content: string
-  }> = []
-
-  for (const row of value) {
-    const record = asRecord(row)
-    if (!record) continue
-    const type = normalizeText(record.type)
-    const mimeType = normalizeText(record.mimeType)
-    const content = normalizeText(record.content)
-    const fileName = normalizeText(record.fileName)
-    if (type !== 'image' || !mimeType || !content) continue
-    normalized.push({
-      type: 'image',
-      mimeType,
-      content,
-      fileName: fileName || undefined,
-    })
-  }
-
   return normalized
 }
 
@@ -992,101 +923,18 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const sessionKey = normalizeText(payload?.sessionKey)
         const message = normalizeText(payload?.message)
-        const attachments = normalizeOpenClawAttachments(payload?.attachments)
-        if (!sessionKey || (!message && attachments.length === 0)) {
-          setJson(res, 400, { error: 'Missing sessionKey and message/attachments' })
+        if (!sessionKey || !message) {
+          setJson(res, 400, { error: 'Missing sessionKey or message' })
           return
         }
-        const idempotencyKey = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-        const sendResult = await runOpenClawGatewayCall('chat.send', {
+        const runId = `run_${Date.now().toString(36)}`
+        await runOpenClawGatewayCall('chat.send', {
           sessionKey,
           message,
           deliver: payload?.deliver === true,
-          idempotencyKey,
-          attachments: attachments.length > 0 ? attachments : undefined,
+          idempotencyKey: runId,
         })
-        const sendRecord = asRecord(sendResult)
-        const runId = normalizeText(sendRecord?.runId) || idempotencyKey
-        setJson(res, 200, { ok: sendRecord?.ok !== false, runId })
-        return
-      }
-
-      if (req.method === 'POST' && url.pathname === '/openclaw-api/abort') {
-        const payload = asRecord(await readJsonBody(req))
-        const sessionKey = normalizeText(payload?.sessionKey)
-        const runId = normalizeText(payload?.runId)
-        if (!sessionKey) {
-          setJson(res, 400, { error: 'Missing sessionKey' })
-          return
-        }
-        const result = await runOpenClawGatewayCall('chat.abort', {
-          sessionKey,
-          runId: runId || undefined,
-        })
-        const record = asRecord(result)
-        const runIds = Array.isArray(record?.runIds)
-          ? record.runIds.filter((row) => typeof row === 'string')
-          : []
-        setJson(res, 200, {
-          ok: record?.ok !== false,
-          aborted: record?.aborted === true,
-          runIds,
-        })
-        return
-      }
-
-      if (req.method === 'POST' && url.pathname === '/openclaw-api/run-status') {
-        const payload = asRecord(await readJsonBody(req))
-        const runId = normalizeText(payload?.runId)
-        const timeoutMsRaw = Number(payload?.timeoutMs)
-        const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(0, Math.floor(timeoutMsRaw)) : 0
-        if (!runId) {
-          setJson(res, 400, { error: 'Missing runId' })
-          return
-        }
-        const result = await runOpenClawGatewayCall('agent.wait', {
-          runId,
-          timeoutMs,
-        })
-        const record = asRecord(result)
-        setJson(res, 200, {
-          runId: normalizeText(record?.runId) || runId,
-          status: normalizeText(record?.status) || 'timeout',
-          startedAt: typeof record?.startedAt === 'number' ? record.startedAt : undefined,
-          endedAt: typeof record?.endedAt === 'number' ? record.endedAt : undefined,
-          error: record?.error,
-        })
-        return
-      }
-
-      if (req.method === 'POST' && url.pathname === '/openclaw-api/attachments/upload') {
-        const payload = asRecord(await readJsonBody(req))
-        const fileName = sanitizeOpenClawUploadFileName(normalizeText(payload?.fileName))
-        const mimeType = normalizeText(payload?.mimeType) || 'application/octet-stream'
-        const contentBase64 = normalizeText(payload?.contentBase64)
-        if (!contentBase64) {
-          setJson(res, 400, { error: 'Missing attachment content' })
-          return
-        }
-
-        const decoded = decodeStrictBase64(contentBase64)
-        if (decoded.length > OPENCLAW_UPLOAD_MAX_BYTES) {
-          setJson(res, 400, { error: 'Attachment exceeds size limit (15MB)' })
-          return
-        }
-
-        await mkdir(OPENCLAW_UPLOAD_DIR, { recursive: true })
-        const storedName = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${fileName}`
-        const storedPath = join(OPENCLAW_UPLOAD_DIR, storedName)
-        await writeFile(storedPath, decoded, { mode: 0o600 })
-
-        setJson(res, 200, {
-          ok: true,
-          path: storedPath,
-          fileName,
-          mimeType,
-          sizeBytes: decoded.length,
-        })
+        setJson(res, 200, { ok: true, runId })
         return
       }
 

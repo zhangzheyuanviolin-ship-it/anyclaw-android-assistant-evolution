@@ -1,11 +1,6 @@
 import type {
-  OpenClawAbortRequest,
-  OpenClawAbortResponse,
-  OpenClawImageAttachment,
   OpenClawHistoryRequest,
   OpenClawHistoryResponse,
-  OpenClawRunStatusRequest,
-  OpenClawRunStatusResponse,
   OpenClawSendRequest,
   OpenClawSendResponse,
   OpenClawSessionSummary,
@@ -209,7 +204,6 @@ export async function readOpenClawHistory(request: OpenClawHistoryRequest): Prom
       }),
     },
     'Failed to load OpenClaw history',
-    25_000,
   )
 
   const messages = Array.isArray(payload.messages) ? payload.messages : []
@@ -223,18 +217,13 @@ export async function readOpenClawHistory(request: OpenClawHistoryRequest): Prom
 
 export async function sendOpenClawMessage(request: OpenClawSendRequest): Promise<OpenClawSendResponse> {
   const sessionKey = request.sessionKey.trim()
-  const message = (request.message ?? '').trim()
-  const attachments = Array.isArray(request.attachments)
-    ? request.attachments
-      .map(normalizeImageAttachment)
-      .filter((row): row is OpenClawImageAttachment => row !== null)
-    : []
+  const message = request.message.trim()
 
   if (!sessionKey) {
     throw new Error('OpenClaw send requires session key')
   }
-  if (!message && attachments.length === 0) {
-    throw new Error('OpenClaw send requires message or attachment')
+  if (!message) {
+    throw new Error('OpenClaw send requires message')
   }
 
   const payload = await requestOpenClaw<OpenClawSendResponse>(
@@ -246,119 +235,13 @@ export async function sendOpenClawMessage(request: OpenClawSendRequest): Promise
         sessionKey,
         message,
         deliver: request.deliver === true,
-        attachments: attachments.length > 0 ? attachments : undefined,
       }),
     },
     'Failed to send OpenClaw message',
-    20_000,
   )
 
   return {
     ok: payload?.ok === true,
     runId: readString(payload?.runId),
-  }
-}
-
-export async function abortOpenClawRun(request: OpenClawAbortRequest): Promise<OpenClawAbortResponse> {
-  const sessionKey = request.sessionKey.trim()
-  const runId = (request.runId ?? '').trim()
-  if (!sessionKey) {
-    throw new Error('OpenClaw abort requires session key')
-  }
-
-  const payload = await requestOpenClaw<OpenClawAbortResponse>(
-    '/openclaw-api/abort',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionKey,
-        runId: runId || undefined,
-      }),
-    },
-    'Failed to cancel OpenClaw run',
-    15_000,
-  )
-
-  return {
-    ok: payload?.ok === true,
-    aborted: payload?.aborted === true,
-    runIds: Array.isArray(payload?.runIds)
-      ? payload.runIds.filter((row): row is string => typeof row === 'string')
-      : [],
-  }
-}
-
-export async function getOpenClawRunStatus(request: OpenClawRunStatusRequest): Promise<OpenClawRunStatusResponse> {
-  const runId = request.runId.trim()
-  if (!runId) {
-    throw new Error('OpenClaw run status requires runId')
-  }
-  const timeoutMs = typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)
-    ? Math.max(0, Math.floor(request.timeoutMs))
-    : 0
-  const payload = await requestOpenClaw<OpenClawRunStatusResponse>(
-    '/openclaw-api/run-status',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        runId,
-        timeoutMs,
-      }),
-    },
-    'Failed to read OpenClaw run status',
-    12_000,
-  )
-  return {
-    runId: readString(payload?.runId).trim() || runId,
-    status: readString(payload?.status).trim().toLowerCase() || 'timeout',
-    startedAt: readNumber(payload?.startedAt) || undefined,
-    endedAt: readNumber(payload?.endedAt) || undefined,
-    error: payload?.error,
-  }
-}
-
-function normalizeImageAttachment(value: unknown): OpenClawImageAttachment | null {
-  const row = asRecord(value)
-  if (!row) return null
-  const type = readString(row.type).trim()
-  const mimeType = readString(row.mimeType).trim()
-  const content = readString(row.content).trim()
-  const fileName = readString(row.fileName).trim()
-  if (type !== 'image' || !mimeType || !content) return null
-  return {
-    type: 'image',
-    mimeType,
-    content,
-    fileName: fileName || undefined,
-  }
-}
-
-export async function uploadOpenClawAttachment(payload: {
-  fileName: string
-  mimeType: string
-  contentBase64: string
-}): Promise<{ path: string; fileName: string; sizeBytes: number }> {
-  const response = await requestOpenClaw<{ path?: string; fileName?: string; sizeBytes?: number }>(
-    '/openclaw-api/attachments/upload',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    },
-    'Failed to upload OpenClaw attachment',
-    20_000,
-  )
-
-  const path = readString(response.path).trim()
-  if (!path) {
-    throw new Error('Failed to upload OpenClaw attachment: missing path')
-  }
-
-  return {
-    path,
-    fileName: readString(response.fileName).trim() || payload.fileName,
-    sizeBytes: readNumber(response.sizeBytes),
   }
 }

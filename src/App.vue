@@ -261,20 +261,10 @@
 
               <OpenClawComposer
                 :session-key="openClawSelectedSessionKey"
-                :is-task-running="openClawIsRunInProgress"
-                :is-cancelling-task="isOpenClawCancellingRun"
+                :disabled="isOpenClawSendingMessage"
                 :placeholder="t('openclaw_send_placeholder')"
                 :send-label="t('openclaw_send_button')"
-                :cancel-label="t('openclaw_cancel_button')"
-                :attach-label="t('openclaw_attach_button')"
-                :attach-camera-label="t('openclaw_attach_camera')"
-                :attach-gallery-label="t('openclaw_attach_gallery')"
-                :attach-files-label="t('openclaw_attach_files')"
-                :remove-attachment-label="t('openclaw_attach_remove')"
-                :image-tag-label="t('openclaw_attach_image_tag')"
-                :file-tag-label="t('openclaw_attach_file_tag')"
                 @submit="onSubmitOpenClawMessage"
-                @cancel="onCancelOpenClawRun"
               />
             </div>
           </template>
@@ -342,7 +332,6 @@ import { useDesktopState } from './composables/useDesktopState'
 import { useOpenClawState } from './composables/useOpenClawState'
 import { useUiI18n, type LocalePreference } from './composables/useUiI18n'
 import type { ReasoningEffort, ThreadScrollState, UiServerRequest } from './types/codex'
-import type { OpenClawComposerSubmitPayload } from './types/openclaw'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const { localePreference, setLocalePreference, t } = useUiI18n()
@@ -405,8 +394,6 @@ const {
   isLoadingSessions: isOpenClawLoadingSessions,
   isLoadingMessages: isOpenClawLoadingMessages,
   isSendingMessage: isOpenClawSendingMessage,
-  isCancellingRun: isOpenClawCancellingRun,
-  isRunInProgress: openClawIsRunInProgress,
   liveOverlay: openClawLiveOverlay,
   lastError: openClawLastError,
   initialize: initializeOpenClaw,
@@ -415,7 +402,6 @@ const {
   refreshHistory: refreshOpenClawHistory,
   selectSession: selectOpenClawSession,
   sendMessage: sendOpenClawMessage,
-  cancelCurrentRun: cancelCurrentOpenClawRun,
   createSession: createOpenClawSession,
   resetCurrentSession: resetCurrentOpenClawSession,
   updateSessionTitle: updateOpenClawSessionTitle,
@@ -787,12 +773,8 @@ function onRenameOpenClawSession(sessionKey: string): void {
   })()
 }
 
-function onSubmitOpenClawMessage(payload: OpenClawComposerSubmitPayload): void {
-  void sendOpenClawMessage(payload)
-}
-
-function onCancelOpenClawRun(): void {
-  void cancelCurrentOpenClawRun()
+function onSubmitOpenClawMessage(text: string): void {
+  void sendOpenClawMessage(text)
 }
 
 function onIgnoreThreadScrollState(): void {
