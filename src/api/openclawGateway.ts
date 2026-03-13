@@ -20,55 +20,97 @@ function readNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
+function isTransientGatewayFailure(message: string): boolean {
+  const normalized = message.trim().toLowerCase()
+  if (!normalized) return false
+  return (
+    normalized.includes('gateway closed (1006') ||
+    normalized.includes('abnormal closure') ||
+    normalized.includes('connection is not open') ||
+    normalized.includes('request timeout') ||
+    normalized.includes('etimedout')
+  )
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function requestOpenClaw<T>(
   path: string,
   options: RequestInit = {},
   fallbackMessage = 'OpenClaw request failed',
   timeoutMs = 9000,
 ): Promise<T> {
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
-  const timerHost = typeof globalThis !== 'undefined' ? globalThis : null
-  const timeout =
-    controller && timeoutMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
-      ? timerHost.setTimeout(() => {
-          controller.abort()
-        }, timeoutMs)
-      : null
+  const executeOnce = async (): Promise<T> => {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const timerHost = typeof globalThis !== 'undefined' ? globalThis : null
+    const timeout =
+      controller && timeoutMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
+        ? timerHost.setTimeout(() => {
+            controller.abort()
+          }, timeoutMs)
+        : null
 
-  let response: Response
-  try {
-    response = await fetch(path, {
-      ...options,
-      signal: controller?.signal,
-    })
-  } catch (error) {
+    let response: Response
+    try {
+      response = await fetch(path, {
+        ...options,
+        signal: controller?.signal,
+      })
+    } catch (error) {
+      if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
+        timerHost.clearTimeout(timeout)
+      }
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new Error(`${fallbackMessage}: request timeout`)
+      }
+      throw error
+    }
+
     if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
       timerHost.clearTimeout(timeout)
     }
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`${fallbackMessage}: request timeout`)
+
+    let payload: unknown = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
     }
-    throw error
+
+    if (!response.ok) {
+      const record = asRecord(payload)
+      const error = readString(record?.error)
+      throw new Error(error || `${fallbackMessage} (HTTP ${response.status})`)
+    }
+
+    return payload as T
   }
 
-  if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
-    timerHost.clearTimeout(timeout)
+  const retryDelaysMs = [0, 250, 700]
+  let lastError: unknown = null
+
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    if (retryDelaysMs[attempt] > 0) {
+      await sleep(retryDelaysMs[attempt])
+    }
+    try {
+      return await executeOnce()
+    } catch (error) {
+      lastError = error
+      const message = error instanceof Error ? error.message : ''
+      const retryable = isTransientGatewayFailure(message)
+      if (!retryable || attempt >= retryDelaysMs.length - 1) {
+        throw error
+      }
+    }
   }
 
-  let payload: unknown = null
-  try {
-    payload = await response.json()
-  } catch {
-    payload = null
+  if (lastError instanceof Error) {
+    throw lastError
   }
-
-  if (!response.ok) {
-    const record = asRecord(payload)
-    const error = readString(record?.error)
-    throw new Error(error || `${fallbackMessage} (HTTP ${response.status})`)
-  }
-
-  return payload as T
+  throw new Error(fallbackMessage)
 }
 
 function normalizeSessionRow(value: unknown): OpenClawSessionSummary | null {

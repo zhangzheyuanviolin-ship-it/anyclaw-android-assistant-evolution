@@ -690,11 +690,22 @@ function formatOpenClawTime(updatedAtMs: number): string {
   return date.toLocaleString()
 }
 
+async function ensureOpenClawRouteWarmReady(): Promise<void> {
+  if (openClawHealthOk.value) return
+  await refreshOpenClawHealth()
+  if (openClawHealthOk.value) return
+  await new Promise((resolve) => setTimeout(resolve, 320))
+  await refreshOpenClawHealth()
+}
+
 function onOpenOpenClawChat(): void {
-  const query = openClawSelectedSessionKey.value
-    ? { session: openClawSelectedSessionKey.value }
-    : undefined
-  void router.push({ name: 'openclaw-chat', query })
+  void (async () => {
+    await ensureOpenClawRouteWarmReady()
+    const query = openClawSelectedSessionKey.value
+      ? { session: openClawSelectedSessionKey.value }
+      : undefined
+    await router.push({ name: 'openclaw-chat', query })
+  })()
 }
 
 function onBackToCodexRoute(): void {

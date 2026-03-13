@@ -75,7 +75,8 @@ class MainActivity : AppCompatActivity() {
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
-            gatewayStatusHandler.postDelayed(this, 7000)
+            val nextDelayMs = if (gatewayConnected) 7000L else 1800L
+            gatewayStatusHandler.postDelayed(this, nextDelayMs)
         }
     }
 
