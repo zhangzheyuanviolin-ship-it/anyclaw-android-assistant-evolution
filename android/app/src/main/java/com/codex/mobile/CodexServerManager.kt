@@ -1878,10 +1878,6 @@ H3
 
     fun isOpenClawGatewayResponsive(): Boolean {
         if (!isOpenClawInstalled()) return false
-        // Quick fail-fast path: avoid expensive health RPC when port is not up yet.
-        if (runInPrefix("( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | grep -q ':$OPENCLAW_GATEWAY_PORT '") != 0) {
-            return false
-        }
         val code = runInPrefix(
             "openclaw gateway call health --json --params '{}' >/dev/null 2>&1",
         )

@@ -609,10 +609,7 @@ class MainActivity : AppCompatActivity() {
         }
         checkpoint("core.server", "ok", "server-ready")
 
-        // Step 7: Start enhancement asynchronously before showing UI to shave initial gateway delay.
-        startEnhancedSetupFlow()
-
-        // Step 8: Show web UI immediately (baseline available even if enhancement fails).
+        // Step 7: Show web UI immediately (baseline available even if enhancement fails).
         runOnUiThread {
             showLoading(false)
             webView.visibility = View.VISIBLE
@@ -628,6 +625,9 @@ class MainActivity : AppCompatActivity() {
             webView.loadUrl(consumeLaunchUrlOrDefault())
         }
         checkpoint("core.ui", "ok", "ui-ready")
+
+        // Step 8: OpenClaw and package enhancements are always async and non-blocking.
+        startEnhancedSetupFlow()
     }
 
     private fun startOpenClawServicesAsync() {
@@ -652,19 +652,12 @@ class MainActivity : AppCompatActivity() {
                 checkpoint("enhanced.plan", "ok", if (heavyNeeded) "heavy-needed" else "heavy-skip-frozen-state")
                 if (openClawPresentAtStart) {
                     // Existing installs should keep gateway availability fast.
-                    gatewayOk = startOpenClawServicesFastPath()
+                    gatewayOk = startOpenClawServicesSync()
                     checkpoint(
                         "enhanced.gateway.fastpath",
                         if (gatewayOk) "ok" else "failed",
                         if (gatewayOk) "gateway-ready" else "gateway-fastpath-failed",
                     )
-                    if (gatewayOk) {
-                        runOnUiThread {
-                            if (webView.visibility == View.VISIBLE) {
-                                refreshGatewayStatusAsync(announce = false)
-                            }
-                        }
-                    }
                 }
 
                 // Keep local recovery scripts/wrappers present on every boot.
@@ -755,28 +748,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }.start()
-    }
-
-    private fun startOpenClawServicesFastPath(): Boolean {
-        if (!serverManager.isOpenClawInstalled()) return false
-        return try {
-            if (serverManager.isOpenClawGatewayResponsive()) {
-                serverManager.startOpenClawControlUiServer()
-                return true
-            }
-
-            serverManager.configureOpenClawAuth()
-            var gatewayOk = serverManager.startOpenClawGateway()
-            if (!gatewayOk) {
-                Thread.sleep(650)
-                gatewayOk = serverManager.startOpenClawGateway()
-            }
-            serverManager.startOpenClawControlUiServer()
-            gatewayOk
-        } catch (error: Exception) {
-            Log.w(TAG, "OpenClaw fast path failed: ${error.message}")
-            false
-        }
     }
 
     private fun startOpenClawServicesSync(): Boolean {
