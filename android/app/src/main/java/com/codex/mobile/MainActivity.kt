@@ -609,7 +609,11 @@ class MainActivity : AppCompatActivity() {
         }
         checkpoint("core.server", "ok", "server-ready")
 
-        // Step 7: Show web UI immediately (baseline available even if enhancement fails).
+        // Step 7: Start enhancement before showing UI so gateway connect can overlap
+        // with page initialization and reduce visible "not connected" time.
+        startEnhancedSetupFlow()
+
+        // Step 8: Show web UI immediately (baseline available even if enhancement fails).
         runOnUiThread {
             showLoading(false)
             webView.visibility = View.VISIBLE
@@ -625,9 +629,6 @@ class MainActivity : AppCompatActivity() {
             webView.loadUrl(consumeLaunchUrlOrDefault())
         }
         checkpoint("core.ui", "ok", "ui-ready")
-
-        // Step 8: OpenClaw and package enhancements are always async and non-blocking.
-        startEnhancedSetupFlow()
     }
 
     private fun startOpenClawServicesAsync() {
@@ -651,8 +652,8 @@ class MainActivity : AppCompatActivity() {
                 val heavyNeeded = !serverManager.canSkipHeavyEnhancedBootstrap()
                 checkpoint("enhanced.plan", "ok", if (heavyNeeded) "heavy-needed" else "heavy-skip-frozen-state")
                 if (openClawPresentAtStart) {
-                    // Existing installs should keep gateway availability fast.
-                    gatewayOk = startOpenClawServicesSync()
+                    // Existing installs: quick connect first, heavy checks only on fallback.
+                    gatewayOk = startOpenClawServicesQuickPass()
                     checkpoint(
                         "enhanced.gateway.fastpath",
                         if (gatewayOk) "ok" else "failed",
@@ -748,6 +749,22 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    private fun startOpenClawServicesQuickPass(): Boolean {
+        if (!serverManager.isOpenClawInstalled()) return false
+        return try {
+            updateStatus("Configuring OpenClaw…")
+            serverManager.configureOpenClawAuth()
+            updateStatus("Starting OpenClaw gateway…")
+            val gatewayOk = serverManager.startOpenClawGateway()
+            updateStatus("Starting OpenClaw Control UI…")
+            serverManager.startOpenClawControlUiServer()
+            gatewayOk
+        } catch (error: Exception) {
+            Log.w(TAG, "OpenClaw quick pass failed: ${error.message}")
+            false
+        }
     }
 
     private fun startOpenClawServicesSync(): Boolean {
