@@ -8,6 +8,7 @@ import java.io.InputStreamReader
 import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import org.json.JSONArray
@@ -40,6 +41,9 @@ class CodexServerManager(private val context: Context) {
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MAX = 400
         private const val OPENCLAW_CHAT_HISTORY_MAX_BYTES = 1 * 1024 * 1024
+        private const val LOCAL_RUNTIME_SCHEMA_VERSION = 1
+        private const val LOCAL_RUNTIME_ASSET_DIR = "runtime"
+        private const val LOCAL_RUNTIME_MANIFEST_ASSET = "$LOCAL_RUNTIME_ASSET_DIR/manifest.json"
     }
 
     private var serverProcess: Process? = null
@@ -310,6 +314,88 @@ class CodexServerManager(private val context: Context) {
             paths.prefixDir,
             "lib/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/codex/codex",
         ).exists()
+    }
+
+    private data class LocalRuntimeManifest(
+        val schemaVersion: Int,
+        val bundleVersion: String,
+        val archiveName: String,
+        val archiveSha256: String,
+        val parts: List<String>,
+    )
+
+    fun hasBundledRuntimeAssets(): Boolean {
+        return try {
+            val entries = context.assets.list(LOCAL_RUNTIME_ASSET_DIR) ?: emptyArray()
+            entries.isNotEmpty() && entries.contains("manifest.json")
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun installBundledRuntime(onProgress: (String) -> Unit): Boolean {
+        if (!hasBundledRuntimeAssets()) return false
+        val manifest = loadLocalRuntimeManifest() ?: return false
+        if (isBundledRuntimeAlreadyApplied(manifest)) {
+            onProgress("Using local runtime bundle")
+            return true
+        }
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val runtimeDir = File(paths.filesDir, ".openclaw-android/runtime-bundle")
+        runtimeDir.mkdirs()
+        val archiveFile = File(runtimeDir, manifest.archiveName)
+
+        onProgress("Assembling local runtime package…")
+        if (archiveFile.exists()) {
+            archiveFile.delete()
+        }
+        runtimeDir.mkdirs()
+
+        val out = archiveFile.outputStream().buffered()
+        out.use { output ->
+            for (part in manifest.parts) {
+                val assetPath = "$LOCAL_RUNTIME_ASSET_DIR/$part"
+                onProgress("Loading local part: $part")
+                context.assets.open(assetPath).use { input ->
+                    input.copyTo(output)
+                }
+            }
+        }
+
+        val actualSha = sha256Hex(archiveFile)
+        if (!actualSha.equals(manifest.archiveSha256, ignoreCase = true)) {
+            throw RuntimeException("Local runtime checksum mismatch")
+        }
+
+        onProgress("Installing local runtime…")
+        val extractCode = runInPrefix(
+            "cd ${paths.filesDir} && tar -xzf ${archiveFile.absolutePath} 2>&1",
+            onOutput = { onProgress(it) },
+        )
+        if (extractCode != 0) {
+            throw RuntimeException("Failed to extract local runtime bundle")
+        }
+
+        runInPrefix(
+            """
+            chmod 700 ${paths.prefixDir}/bin/node 2>/dev/null || true
+            chmod 700 ${paths.prefixDir}/bin/codex 2>/dev/null || true
+            chmod 700 ${paths.prefixDir}/bin/openclaw 2>/dev/null || true
+            chmod 700 ${paths.homeDir}/.openclaw-android/native/davey/davey.android-arm64.node 2>/dev/null || true
+            """.trimIndent(),
+        )
+
+        writeBundledRuntimeState(manifest, actualSha)
+        return isNodeInstalled() && isCodexInstalled() && isPlatformBinaryInstalled() && isOpenClawInstalled()
+    }
+
+    fun primeEnhancedStateFromBundledRuntime() {
+        if (!isOpenClawInstalled()) return
+        markEnhancedBootstrapReady(
+            gatewayReady = false,
+            detail = "offline-bundled-runtime",
+        )
     }
 
     // ── Installation ────────────────────────────────────────────────────────
@@ -3728,6 +3814,82 @@ EOF
             Log.w(TAG, "Failed writing asset $assetPath to ${target.absolutePath}: ${error.message}")
             false
         }
+    }
+
+    private fun loadLocalRuntimeManifest(): LocalRuntimeManifest? {
+        return try {
+            val text = context.assets.open(LOCAL_RUNTIME_MANIFEST_ASSET).bufferedReader().use { it.readText() }
+            val root = JSONObject(JSONTokener(text))
+            val schemaVersion = root.optInt("schemaVersion", 0)
+            val bundleVersion = root.optString("bundleVersion", "").trim()
+            val archiveName = root.optString("archiveName", "").trim()
+            val archiveSha256 = root.optString("archiveSha256", "").trim()
+            val partArr = root.optJSONArray("parts") ?: JSONArray()
+            val parts = mutableListOf<String>()
+            for (i in 0 until partArr.length()) {
+                val part = partArr.optString(i, "").trim()
+                if (part.isNotEmpty()) parts.add(part)
+            }
+            if (schemaVersion != LOCAL_RUNTIME_SCHEMA_VERSION) return null
+            if (bundleVersion.isEmpty() || archiveName.isEmpty() || archiveSha256.isEmpty() || parts.isEmpty()) return null
+            LocalRuntimeManifest(
+                schemaVersion = schemaVersion,
+                bundleVersion = bundleVersion,
+                archiveName = archiveName,
+                archiveSha256 = archiveSha256,
+                parts = parts,
+            )
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to load local runtime manifest: ${error.message}")
+            null
+        }
+    }
+
+    private fun isBundledRuntimeAlreadyApplied(manifest: LocalRuntimeManifest): Boolean {
+        if (!isNodeInstalled() || !isCodexInstalled() || !isPlatformBinaryInstalled() || !isOpenClawInstalled()) return false
+        val paths = BootstrapInstaller.getPaths(context)
+        val stateFile = File(ensureRuntimeStateDir(paths), "local-runtime.json")
+        if (!stateFile.exists()) return false
+        return try {
+            val root = JSONObject(JSONTokener(stateFile.readText()))
+            val schemaOk = root.optInt("schemaVersion", 0) == manifest.schemaVersion
+            val versionOk = root.optString("bundleVersion", "") == manifest.bundleVersion
+            val shaOk = root.optString("archiveSha256", "").equals(manifest.archiveSha256, ignoreCase = true)
+            schemaOk && versionOk && shaOk
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun writeBundledRuntimeState(manifest: LocalRuntimeManifest, archiveSha256: String) {
+        val paths = BootstrapInstaller.getPaths(context)
+        val stateFile = File(ensureRuntimeStateDir(paths), "local-runtime.json")
+        val payload = JSONObject().apply {
+            put("schemaVersion", manifest.schemaVersion)
+            put("bundleVersion", manifest.bundleVersion)
+            put("archiveName", manifest.archiveName)
+            put("archiveSha256", archiveSha256.lowercase())
+            put("installedAt", java.time.Instant.now().toString())
+        }
+        stateFile.writeText(payload.toString(2))
+    }
+
+    private fun sha256Hex(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buf = ByteArray(1024 * 1024)
+            var read = input.read(buf)
+            while (read > 0) {
+                digest.update(buf, 0, read)
+                read = input.read(buf)
+            }
+        }
+        val bytes = digest.digest()
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            sb.append(String.format("%02x", b))
+        }
+        return sb.toString()
     }
 
     private fun buildEnvironment(

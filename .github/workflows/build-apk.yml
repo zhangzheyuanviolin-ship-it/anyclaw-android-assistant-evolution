@@ -33,6 +33,11 @@ jobs:
       - name: Bundle server into APK assets
         run: bash android/scripts/build-server-bundle.sh
 
+      - name: Verify local runtime bundle assets
+        run: |
+          test -f android/app/src/main/assets/runtime/manifest.json
+          ls -lh android/app/src/main/assets/runtime | head -n 40
+
       - name: Download Termux bootstrap
         run: bash android/scripts/download-bootstrap.sh
 

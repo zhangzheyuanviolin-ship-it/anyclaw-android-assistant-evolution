@@ -531,44 +531,64 @@ class MainActivity : AppCompatActivity() {
         updateStatus("Environment ready")
         checkpoint("core.bootstrap", "ok", "bootstrap-ready")
 
-        // Step 2: Core runtime only (must stay small and deterministic)
-        if (!serverManager.isNodeInstalled()) {
-            updateStatus("Installing Node.js (first run)…", "This may take a few minutes")
-            val nodeOk = serverManager.installNode { msg -> updateDetail(msg) }
-            if (!nodeOk) {
-                throw RuntimeException("Failed to install Node.js")
+        // Step 2: Prefer fully local runtime bundle. Fallback to network chain only if missing.
+        val localRuntimeReady =
+            if (serverManager.hasBundledRuntimeAssets()) {
+                updateStatus("Installing local runtime…", "No network download required")
+                serverManager.installBundledRuntime { msg -> updateDetail(msg) }
+            } else {
+                false
             }
-        }
-        updateStatus("Node.js ready")
-        checkpoint("core.node", "ok", "node-ready")
 
-        // Step 3: Install Codex CLI
-        if (!serverManager.isCodexInstalled()) {
-            updateStatus("Installing Codex CLI…", "This may take a few minutes")
-            val codexOk = serverManager.installCodex { msg -> updateDetail(msg) }
-            if (!codexOk) {
-                throw RuntimeException("Failed to install Codex")
+        if (localRuntimeReady) {
+            updateStatus("Local runtime ready")
+            checkpoint("core.runtime.local", "ok", "offline-runtime-ready")
+            serverManager.primeEnhancedStateFromBundledRuntime()
+        } else {
+            // Step 2 fallback: Core runtime online install (legacy path)
+            if (!serverManager.isNodeInstalled()) {
+                updateStatus("Installing Node.js (first run)…", "This may take a few minutes")
+                val nodeOk = serverManager.installNode { msg -> updateDetail(msg) }
+                if (!nodeOk) {
+                    throw RuntimeException("Failed to install Node.js")
+                }
             }
-        }
-        checkpoint("core.codex", "ok", "codex-ready")
+            updateStatus("Node.js ready")
+            checkpoint("core.node", "ok", "node-ready")
 
-        // Ensure codex wrapper script exists
+            // Step 3 fallback: Install Codex CLI
+            if (!serverManager.isCodexInstalled()) {
+                updateStatus("Installing Codex CLI…", "This may take a few minutes")
+                val codexOk = serverManager.installCodex { msg -> updateDetail(msg) }
+                if (!codexOk) {
+                    throw RuntimeException("Failed to install Codex")
+                }
+            }
+            checkpoint("core.codex", "ok", "codex-ready")
+
+            // Step 3b fallback: Install native platform binary
+            if (!serverManager.isPlatformBinaryInstalled()) {
+                updateStatus("Installing Codex platform binary…")
+                val binOk = serverManager.installPlatformBinary { msg -> updateDetail(msg) }
+                if (!binOk) {
+                    throw RuntimeException("Failed to install Codex platform binary")
+                }
+            }
+            updateStatus("Codex ready")
+            checkpoint("core.platform", "ok", "platform-ready")
+        }
+
+        // Ensure codex wrapper script exists for both local and fallback paths.
         serverManager.ensureCodexWrapperScript()
 
         // Step 3a: Extract web UI from APK assets (every launch)
         updateStatus("Updating web UI…")
         serverManager.installServerBundle { msg -> updateDetail(msg) }
-
-        // Step 3b: Install native platform binary
-        if (!serverManager.isPlatformBinaryInstalled()) {
-            updateStatus("Installing Codex platform binary…")
-            val binOk = serverManager.installPlatformBinary { msg -> updateDetail(msg) }
-            if (!binOk) {
-                throw RuntimeException("Failed to install Codex platform binary")
-            }
+        if (localRuntimeReady) {
+            checkpoint("core.node", "ok", "bundled-runtime")
+            checkpoint("core.codex", "ok", "bundled-runtime")
+            checkpoint("core.platform", "ok", "bundled-runtime")
         }
-        updateStatus("Codex ready")
-        checkpoint("core.platform", "ok", "platform-ready")
 
         // Step 3c: Write full-access config, create default workspace, and bridge shared storage paths
         serverManager.ensureFullAccessConfig()
