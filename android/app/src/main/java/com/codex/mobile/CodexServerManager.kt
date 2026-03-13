@@ -400,7 +400,9 @@ WEOF
         // All packages needed for native compilation (koffi) in one batch.
         // Split into groups to avoid apt-get download failures on missing pkgs.
         val pkgGroups = listOf(
-            "git make cmake clang binutils binutils-bin lld",
+            // Keep git isolated so a renamed/missing package cannot block git download.
+            "git",
+            "make cmake clang binutils lld",
             "libllvm libedit libffi ndk-sysroot ndk-multilib libcompiler-rt",
             "libarchive libxml2 liblzma libcurl libuv libnghttp2 libnghttp3",
             "rhash jsoncpp",
@@ -439,6 +441,10 @@ WEOF
 
         onProgress("Repairing toolchain links…")
         ensureOpenClawToolchain(onProgress)
+        onProgress("Verifying git availability…")
+        if (!ensureGitAvailableForOpenClaw(onProgress)) {
+            onProgress("WARNING: git is still unavailable after targeted repair")
+        }
 
         onProgress("Running toolchain preflight…")
         val preflightOk = runOpenClawToolchainPreflight(onProgress)
@@ -463,20 +469,60 @@ WEOF
         return true
     }
 
+    /**
+     * Ensure git exists in PREFIX/bin. npm may spawn git for transitive
+     * dependency resolution in some environments.
+     */
+    private fun ensureGitAvailableForOpenClaw(onProgress: (String) -> Unit): Boolean {
+        if (runInPrefix("command -v git >/dev/null 2>&1") == 0) return true
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        onProgress("git not found, attempting targeted git repair…")
+
+        val cmd = """
+            set +e
+            cd "$prefix/tmp" || exit 1
+            apt-get update --allow-insecure-repositories 2>&1 || true
+            rm -rf _git_stage git*.deb 2>/dev/null
+            apt-get download --allow-unauthenticated git 2>&1 || true
+            mkdir -p _git_stage
+            for deb in git*.deb; do
+              [ -f "${'$'}deb" ] && dpkg-deb -x "${'$'}deb" _git_stage/ 2>&1 || true
+            done
+            if [ -d "_git_stage/data/data/com.termux/files/usr" ]; then
+              cp -a _git_stage/data/data/com.termux/files/usr/* "$prefix/" 2>&1 || true
+            elif [ -d "_git_stage/usr" ]; then
+              cp -a _git_stage/usr/* "$prefix/" 2>&1 || true
+            fi
+            rm -rf _git_stage git*.deb 2>/dev/null
+            command -v git >/dev/null 2>&1
+        """.trimIndent()
+
+        val code = runInPrefix(cmd, onOutput = { onProgress(it) })
+        return code == 0
+    }
+
     private fun ensureOpenClawToolchain(onProgress: (String) -> Unit) {
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
         val cmd = """
             set -e
 
-            if [ ! -x "$prefix/libexec/binutils/ar" ] || [ ! -x "$prefix/libexec/binutils/ranlib" ]; then
-              echo "binutils missing, attempting targeted repair..."
+            MISSING_TOOLS=""
+            for tool in git make cmake clang; do
+              if ! command -v "${'$'}tool" >/dev/null 2>&1; then
+                MISSING_TOOLS="${'$'}MISSING_TOOLS ${'$'}tool"
+              fi
+            done
+            if [ ! -x "$prefix/libexec/binutils/ar" ] || [ ! -x "$prefix/libexec/binutils/ranlib" ] || [ -n "${'$'}MISSING_TOOLS" ]; then
+              echo "toolchain components missing:${'$'}MISSING_TOOLS; attempting targeted repair..."
               cd "$prefix/tmp" || exit 1
               apt-get update --allow-insecure-repositories 2>&1 || true
-              apt-get download --allow-unauthenticated binutils binutils-bin 2>&1 || true
+              apt-get download --allow-unauthenticated binutils lld git make cmake clang 2>&1 || true
               rm -rf _binutils_stage
               mkdir -p _binutils_stage
-              for deb in binutils*.deb binutils-bin*.deb; do
+              for deb in binutils*.deb lld*.deb git*.deb make*.deb cmake*.deb clang*.deb; do
                 [ -f "${'$'}deb" ] && dpkg-deb -x "${'$'}deb" _binutils_stage/ 2>&1 || true
               done
               if [ -d "_binutils_stage/data/data/com.termux/files/usr" ]; then
@@ -705,15 +751,26 @@ H3
 
         // Configure git to use HTTPS instead of SSH (ssh not available in prefix)
         configureGitHttps(paths)
+        ensureGitAvailableForOpenClaw(onProgress)
 
         // Clean npm cache to avoid stale git clones
         runInPrefix("node $npmCli cache clean --force 2>&1") { Log.d(TAG, "[npm-cache] $it") }
 
         onProgress("Installing OpenClaw (npm)…")
-        val installCode = runInPrefix(
+        var installCode = runInPrefix(
             "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
             onOutput = { onProgress(it) },
         )
+        if (installCode != 0) {
+            onProgress("OpenClaw npm install failed, attempting one-time recovery…")
+            ensureOpenClawToolchain(onProgress)
+            ensureGitAvailableForOpenClaw(onProgress)
+            fixGitCoreShebangs(prefix)
+            installCode = runInPrefix(
+                "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+                onOutput = { onProgress(it) },
+            )
+        }
         if (installCode != 0) {
             Log.e(TAG, "npm install openclaw failed with code $installCode")
             return false
@@ -755,12 +812,23 @@ H3
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+        ensureGitAvailableForOpenClaw(onProgress)
 
         onProgress("Aligning OpenClaw to stable version $OPENCLAW_TARGET_VERSION…")
-        val code = runInPrefix(
+        var code = runInPrefix(
             "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
             onOutput = { onProgress(it) },
         )
+        if (code != 0) {
+            onProgress("Version alignment failed, repairing toolchain and retrying once…")
+            ensureOpenClawToolchain(onProgress)
+            ensureGitAvailableForOpenClaw(onProgress)
+            fixGitCoreShebangs(prefix)
+            code = runInPrefix(
+                "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+                onOutput = { onProgress(it) },
+            )
+        }
         if (code != 0) {
             Log.e(TAG, "OpenClaw version alignment failed with code $code")
             return false
