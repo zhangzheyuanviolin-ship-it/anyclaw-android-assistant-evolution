@@ -648,6 +648,8 @@ class MainActivity : AppCompatActivity() {
             try {
                 var gatewayOk = false
                 val openClawPresentAtStart = serverManager.isOpenClawInstalled()
+                val heavyNeeded = !serverManager.canSkipHeavyEnhancedBootstrap()
+                checkpoint("enhanced.plan", "ok", if (heavyNeeded) "heavy-needed" else "heavy-skip-frozen-state")
                 if (openClawPresentAtStart) {
                     // Existing installs should keep gateway availability fast.
                     gatewayOk = startOpenClawServicesSync()
@@ -658,30 +660,37 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
 
-                // Keep package-manager recovery assets present on every boot.
-                serverManager.ensureAptTrustChain()
+                // Keep local recovery scripts/wrappers present on every boot.
                 serverManager.ensurePackageRecoveryScripts()
                 serverManager.ensurePackageManagerWrappers()
                 checkpoint("enhanced.pkg", "ok", "recovery-assets-ready")
 
-                if (!serverManager.isProotInstalled()) {
-                    updateStatus("Installing proot…", "Needed for package management")
-                    val prootOk = serverManager.installProot { msg -> updateDetail(msg) }
-                    if (!prootOk) {
-                        throw RuntimeException("Failed to install proot")
-                    }
-                }
-                checkpoint("enhanced.proot", "ok", "proot-ready")
+                if (heavyNeeded) {
+                    // Network-sensitive chain is only executed when frozen state is stale/missing.
+                    serverManager.ensureAptTrustChain()
+                    checkpoint("enhanced.apt", "ok", "apt-trust-chain-ready")
 
-                if (!serverManager.isPythonInstalled()) {
-                    updateStatus("Installing Python…")
-                    val pyOk = serverManager.installPython { msg -> updateDetail(msg) }
-                    if (!pyOk) {
-                        Log.w(TAG, "Python install failed — continuing without it")
+                    if (!serverManager.isProotInstalled()) {
+                        updateStatus("Installing proot…", "Needed for package management")
+                        val prootOk = serverManager.installProot { msg -> updateDetail(msg) }
+                        if (!prootOk) {
+                            throw RuntimeException("Failed to install proot")
+                        }
                     }
+                    checkpoint("enhanced.proot", "ok", "proot-ready")
+
+                    if (!serverManager.isPythonInstalled()) {
+                        updateStatus("Installing Python…")
+                        val pyOk = serverManager.installPython { msg -> updateDetail(msg) }
+                        if (!pyOk) {
+                            Log.w(TAG, "Python install failed — continuing without it")
+                        }
+                    }
+                    serverManager.ensureBionicCompat()
+                    checkpoint("enhanced.runtime", "ok", "python-bionic-ready")
+                } else {
+                    checkpoint("enhanced.runtime", "ok", "reuse-frozen-enhanced-state")
                 }
-                serverManager.ensureBionicCompat()
-                checkpoint("enhanced.runtime", "ok", "python-bionic-ready")
 
                 if (!serverManager.isOpenClawInstalled()) {
                     updateStatus("Installing build dependencies…")
@@ -702,16 +711,18 @@ class MainActivity : AppCompatActivity() {
                 if (!serverManager.isOpenClawInstalled()) {
                     checkpoint("enhanced.gateway", "failed", "openclaw-not-installed")
                 } else {
-                    updateStatus("Checking OpenClaw version…")
-                    val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
-                    if (!versionOk) {
-                        Log.w(TAG, "OpenClaw version alignment failed — continuing with current install")
+                    if (heavyNeeded) {
+                        updateStatus("Checking OpenClaw version…")
+                        val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
+                        if (!versionOk) {
+                            Log.w(TAG, "OpenClaw version alignment failed — continuing with current install")
+                        }
+                        checkpoint(
+                            "enhanced.openclaw.version",
+                            if (versionOk) "ok" else "warn",
+                            if (versionOk) "version-aligned" else "version-align-failed",
+                        )
                     }
-                    checkpoint(
-                        "enhanced.openclaw.version",
-                        if (versionOk) "ok" else "warn",
-                        if (versionOk) "version-aligned" else "version-align-failed",
-                    )
 
                     if (!gatewayOk) {
                         gatewayOk = startOpenClawServicesSync()
@@ -720,6 +731,10 @@ class MainActivity : AppCompatActivity() {
                         "enhanced.gateway",
                         if (gatewayOk) "ok" else "failed",
                         if (gatewayOk) "gateway-ready" else "gateway-start-failed",
+                    )
+                    serverManager.markEnhancedBootstrapReady(
+                        gatewayReady = gatewayOk,
+                        detail = if (heavyNeeded) "heavy-run" else "frozen-reuse",
                     )
                 }
             } catch (error: Exception) {

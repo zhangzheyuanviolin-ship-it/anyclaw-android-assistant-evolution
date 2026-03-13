@@ -218,6 +218,69 @@ class CodexServerManager(private val context: Context) {
         )
     }
 
+    fun canSkipHeavyEnhancedBootstrap(): Boolean {
+        if (!isOpenClawInstalled()) return false
+        if (!isNodeInstalled() || !isCodexInstalled() || !isPlatformBinaryInstalled()) return false
+        val paths = BootstrapInstaller.getPaths(context)
+        val stateFile = File(ensureRuntimeStateDir(paths), "enhanced-bootstrap.json")
+        if (!stateFile.exists()) return false
+
+        return try {
+            val root = JSONObject(JSONTokener(stateFile.readText()))
+            if (root.optInt("schemaVersion", 0) != 1) return false
+            if (!root.optBoolean("heavyReady", false)) return false
+
+            val preparedTarget = root.optString("openclawTargetVersion", "")
+            if (preparedTarget != OPENCLAW_TARGET_VERSION) return false
+
+            val installedOpenClaw = getInstalledOpenClawVersion().orEmpty()
+            val preparedOpenClaw = root.optString("openclawPreparedVersion", "")
+            if (installedOpenClaw.isEmpty() || installedOpenClaw != preparedOpenClaw) return false
+
+            val preparedNode = root.optString("nodeVersion", "")
+            val currentNode = runCapture("node -v 2>/dev/null || true")
+            if (preparedNode.isNotBlank() && currentNode.isNotBlank() && preparedNode != currentNode) return false
+
+            true
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to parse enhanced-bootstrap.json: ${error.message}")
+            false
+        }
+    }
+
+    fun markEnhancedBootstrapReady(gatewayReady: Boolean, detail: String = "") {
+        val paths = BootstrapInstaller.getPaths(context)
+        val stateDir = ensureRuntimeStateDir(paths)
+        val now = System.currentTimeMillis()
+
+        val payload = JSONObject().apply {
+            put("schemaVersion", 1)
+            put("updatedAtMs", now)
+            put("detail", detail.trim())
+            put("heavyReady", true)
+            put("gatewayLastReady", gatewayReady)
+            put("openclawTargetVersion", OPENCLAW_TARGET_VERSION)
+            put("openclawPreparedVersion", getInstalledOpenClawVersion())
+            put("nodeVersion", runCapture("node -v 2>/dev/null || true"))
+            put("codexVersion", runCapture("codex --version 2>/dev/null | head -n 1 || true"))
+        }
+
+        try {
+            File(stateDir, "enhanced-bootstrap.json").writeText(payload.toString(2))
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to write enhanced-bootstrap.json: ${error.message}")
+        }
+        appendJsonLine(
+            File(stateDir, "bootstrap-events.jsonl"),
+            JSONObject().apply {
+                put("timestampMs", now)
+                put("stage", "enhanced")
+                put("status", if (gatewayReady) "ready" else "partial")
+                put("detail", detail.trim())
+            },
+        )
+    }
+
     // ── Install checks ─────────────────────────────────────────────────────
 
     fun isProotInstalled(): Boolean {
