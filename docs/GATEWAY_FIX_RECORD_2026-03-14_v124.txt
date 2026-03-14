@@ -1,0 +1,35 @@
+口袋大龙虾 网关故障修复备案（2026-03-14）
+
+目标
+在后续任何版本中，避免重复尝试已被证明无效的修复路径，强制按已定位根因进行修复与验证。
+
+一、本轮已确认根因
+1) 测试包离线运行时中的 openclaw 启动入口不稳定：openclaw.mjs 使用了 #!/usr/bin/env node，在安卓环境会触发 openclaw: not found，导致网关无法启动。
+2) 离线打包脚本误删 openclaw/extensions，导致 memory-core 缺失，网关配置校验失败并报 plugin not found: memory-core。
+3) 网关 token 同步存在隐患：仅设置 gateway.auth.token 不足，需同步 gateway.remote.token，避免 gateway token missing。
+
+二、本轮已实施修复点
+1) 在离线运行时安装流程中，新增启动入口规范化：
+- 强制将 openclaw.mjs 首行修正为当前包 PREFIX/bin/node。
+- 强制将 PREFIX/bin/openclaw 重建为稳定 shell wrapper，显式调用 node + openclaw.mjs。
+- 在“离线运行时已安装可复用”路径同样执行入口规范化，避免旧坏状态残留。
+2) 离线打包脚本停止删除 openclaw/extensions，确保 memory-core 随包携带。
+3) configureOpenClawAuth 中同步设置 gateway.remote.token = gateway.auth.token。
+
+三、已验证无效或禁止重复的修复路径
+1) 禁止再次以“测试包与原始包端口冲突”作为主要根因并围绕其反复改端口。
+2) 禁止仅靠“增加重试次数/延迟等待”替代根因修复。
+3) 禁止仅做诊断输出（doctor 提示）但不修复启动入口、扩展目录、token 同步三项硬问题。
+4) 禁止再次删除 openclaw/extensions 目录进行所谓瘦身。
+
+四、后续修复与回归的强制检查项
+每次构建前后必须同时满足：
+1) 测试包私有路径下 command -v openclaw 可用。
+2) openclaw.mjs 第一行必须为当前包 PREFIX/bin/node，且 PREFIX/bin/openclaw 为可执行 wrapper。
+3) openclaw/extensions/memory-core 必须存在。
+4) ~/.openclaw/openclaw.json 中 gateway.auth.token 与 gateway.remote.token 同步。
+5) 首次安装完成后进入主页面，网关可自动或手动连接成功；大龙虾仪表盘可进入，不出现 openclaw: not found。
+
+五、下轮策略约束
+若后续仍出现网关失败，优先检查上面四个硬检查项，任何修复不得绕过这四项。只有四项全部通过后，才允许分析次要性能问题（如连接速度）。
+

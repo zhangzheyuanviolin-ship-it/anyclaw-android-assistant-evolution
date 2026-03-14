@@ -336,12 +336,13 @@ class CodexServerManager(private val context: Context) {
     fun installBundledRuntime(onProgress: (String) -> Unit): Boolean {
         if (!hasBundledRuntimeAssets()) return false
         val manifest = loadLocalRuntimeManifest() ?: return false
+        val paths = BootstrapInstaller.getPaths(context)
         if (isBundledRuntimeAlreadyApplied(manifest)) {
             onProgress("Using local runtime bundle")
+            normalizeBundledOpenClawLaunchers(paths, onProgress)
             return true
         }
 
-        val paths = BootstrapInstaller.getPaths(context)
         val runtimeDir = File(paths.filesDir, ".openclaw-android/runtime-bundle")
         runtimeDir.mkdirs()
         val archiveFile = File(runtimeDir, manifest.archiveName)
@@ -385,6 +386,8 @@ class CodexServerManager(private val context: Context) {
             chmod 700 ${paths.homeDir}/.openclaw-android/native/davey/davey.android-arm64.node 2>/dev/null || true
             """.trimIndent(),
         )
+
+        normalizeBundledOpenClawLaunchers(paths, onProgress)
 
         onProgress("Normalizing runtime paths…")
         patchOpenClawPaths()
@@ -1396,6 +1399,8 @@ H3
         auth.put("mode", "token")
         val gatewayToken = auth.optString("token", "").trim().ifEmpty { generateGatewayToken() }
         auth.put("token", gatewayToken)
+        val remote = ensureObject(gateway, "remote")
+        remote.put("token", gatewayToken)
 
         val agents = ensureObject(root, "agents")
         val defaults = ensureObject(agents, "defaults")
@@ -3918,6 +3923,42 @@ EOF
             put("installedAt", java.time.Instant.now().toString())
         }
         stateFile.writeText(payload.toString(2))
+    }
+
+    private fun normalizeBundledOpenClawLaunchers(
+        paths: BootstrapInstaller.Paths,
+        onProgress: (String) -> Unit,
+    ) {
+        val openclawMjs = File(paths.prefixDir, "lib/node_modules/openclaw/openclaw.mjs")
+        if (openclawMjs.exists()) {
+            runCatching {
+                val lines = openclawMjs.readLines().toMutableList()
+                if (lines.isNotEmpty()) {
+                    val expected = "#!${paths.prefixDir}/bin/node"
+                    if (lines[0] != expected) {
+                        lines[0] = expected
+                        openclawMjs.writeText(lines.joinToString(separator = "\n", postfix = "\n"))
+                    }
+                }
+            }.onFailure { error ->
+                Log.w(TAG, "Failed to normalize OpenClaw shebang: ${error.message}")
+            }
+        }
+
+        val wrapCode =
+            runInPrefix(
+                """
+                rm -f ${paths.prefixDir}/bin/openclaw
+                cat > ${paths.prefixDir}/bin/openclaw <<'WEOF'
+#!/system/bin/sh
+exec ${paths.prefixDir}/bin/node ${paths.prefixDir}/lib/node_modules/openclaw/openclaw.mjs "${'$'}@"
+WEOF
+                chmod 700 ${paths.prefixDir}/bin/openclaw 2>/dev/null || true
+                """.trimIndent(),
+            )
+        if (wrapCode == 0) {
+            onProgress("OpenClaw launcher normalized")
+        }
     }
 
     private fun sha256Hex(file: File): String {

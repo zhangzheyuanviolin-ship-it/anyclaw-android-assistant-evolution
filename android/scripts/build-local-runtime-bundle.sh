@@ -74,7 +74,6 @@ copy_if_exists "$SOURCE_PREFIX/lib/node_modules/npm" "$STAGE_DIR/files/usr/lib/n
 
 echo "Pruning non-runtime OpenClaw weight..."
 rm -rf "$STAGE_DIR/files/usr/lib/node_modules/openclaw/docs" \
-       "$STAGE_DIR/files/usr/lib/node_modules/openclaw/extensions" \
        "$STAGE_DIR/files/usr/lib/node_modules/openclaw/.github" \
        "$STAGE_DIR/files/usr/lib/node_modules/openclaw/.changeset" 2>/dev/null || true
 
