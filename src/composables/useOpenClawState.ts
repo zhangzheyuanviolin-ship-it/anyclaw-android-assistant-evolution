@@ -427,6 +427,7 @@ export function useOpenClawState() {
   let pollTick = 0
   let lastRenderedSignature = 'empty'
   let pendingBaselineSignature = 'empty'
+  let pendingSinceMs = 0
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
@@ -513,6 +514,7 @@ export function useOpenClawState() {
         sessionKey,
         limit: historyLimit.value,
       })
+      let hitPendingTimeout = false
       const nextMessages = toUiMessages(payload.messages, showProcess.value)
       const nextSignature = buildUiMessagesSignature(nextMessages)
       const historyChanged = nextSignature !== lastRenderedSignature
@@ -527,9 +529,18 @@ export function useOpenClawState() {
         const hasTimestampEvidence = hasAnyTimestampAtOrAfter(payload.messages, lastSendAtMs)
         if (hasTimedOutput || (!hasTimestampEvidence && nextSignature !== pendingBaselineSignature)) {
           pendingRun.value = false
+          pendingSinceMs = 0
         }
       }
-      lastError.value = ''
+      if (pendingRun.value && pendingSinceMs > 0 && Date.now() - pendingSinceMs > 45_000) {
+        pendingRun.value = false
+        pendingSinceMs = 0
+        lastError.value = '执行超时：当前会话可能不是可聊天会话，请新建会话后重试'
+        hitPendingTimeout = true
+      }
+      if (!hitPendingTimeout) {
+        lastError.value = ''
+      }
     } catch (error) {
       lastError.value = error instanceof Error ? error.message : '加载聊天记录失败'
     } finally {
@@ -553,6 +564,7 @@ export function useOpenClawState() {
     lastRenderedSignature = 'empty'
     pendingBaselineSignature = 'empty'
     pendingRun.value = false
+    pendingSinceMs = 0
     await refreshHistory()
   }
 
@@ -608,6 +620,7 @@ export function useOpenClawState() {
 
     isSendingMessage.value = true
     pendingRun.value = true
+    pendingSinceMs = Date.now()
     lastSendAtMs = Date.now()
     pendingBaselineSignature = lastRenderedSignature
 
@@ -649,17 +662,25 @@ export function useOpenClawState() {
         uploadedImagePaths,
         uploadedFilePaths,
       )
-      await sendOpenClawMessage({
+      const sendResult = await sendOpenClawMessage({
         sessionKey,
         message,
-        deliver: false,
+        deliver: true,
       })
+      const dispatchedSessionKey = sendResult.sessionKey?.trim() || sessionKey
+      if (dispatchedSessionKey !== selectedSessionKey.value) {
+        selectedSessionKey.value = dispatchedSessionKey
+        messages.value = []
+        lastRenderedSignature = 'empty'
+        pendingBaselineSignature = 'empty'
+      }
       await refreshHistory()
-      void refreshSessions(sessionKey)
+      void refreshSessions(dispatchedSessionKey)
       void refreshHealth()
       lastError.value = ''
     } catch (error) {
       pendingRun.value = false
+      pendingSinceMs = 0
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {

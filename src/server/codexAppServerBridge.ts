@@ -373,6 +373,34 @@ const OPENCLAW_SESSION_LIST_PARAMS = {
   includeUnknown: true,
 }
 
+function isHeartbeatTag(value: unknown): boolean {
+  const normalized = normalizeText(value).toLowerCase()
+  return normalized === 'heartbeat'
+}
+
+function isHeartbeatSessionRecord(row: Record<string, unknown>): boolean {
+  if (isHeartbeatTag(row.displayName) || isHeartbeatTag(row.label) || isHeartbeatTag(row.lastTo)) {
+    return true
+  }
+
+  const origin = asRecord(row.origin)
+  if (
+    isHeartbeatTag(origin?.provider) ||
+    isHeartbeatTag(origin?.from) ||
+    isHeartbeatTag(origin?.to) ||
+    isHeartbeatTag(origin?.label)
+  ) {
+    return true
+  }
+
+  const deliveryContext = asRecord(row.deliveryContext)
+  if (isHeartbeatTag(deliveryContext?.to)) {
+    return true
+  }
+
+  return false
+}
+
 async function createIndependentOpenClawSession(
   currentSessionKey: string,
   label: string,
@@ -966,7 +994,27 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           includeUnknown: true,
         })
         const record = asRecord(payload)
-        const sessions = Array.isArray(record?.sessions) ? record.sessions : []
+        const rawSessions = Array.isArray(record?.sessions) ? record.sessions : []
+        let sessionRows = parseOpenClawSessionRows({ sessions: rawSessions })
+        let sessions = sessionRows.filter((row) => !isHeartbeatSessionRecord(row))
+
+        if (sessions.length === 0) {
+          try {
+            await createIndependentOpenClawSession('agent:main:main', '新会话')
+            const retryPayload = await runOpenClawGatewayCall('sessions.list', {
+              limit,
+              includeDerivedTitles: true,
+              includeLastMessage: true,
+              includeGlobal: true,
+              includeUnknown: true,
+            })
+            sessionRows = parseOpenClawSessionRows(retryPayload)
+            sessions = sessionRows.filter((row) => !isHeartbeatSessionRecord(row))
+          } catch {
+            sessions = sessionRows
+          }
+        }
+
         setJson(res, 200, { sessions })
         return
       }
@@ -996,15 +1044,29 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey and message/attachments' })
           return
         }
+
+        let targetSessionKey = sessionKey
+        try {
+          const existingRows = parseOpenClawSessionRows(
+            await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS),
+          )
+          const currentRow = findOpenClawSessionByKey(existingRows, targetSessionKey)
+          if (currentRow && isHeartbeatSessionRecord(currentRow)) {
+            targetSessionKey = await createIndependentOpenClawSession(targetSessionKey, '新会话')
+          }
+        } catch {
+          // Fallback to caller-provided session key when listing sessions is temporarily unavailable.
+        }
+
         const runId = `run_${Date.now().toString(36)}`
         await runOpenClawGatewayCall('chat.send', {
-          sessionKey,
+          sessionKey: targetSessionKey,
           message,
           deliver: payload?.deliver === true,
           idempotencyKey: runId,
           attachments: attachments.length > 0 ? attachments : undefined,
         })
-        setJson(res, 200, { ok: true, runId })
+        setJson(res, 200, { ok: true, runId, sessionKey: targetSessionKey })
         return
       }
 

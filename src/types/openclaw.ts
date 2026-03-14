@@ -53,6 +53,7 @@ export type OpenClawSendRequest = {
 export type OpenClawSendResponse = {
   ok: boolean
   runId: string
+  sessionKey?: string
 }
 
 export type OpenClawImageAttachment = {

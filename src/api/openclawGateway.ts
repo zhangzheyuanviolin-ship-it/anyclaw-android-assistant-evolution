@@ -294,6 +294,7 @@ export async function sendOpenClawMessage(request: OpenClawSendRequest): Promise
   return {
     ok: payload?.ok === true,
     runId: readString(payload?.runId),
+    sessionKey: readString(payload?.sessionKey).trim() || undefined,
   }
 }
 
