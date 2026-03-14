@@ -25,11 +25,11 @@ class CodexServerManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CodexServerManager"
-        const val SERVER_PORT = 18923
-        private const val PROXY_PORT = 18924
+        const val SERVER_PORT_DEFAULT = 18923
+        private const val PROXY_PORT_DEFAULT = 18924
         private const val CODEX_VERSION = "0.104.0"
-        const val OPENCLAW_GATEWAY_PORT = 18789
-        const val OPENCLAW_CONTROL_UI_PORT = 19001
+        const val OPENCLAW_GATEWAY_PORT_DEFAULT = 18789
+        const val OPENCLAW_CONTROL_UI_PORT_DEFAULT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
@@ -44,7 +44,22 @@ class CodexServerManager(private val context: Context) {
         private const val LOCAL_RUNTIME_SCHEMA_VERSION = 1
         private const val LOCAL_RUNTIME_ASSET_DIR = "runtime"
         private const val LOCAL_RUNTIME_MANIFEST_ASSET = "$LOCAL_RUNTIME_ASSET_DIR/manifest.json"
+
+        private fun resolvePortOffset(packageName: String): Int {
+            return when {
+                packageName.contains(".pocketlobster.test") -> 200
+                packageName.endsWith(".beta") -> 0
+                else -> 100
+            }
+        }
     }
+
+    private val portOffset: Int = resolvePortOffset(context.packageName)
+    val serverPort: Int = SERVER_PORT_DEFAULT + portOffset
+    private val proxyPort: Int = PROXY_PORT_DEFAULT + portOffset
+    val openClawGatewayPort: Int = OPENCLAW_GATEWAY_PORT_DEFAULT + portOffset
+    val openClawControlUiPort: Int = OPENCLAW_CONTROL_UI_PORT_DEFAULT + portOffset
+    val shizukuBridgePort: Int = ShizukuShellBridgeServer.resolveBridgePort(context.packageName)
 
     private var serverProcess: Process? = null
     private var proxyProcess: Process? = null
@@ -195,13 +210,13 @@ class CodexServerManager(private val context: Context) {
             put(
                 "gatewayListening",
                 runCapture(
-                    "( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | grep '${OPENCLAW_GATEWAY_PORT}' || true",
+                    "( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | /system/bin/grep '${openClawGatewayPort}' || true",
                 ),
             )
             put(
                 "relevantProcesses",
                 runCapture(
-                    "ps -A 2>/dev/null | grep -E 'openclaw|node' | grep -E 'gateway|${OPENCLAW_GATEWAY_PORT}|${OPENCLAW_CONTROL_UI_PORT}' || true",
+                    "ps -A 2>/dev/null | /system/bin/grep -E 'openclaw|node' | /system/bin/grep -E 'gateway|${openClawGatewayPort}|${openClawControlUiPort}' || true",
                 ),
             )
         }
@@ -878,8 +893,8 @@ EOF
         val cmd = """
             cd "$prefix/libexec/git-core" 2>/dev/null || exit 0
             for f in git-*; do
-                if head -1 "${'$'}f" 2>/dev/null | grep -q "com.termux"; then
-                    sed -i "1s|/data/data/com.termux/files/usr|$prefix|" "${'$'}f"
+                if head -1 "${'$'}f" 2>/dev/null | /system/bin/grep -q "com.termux"; then
+                    /system/bin/sed -i "1s|/data/data/com.termux/files/usr|$prefix|" "${'$'}f"
                 fi
             done
             echo "Git shebangs fixed"
@@ -1266,39 +1281,39 @@ H3
 
             # Fix the openclaw.mjs shebang
             if [ -f "${'$'}ODIR/openclaw.mjs" ]; then
-                sed -i "1s|#!/usr/bin/env node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
-                sed -i "1s|^#!/data/.*/files/usr/bin/node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
-                sed -i "1s|^#!/data/.*/files/usr/bin/env node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
+                /system/bin/sed -i "1s|#!/usr/bin/env node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
+                /system/bin/sed -i "1s|^#!/data/.*/files/usr/bin/node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
+                /system/bin/sed -i "1s|^#!/data/.*/files/usr/bin/env node|#!$prefix/bin/node|" "${'$'}ODIR/openclaw.mjs"
             fi
 
             # Patch /tmp -> $prefix/tmp
-            for f in ${'$'}(grep -rl '/tmp' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
-                sed -i "s|\"\/tmp/|\"$prefix/tmp/|g" "${'$'}f"
-                sed -i "s|'\/tmp/|'$prefix/tmp/|g" "${'$'}f"
-                sed -i "s|\`\/tmp/|\`$prefix/tmp/|g" "${'$'}f"
-                sed -i "s|\"\/tmp\"|\"$prefix/tmp\"|g" "${'$'}f"
-                sed -i "s|'\/tmp'|'$prefix/tmp'|g" "${'$'}f"
+            for f in ${'$'}(/system/bin/grep -rl '/tmp' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
+                /system/bin/sed -i "s|\"\/tmp/|\"$prefix/tmp/|g" "${'$'}f"
+                /system/bin/sed -i "s|'\/tmp/|'$prefix/tmp/|g" "${'$'}f"
+                /system/bin/sed -i "s|\`\/tmp/|\`$prefix/tmp/|g" "${'$'}f"
+                /system/bin/sed -i "s|\"\/tmp\"|\"$prefix/tmp\"|g" "${'$'}f"
+                /system/bin/sed -i "s|'\/tmp'|'$prefix/tmp'|g" "${'$'}f"
             done
 
             # Patch /bin/sh -> $prefix/bin/sh
-            for f in ${'$'}(grep -rl '"/bin/sh"' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null) \
-                     ${'$'}(grep -rl "'/bin/sh'" "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
-                sed -i "s|\"\/bin\/sh\"|\"$prefix/bin/sh\"|g" "${'$'}f"
-                sed -i "s|'\/bin\/sh'|'$prefix/bin/sh'|g" "${'$'}f"
+            for f in ${'$'}(/system/bin/grep -rl '"/bin/sh"' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null) \
+                     ${'$'}(/system/bin/grep -rl "'/bin/sh'" "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
+                /system/bin/sed -i "s|\"\/bin\/sh\"|\"$prefix/bin/sh\"|g" "${'$'}f"
+                /system/bin/sed -i "s|'\/bin\/sh'|'$prefix/bin/sh'|g" "${'$'}f"
             done
 
             # Patch /bin/bash -> $prefix/bin/bash
-            for f in ${'$'}(grep -rl '"/bin/bash"' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null) \
-                     ${'$'}(grep -rl "'/bin/bash'" "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
-                sed -i "s|\"\/bin\/bash\"|\"$prefix/bin/bash\"|g" "${'$'}f"
-                sed -i "s|'\/bin\/bash'|'$prefix/bin/bash'|g" "${'$'}f"
+            for f in ${'$'}(/system/bin/grep -rl '"/bin/bash"' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null) \
+                     ${'$'}(/system/bin/grep -rl "'/bin/bash'" "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
+                /system/bin/sed -i "s|\"\/bin\/bash\"|\"$prefix/bin/bash\"|g" "${'$'}f"
+                /system/bin/sed -i "s|'\/bin\/bash'|'$prefix/bin/bash'|g" "${'$'}f"
             done
 
             # Patch /usr/bin/env -> $prefix/bin/env
-            for f in ${'$'}(grep -rl '"/usr/bin/env"' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null) \
-                     ${'$'}(grep -rl "'/usr/bin/env'" "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
-                sed -i "s|\"\/usr\/bin\/env\"|\"$prefix/bin/env\"|g" "${'$'}f"
-                sed -i "s|'\/usr\/bin\/env'|'$prefix/bin/env'|g" "${'$'}f"
+            for f in ${'$'}(/system/bin/grep -rl '"/usr/bin/env"' "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null) \
+                     ${'$'}(/system/bin/grep -rl "'/usr/bin/env'" "${'$'}ODIR" --include='*.js' --include='*.mjs' --include='*.cjs' 2>/dev/null); do
+                /system/bin/sed -i "s|\"\/usr\/bin\/env\"|\"$prefix/bin/env\"|g" "${'$'}f"
+                /system/bin/sed -i "s|'\/usr\/bin\/env'|'$prefix/bin/env'|g" "${'$'}f"
             done
 
             echo "Path patches applied"
@@ -1329,16 +1344,16 @@ H3
             # 1. Patch runner-*.js: catch network interface errors
             for f in ${'$'}DIST/runner-*.js; do
                 [ ! -f "${'$'}f" ] && continue
-                grep -q 'Unhandled promise rejection' "${'$'}f" || continue
-                sed -i 's|console.error("\[openclaw\] Unhandled promise rejection:", formatUncaughtError(reason));|if (reason \&\& reason.message \&\& reason.message.includes("interface")) { console.warn("[openclaw] Non-fatal network interface error (continuing):", formatUncaughtError(reason)); return; } console.error("[openclaw] Unhandled promise rejection:", formatUncaughtError(reason));|' "${'$'}f"
+                /system/bin/grep -q 'Unhandled promise rejection' "${'$'}f" || continue
+                /system/bin/sed -i 's|console.error("\[openclaw\] Unhandled promise rejection:", formatUncaughtError(reason));|if (reason \&\& reason.message \&\& reason.message.includes("interface")) { console.warn("[openclaw] Non-fatal network interface error (continuing):", formatUncaughtError(reason)); return; } console.error("[openclaw] Unhandled promise rejection:", formatUncaughtError(reason));|' "${'$'}f"
                 echo "patched runner: ${'$'}f"
             done
 
             # 2. Patch gateway-cli-*.js: allow device-auth bypass
             for f in ${'$'}DIST/gateway-cli-*.js; do
                 [ ! -f "${'$'}f" ] && continue
-                grep -q 'evaluateMissingDeviceIdentity' "${'$'}f" || continue
-                sed -i 's|function evaluateMissingDeviceIdentity(params) {|function evaluateMissingDeviceIdentity(params) { if (params.controlUiAuthPolicy.allowBypass) return { kind: "allow" };|' "${'$'}f"
+                /system/bin/grep -q 'evaluateMissingDeviceIdentity' "${'$'}f" || continue
+                /system/bin/sed -i 's|function evaluateMissingDeviceIdentity(params) {|function evaluateMissingDeviceIdentity(params) { if (params.controlUiAuthPolicy.allowBypass) return { kind: "allow" };|' "${'$'}f"
                 echo "patched gateway-cli: ${'$'}f"
             done
 
@@ -1390,8 +1405,8 @@ H3
         controlUi.put(
             "allowedOrigins",
             JSONArray()
-                .put("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT")
-                .put("http://localhost:$OPENCLAW_CONTROL_UI_PORT"),
+                .put("http://127.0.0.1:$openClawControlUiPort")
+                .put("http://localhost:$openClawControlUiPort"),
         )
         controlUi.put("allowInsecureAuth", true)
         controlUi.put("dangerouslyDisableDeviceAuth", false)
@@ -1401,6 +1416,7 @@ H3
         auth.put("token", gatewayToken)
         val remote = ensureObject(gateway, "remote")
         remote.put("token", gatewayToken)
+        remote.put("url", "ws://127.0.0.1:$openClawGatewayPort")
 
         val agents = ensureObject(root, "agents")
         val defaults = ensureObject(agents, "defaults")
@@ -1461,7 +1477,7 @@ H3
         if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 20)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
-        if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
+        if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${shizukuBridgePort}/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
@@ -1502,7 +1518,7 @@ H3
         runtimeSuiteEntry.put("enabled", true)
         val runtimeSuiteConfig = ensureObject(runtimeSuiteEntry, "config")
         if (!runtimeSuiteConfig.has("timeoutSeconds")) runtimeSuiteConfig.put("timeoutSeconds", 30)
-        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
+        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$serverPort")
         if (!runtimeSuiteConfig.has("runtimeDoctorPath")) {
             runtimeSuiteConfig.put(
                 "runtimeDoctorPath",
@@ -1738,14 +1754,16 @@ H3
             for pidfile in ${paths.prefixDir}/tmp/openclaw*/gateway.pid ${paths.prefixDir}/tmp/openclaw/gateway.pid; do
                 [ -f "${'$'}pidfile" ] && kill -9 ${'$'}(cat "${'$'}pidfile" 2>/dev/null) 2>/dev/null
             done
-            # Scan /proc for any node process bound to the gateway port
-            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
-                if echo "${'$'}cmdline" | grep -q "openclaw gateway run"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}"; then
-                    kill -9 ${'$'}pid 2>/dev/null
-                fi
+            # Scan /proc for stale gateway processes tied to the current app sandbox.
+            for procdir in /proc/[0-9]*; do
+                [ -r "${'$'}procdir/cmdline" ] || continue
+                pid="${'$'}{procdir##*/}"
+                cmdline=${'$'}(cat "${'$'}procdir/cmdline" 2>/dev/null | tr '\0' ' ')
+                case "${'$'}cmdline" in
+                    *"${paths.homeDir}"*"openclaw gateway run"*|*"--port ${openClawGatewayPort}"*|*"127.0.0.1:${openClawGatewayPort}"*)
+                        kill -9 "${'$'}pid" 2>/dev/null
+                        ;;
+                esac
             done
             # Clear stale lock/pid files
             rm -f ${paths.prefixDir}/tmp/openclaw*/gateway.lock ${paths.prefixDir}/tmp/openclaw*/gateway.pid 2>/dev/null
@@ -1759,7 +1777,7 @@ H3
 
         val env = buildEnvironment(paths)
         val shell = "${paths.prefixDir}/bin/sh"
-        val cmd = "exec openclaw gateway run --force --port $OPENCLAW_GATEWAY_PORT 2>&1"
+        val cmd = "exec openclaw gateway run --force --port $openClawGatewayPort 2>&1"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
         pb.environment().clear()
@@ -1776,7 +1794,7 @@ H3
         ensureHeartbeatBootstrapAsync(paths.homeDir)
 
         if (waitForOpenClawGatewayReady(proc, timeoutMs = 22_000L, pollMs = 520L)) {
-            Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
+            Log.i(TAG, "OpenClaw gateway started on port $openClawGatewayPort")
             return true
         }
 
@@ -1788,7 +1806,7 @@ H3
 
     /**
      * Start a lightweight Node.js static file server to serve the OpenClaw
-     * Control UI on [OPENCLAW_CONTROL_UI_PORT]. The UI assets live inside
+     * Control UI on [openClawControlUiPort]. The UI assets live inside
      * the installed openclaw npm package at dist/control-ui/.
      */
     fun startOpenClawControlUiServer(): Boolean {
@@ -1836,7 +1854,7 @@ H3
                 '.ico':'image/x-icon',
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
-              const localGatewayUrl = 'ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT';
+              const localGatewayUrl = 'ws://127.0.0.1:$openClawGatewayPort';
               function injectBootstrap(html) {
                 const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
@@ -1872,7 +1890,7 @@ H3
                   'function patchChatHistoryRequest(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||typeof app.client.request!==\"function\"){return;}if(app.client.__anyclawReqPatched===\"1\"){return;}var orig=app.client.request.bind(app.client);app.client.request=function(method,params){try{if(method===\"chat.history\"&&params&&typeof params===\"object\"){var capped=getHistoryLimit();var wanted=Number(params.limit);if(!Number.isFinite(wanted)){wanted=capped;}if(wanted>capped){wanted=capped;}params=Object.assign({},params,{limit:wanted});}}catch(_){}return orig(method,params);};app.client.__anyclawReqPatched=\"1\";}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
                   'function wireNewSessionButton(){document.querySelectorAll(\"button\").forEach(function(btn){var label=normalizeSpace(btn.textContent||\"\");if(label!==\"New session\"&&label!==\"新建会话\"){return;}if(btn.dataset.anyclawNewBound===\"1\"){return;}btn.dataset.anyclawNewBound=\"1\";btn.addEventListener(\"click\",function(ev){try{ev.preventDefault();ev.stopPropagation();if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}}catch(_){}openNewSessionDirect();},true);if(isZh){replaceFirstTextNode(btn,\"新建会话\");}});}' +
-                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:18923/\";});document.body.appendChild(btn);}' +
+                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:$serverPort/\";});document.body.appendChild(btn);}' +
                   'function installTraceToggle(){var id=\"anyclaw-trace-toggle\";var btn=document.getElementById(id);var u=new URL(location.href);var isSimple=u.searchParams.get(\"simple\")!==\"0\";if(!btn){btn=document.createElement(\"button\");btn.id=id;btn.type=\"button\";btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"96px\";btn.style.zIndex=\"2147482998\";btn.style.padding=\"6px 10px\";btn.style.borderRadius=\"8px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.88)\";btn.style.color=\"#fff\";btn.style.fontSize=\"12px\";document.body.appendChild(btn);}btn.textContent=isZh?(isSimple?\"过程显示：关\":\"过程显示：开\"):(isSimple?\"Process view: off\":\"Process view: on\");btn.setAttribute(\"aria-label\",btn.textContent);btn.onclick=function(){var next=new URL(location.href);next.searchParams.set(\"simple\",isSimple?\"0\":\"1\");location.assign(next.toString());};}' +
                   'function runPatches(){patchChatHistoryRequest();localizeStatic();wireNewSessionButton();installBackButton();installTraceToggle();installHistoryControls();}' +
                   'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
@@ -1957,7 +1975,7 @@ H3
                   }
                   sendStatic(res, fp, data);
                 });
-              }).listen($OPENCLAW_CONTROL_UI_PORT, '127.0.0.1', () => console.log('Control UI on port $OPENCLAW_CONTROL_UI_PORT'));
+              }).listen($openClawControlUiPort, '127.0.0.1', () => console.log('Control UI on port $openClawControlUiPort'));
             " 2>&1
         """.trimIndent()
 
@@ -1972,7 +1990,7 @@ H3
         startProcessLogThread(proc, "openclaw-ui")
 
         Thread.sleep(1000)
-        Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
+        Log.i(TAG, "OpenClaw Control UI server started on port $openClawControlUiPort")
         return true
     }
 
@@ -1996,11 +2014,15 @@ H3
             for pidfile in ${paths.prefixDir}/tmp/openclaw*/gateway.pid ${paths.prefixDir}/tmp/openclaw/gateway.pid; do
                 [ -f "${'$'}pidfile" ] && kill -9 ${'$'}(cat "${'$'}pidfile" 2>/dev/null) 2>/dev/null
             done
-            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
-                echo "${'$'}cmdline" | grep -q "openclaw gateway run" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${OPENCLAW_CONTROL_UI_PORT}" && kill -9 ${'$'}pid 2>/dev/null
+            for procdir in /proc/[0-9]*; do
+                [ -r "${'$'}procdir/cmdline" ] || continue
+                pid="${'$'}{procdir##*/}"
+                cmdline=${'$'}(cat "${'$'}procdir/cmdline" 2>/dev/null | tr '\0' ' ')
+                case "${'$'}cmdline" in
+                    *"${paths.homeDir}"*"openclaw gateway run"*|*"--port ${openClawGatewayPort}"*|*"127.0.0.1:${openClawGatewayPort}"*|*"127.0.0.1:${openClawControlUiPort}"*)
+                        kill -9 "${'$'}pid" 2>/dev/null
+                        ;;
+                esac
             done
             rm -f ${paths.prefixDir}/tmp/openclaw*/gateway.lock ${paths.prefixDir}/tmp/openclaw*/gateway.pid 2>/dev/null
             rm -f ${paths.prefixDir}/tmp/openclaw/gateway.lock ${paths.prefixDir}/tmp/openclaw/gateway.pid 2>/dev/null
@@ -2064,12 +2086,12 @@ H3
             echo "[openclaw-gw-diagnose] node=$(command -v node || true)"
             if [ -f "${paths.homeDir}/.openclaw/openclaw.json" ]; then
               echo "[openclaw-gw-diagnose] openclaw.json(bind/auth):"
-              grep -E '"bind"|"auth"|"token"|"mode"' "${paths.homeDir}/.openclaw/openclaw.json" 2>/dev/null || true
+              /system/bin/grep -E '"bind"|"auth"|"token"|"mode"' "${paths.homeDir}/.openclaw/openclaw.json" 2>/dev/null || true
             fi
             echo "[openclaw-gw-diagnose] port-listen:"
-            ( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | grep "${OPENCLAW_GATEWAY_PORT}" || true
+            ( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | /system/bin/grep "${openClawGatewayPort}" || true
             echo "[openclaw-gw-diagnose] process-list:"
-            ps -A 2>/dev/null | grep -E 'openclaw|node' | grep -E 'gateway|${OPENCLAW_GATEWAY_PORT}' || true
+            ps -A 2>/dev/null | /system/bin/grep -E 'openclaw|node' | /system/bin/grep -E 'gateway|${openClawGatewayPort}' || true
             echo "[openclaw-gw-diagnose] health-call:"
             openclaw gateway call health --json --params '{}' 2>&1 || true
             """.trimIndent()
@@ -2089,7 +2111,7 @@ H3
             JOB_NAME="anyclaw-heartbeat-main"
             EVERY="20m"
 
-            if [ ! -f "${'$'}HB_FILE" ] || [ -z "${'$'}(grep -Ev '^[[:space:]]*(#|$)' "${'$'}HB_FILE" 2>/dev/null)" ]; then
+            if [ ! -f "${'$'}HB_FILE" ] || [ -z "${'$'}(/system/bin/grep -Ev '^[[:space:]]*(#|$)' "${'$'}HB_FILE" 2>/dev/null)" ]; then
               cat > "${'$'}HB_FILE" <<'EOF'
 # HEARTBEAT.md
 # AnyClaw auto-bootstrap tasks (safe defaults)
@@ -2440,6 +2462,23 @@ WEOF
             pidFile.delete()
         }
 
+        // Kill stale proxy processes in the same app sandbox that can keep the
+        // port occupied and cause false-positive startup.
+        runInPrefix(
+            """
+            for procdir in /proc/[0-9]*; do
+                [ -r "${'$'}procdir/cmdline" ] || continue
+                pid="${'$'}{procdir##*/}"
+                cmdline=${'$'}(cat "${'$'}procdir/cmdline" 2>/dev/null | tr '\0' ' ')
+                case "${'$'}cmdline" in
+                    *"${paths.homeDir}"*"proxy.js"*|*"127.0.0.1:${proxyPort}"*)
+                        kill -9 "${'$'}pid" 2>/dev/null
+                        ;;
+                esac
+            done
+            """.trimIndent(),
+        )
+
         val env = buildEnvironment(paths)
         val shell = "${paths.prefixDir}/bin/sh"
         val cmd = "exec node ${proxyScript.absolutePath}"
@@ -2455,7 +2494,15 @@ WEOF
         startProcessLogThread(proc, "proxy")
 
         Thread.sleep(800)
-        Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$PROXY_PORT")
+        try {
+            val exit = proc.exitValue()
+            Log.w(TAG, "CONNECT proxy exited during startup with code=$exit")
+            proxyProcess = null
+            return false
+        } catch (_: IllegalThreadStateException) {
+            // still running
+        }
+        Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$proxyPort")
         return true
     }
 
@@ -2523,8 +2570,8 @@ WEOF
     ): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
 
         val pb = ProcessBuilder(codexBinPath(), "login")
         pb.environment().clear()
@@ -2571,8 +2618,8 @@ WEOF
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
 
         val shell = "${paths.prefixDir}/bin/sh"
         val cmd = "${codexBinPath()} exec --skip-git-repo-check \"say hi\" 2>&1"
@@ -2632,8 +2679,8 @@ WEOF
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
 
         val serverScript = "${paths.prefixDir}/lib/node_modules/codex-web-local/dist-cli/index.js"
         if (!File(serverScript).exists()) {
@@ -2641,8 +2688,25 @@ WEOF
             return false
         }
 
+        // Kill stale local server processes from the same app sandbox to avoid
+        // EADDRINUSE false-ready scenarios.
+        runInPrefix(
+            """
+            for procdir in /proc/[0-9]*; do
+                [ -r "${'$'}procdir/cmdline" ] || continue
+                pid="${'$'}{procdir##*/}"
+                cmdline=${'$'}(cat "${'$'}procdir/cmdline" 2>/dev/null | tr '\0' ' ')
+                case "${'$'}cmdline" in
+                    *"${serverScript}"*|*"--port ${serverPort}"*|*"127.0.0.1:${serverPort}"*)
+                        kill -9 "${'$'}pid" 2>/dev/null
+                        ;;
+                esac
+            done
+            """.trimIndent(),
+        )
+
         val shell = "${paths.prefixDir}/bin/sh"
-        val command = "exec node $serverScript --port $SERVER_PORT --no-password"
+        val command = "exec node $serverScript --port $serverPort --no-password"
 
         Log.i(TAG, "Starting server: $command")
 
@@ -2656,14 +2720,34 @@ WEOF
         serverProcess = proc
         startProcessLogThread(proc, "server")
 
+        Thread.sleep(550)
+        try {
+            val exit = proc.exitValue()
+            Log.e(TAG, "Server exited during startup with code=$exit")
+            serverProcess = null
+            return false
+        } catch (_: IllegalThreadStateException) {
+            // still running
+        }
+
         return true
     }
 
     fun waitForServer(timeoutMs: Long = 60_000): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
-        val url = URL("http://127.0.0.1:$SERVER_PORT/")
+        val url = URL("http://127.0.0.1:$serverPort/")
+        val startedProc = serverProcess
 
         while (System.currentTimeMillis() < deadline) {
+            if (startedProc != null) {
+                try {
+                    val exit = startedProc.exitValue()
+                    Log.e(TAG, "Server process exited before ready with code=$exit")
+                    return false
+                } catch (_: IllegalThreadStateException) {
+                    // still running
+                }
+            }
             try {
                 val conn = url.openConnection() as HttpURLConnection
                 conn.connectTimeout = 2000
@@ -2778,7 +2862,7 @@ WEOF
             mkdir -p "${'$'}key_dir" "${'$'}legacy_dir" "${paths.prefixDir}/tmp" 2>/dev/null || true
 
             download_ok=0
-            if [ -s "${'$'}key_file" ] && grep -q "BEGIN PGP PUBLIC KEY BLOCK" "${'$'}key_file" 2>/dev/null; then
+            if [ -s "${'$'}key_file" ] && /system/bin/grep -q "BEGIN PGP PUBLIC KEY BLOCK" "${'$'}key_file" 2>/dev/null; then
               download_ok=1
             else
               if command -v curl >/dev/null 2>&1; then
@@ -2792,7 +2876,7 @@ WEOF
               fi
             fi
 
-            if [ "${'$'}download_ok" -eq 1 ] && grep -q "BEGIN PGP PUBLIC KEY BLOCK" "${'$'}key_file" 2>/dev/null; then
+            if [ "${'$'}download_ok" -eq 1 ] && /system/bin/grep -q "BEGIN PGP PUBLIC KEY BLOCK" "${'$'}key_file" 2>/dev/null; then
               chmod 600 "${'$'}key_file" 2>/dev/null || true
               for old in "${'$'}key_dir"/*.gpg; do
                 [ -e "${'$'}old" ] || continue
@@ -2978,8 +3062,8 @@ case "${'$'}{cmd}" in
 esac
 EOF
 
-            sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/manual-deb-manager.sh"
-            sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/manual-deb-manager.sh"
+            /system/bin/sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/manual-deb-manager.sh"
+            /system/bin/sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/manual-deb-manager.sh"
             chmod 700 "${'$'}scripts/manual-deb-manager.sh" 2>/dev/null || true
             echo "package-recovery-scripts-ready"
         """.trimIndent()
@@ -3165,10 +3249,10 @@ case "${'$'}action" in
     ;;
 esac
 EOF
-              sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}target"
-              sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}target"
-              sed -i "s#__TOOL__#${'$'}tool#g" "${'$'}target"
-              sed -i "s#__VERB__#${'$'}tool#g" "${'$'}target"
+              /system/bin/sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}target"
+              /system/bin/sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}target"
+              /system/bin/sed -i "s#__TOOL__#${'$'}tool#g" "${'$'}target"
+              /system/bin/sed -i "s#__VERB__#${'$'}tool#g" "${'$'}target"
               chmod 700 "${'$'}target"
             }
 
@@ -3380,9 +3464,9 @@ cat "${'$'}OUT_JSON"
 exit 0
 EOF
 
-            sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
-            sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
-            sed -i "s#__FILES__#${paths.filesDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
+            /system/bin/sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
+            /system/bin/sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
+            /system/bin/sed -i "s#__FILES__#${paths.filesDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
             chmod 700 "${'$'}scripts/runtime-env-doctor.sh" 2>/dev/null || true
             "${'$'}scripts/runtime-env-doctor.sh" --probe --json > "${'$'}state_dir/runtime-health.json" 2>/dev/null || true
             echo "runtime-doctor-ready"
@@ -3399,7 +3483,7 @@ EOF
     fun ensureShizukuBridgeScripts() {
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
-        val port = ShizukuShellBridgeServer.BRIDGE_PORT
+        val port = shizukuBridgePort
         val cmd = """
             cat > "$prefix/bin/shizuku-shell" <<'EOF'
 #!/system/bin/sh

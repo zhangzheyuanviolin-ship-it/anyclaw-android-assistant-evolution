@@ -9,12 +9,20 @@ import org.json.JSONObject
 
 class ShizukuShellBridgeServer(
     private val context: Context,
-    port: Int = BRIDGE_PORT,
+    port: Int = resolveBridgePort(context.packageName),
 ) : NanoHTTPD("127.0.0.1", port) {
 
     companion object {
         private const val TAG = "ShizukuBridgeServer"
-        const val BRIDGE_PORT = 18926
+        const val BRIDGE_PORT_DEFAULT = 18926
+
+        fun resolveBridgePort(packageName: String): Int {
+            return when {
+                packageName.contains(".pocketlobster.test") -> BRIDGE_PORT_DEFAULT + 200
+                packageName.endsWith(".beta") -> BRIDGE_PORT_DEFAULT
+                else -> BRIDGE_PORT_DEFAULT + 100
+            }
+        }
     }
 
     @Volatile
@@ -161,7 +169,7 @@ class ShizukuShellBridgeServer(
             .put("granted", granted)
             .put("enabled", enabled)
             .put("executor", "system-shell")
-            .put("bridge_port", BRIDGE_PORT)
+            .put("bridge_port", resolveBridgePort(context.packageName))
             .put("last_error_code", lastErrorCode ?: JSONObject.NULL)
             .put("last_error", lastErrorMessage ?: JSONObject.NULL)
             .put("checked_at", Instant.now().toString())

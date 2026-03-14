@@ -147,6 +147,7 @@ class ConversationManagerActivity : AppCompatActivity() {
 
     private fun loadCodexRows(): List<ConversationRow> {
         val active = LocalBridgeClients.callCodexRpc(
+            this,
             "thread/list",
             JSONObject()
                 .put("archived", false)
@@ -154,6 +155,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                 .put("sortKey", "updated_at"),
         )
         val archived = LocalBridgeClients.callCodexRpc(
+            this,
             "thread/list",
             JSONObject()
                 .put("archived", true)
@@ -356,6 +358,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                 when (row.source) {
                     SourceType.CODEX -> {
                         LocalBridgeClients.callCodexRpc(
+                            this,
                             "thread/name/set",
                             JSONObject()
                                 .put("threadId", row.id)
@@ -409,6 +412,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                         if (!row.archived) {
                             try {
                                 LocalBridgeClients.callCodexRpc(
+                                    this,
                                     "thread/archive",
                                     JSONObject().put("threadId", row.id),
                                 )
@@ -550,6 +554,7 @@ class ConversationManagerActivity : AppCompatActivity() {
     private fun loadCodexTranscript(row: ConversationRow): String {
         return try {
             val payload = LocalBridgeClients.callCodexRpc(
+                this,
                 "thread/read",
                 JSONObject()
                     .put("threadId", row.id)

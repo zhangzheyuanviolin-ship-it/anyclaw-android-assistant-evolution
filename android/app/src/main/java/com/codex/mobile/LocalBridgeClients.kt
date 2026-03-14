@@ -1,5 +1,6 @@
 package com.codex.mobile
 
+import android.content.Context
 import android.util.Log
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -25,13 +26,24 @@ object LocalBridgeClients {
         throw IllegalStateException("No JSON payload found")
     }
 
-    fun callCodexRpc(method: String, params: JSONObject = JSONObject()): JSONObject {
+    private fun resolveServerPort(context: Context): Int {
+        val packageName = context.packageName
+        val offset =
+            when {
+                packageName.contains(".pocketlobster.test") -> 200
+                packageName.endsWith(".beta") -> 0
+                else -> 100
+            }
+        return CodexServerManager.SERVER_PORT_DEFAULT + offset
+    }
+
+    fun callCodexRpc(context: Context, method: String, params: JSONObject = JSONObject()): JSONObject {
         val body = JSONObject()
             .put("method", method)
             .put("params", params)
             .toString()
 
-        val url = URL("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/codex-api/rpc")
+        val url = URL("http://127.0.0.1:${resolveServerPort(context)}/codex-api/rpc")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 10_000

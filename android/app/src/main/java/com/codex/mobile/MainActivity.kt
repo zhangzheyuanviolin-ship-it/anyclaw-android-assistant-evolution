@@ -158,7 +158,7 @@ class MainActivity : AppCompatActivity() {
             onGatewayTogglePressed()
         }
         backToCodexButton.setOnClickListener {
-            webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
+            webView.loadUrl("http://127.0.0.1:${serverManager.serverPort}/")
         }
         openClawNewChatButton.setOnClickListener {
             webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
@@ -295,7 +295,7 @@ class MainActivity : AppCompatActivity() {
                         "页面渲染异常，正在自动恢复到可用状态",
                         Toast.LENGTH_LONG,
                     ).show()
-                    pendingLaunchUrl = "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
+                    pendingLaunchUrl = "http://127.0.0.1:${serverManager.serverPort}/"
                     recreate()
                 }
                 return true
@@ -429,7 +429,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun isOpenClawChatUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        return url.contains(":${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}") &&
+        return url.contains(":${serverManager.openClawControlUiPort}") &&
             (url.contains("/chat") || url.contains("/index.html"))
     }
 
@@ -484,7 +484,7 @@ class MainActivity : AppCompatActivity() {
             null,
         )
 
-        val fallback = "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat"
+        val fallback = "http://127.0.0.1:${serverManager.openClawControlUiPort}/chat"
         val parsed = Uri.parse(originalUrl ?: fallback)
         val builder = parsed.buildUpon().clearQuery()
         for (name in parsed.queryParameterNames) {
@@ -832,7 +832,7 @@ class MainActivity : AppCompatActivity() {
     private fun consumeLaunchUrlOrDefault(): String {
         val target = pendingLaunchUrl
         pendingLaunchUrl = null
-        return target ?: "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
+        return target ?: "http://127.0.0.1:${serverManager.serverPort}/"
     }
 
     private fun resolveLaunchUrlFromIntent(intent: Intent?): String? {
@@ -842,7 +842,7 @@ class MainActivity : AppCompatActivity() {
             OPEN_TARGET_CODEX_THREAD -> {
                 val threadId = intent?.getStringExtra(EXTRA_THREAD_ID)?.trim().orEmpty()
                 if (threadId.isEmpty()) null
-                else "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/thread/${Uri.encode(threadId)}"
+                else "http://127.0.0.1:${serverManager.serverPort}/thread/${Uri.encode(threadId)}"
             }
             OPEN_TARGET_OPENCLAW_SESSION -> {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
@@ -862,7 +862,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildOpenClawChatPageUrl(sessionKey: String?): String {
-        val builder = Uri.parse("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/openclaw/chat").buildUpon()
+        val builder = Uri.parse("http://127.0.0.1:${serverManager.serverPort}/openclaw/chat").buildUpon()
         val normalized = sessionKey?.trim().orEmpty()
         if (normalized.isNotEmpty()) {
             builder.appendQueryParameter("session", normalized)
@@ -1161,7 +1161,7 @@ class MainActivity : AppCompatActivity() {
             val server = ShizukuShellBridgeServer(this)
             server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             shizukuBridgeServer = server
-            Log.i(TAG, "Shizuku bridge server started on ${ShizukuShellBridgeServer.BRIDGE_PORT}")
+            Log.i(TAG, "Shizuku bridge server started on ${ShizukuShellBridgeServer.resolveBridgePort(packageName)}")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to start Shizuku bridge server: ${e.message}")
         }
