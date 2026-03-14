@@ -401,6 +401,36 @@ function isHeartbeatSessionRecord(row: Record<string, unknown>): boolean {
   return false
 }
 
+function isChatCapableSessionRecord(row: Record<string, unknown>): boolean {
+  const chatType = normalizeText(row.chatType)
+  if (chatType) return true
+
+  const lastChannel = normalizeText(row.lastChannel)
+  if (lastChannel) return true
+
+  const origin = asRecord(row.origin)
+  if (
+    normalizeText(origin?.provider) ||
+    normalizeText(origin?.surface) ||
+    normalizeText(origin?.chatType) ||
+    normalizeText(origin?.from) ||
+    normalizeText(origin?.to)
+  ) {
+    return true
+  }
+
+  const deliveryContext = asRecord(row.deliveryContext)
+  if (
+    normalizeText(deliveryContext?.channel) ||
+    normalizeText(deliveryContext?.from) ||
+    normalizeText(deliveryContext?.to)
+  ) {
+    return true
+  }
+
+  return false
+}
+
 async function createIndependentOpenClawSession(
   currentSessionKey: string,
   label: string,
@@ -436,12 +466,26 @@ async function createIndependentOpenClawSession(
       throw error
     }
 
+    try {
+      await runOpenClawGatewayCall('chat.send', {
+        sessionKey,
+        message: '/new',
+        deliver: true,
+        idempotencyKey: `seed_${Date.now().toString(36)}_${createAttempt}`,
+      })
+    } catch (error) {
+      lastError = error
+      await new Promise((resolve) => setTimeout(resolve, 120 + createAttempt * 80))
+      continue
+    }
+
     usedLabels.add(uniqueLabel)
     for (let persistAttempt = 0; persistAttempt < 8; persistAttempt += 1) {
       const sessionRows = parseOpenClawSessionRows(
         await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS),
       )
-      if (findOpenClawSessionByKey(sessionRows, sessionKey)) {
+      const persistedRow = findOpenClawSessionByKey(sessionRows, sessionKey)
+      if (persistedRow && isChatCapableSessionRecord(persistedRow)) {
         return sessionKey
       }
       await new Promise((resolve) => setTimeout(resolve, 220 + persistAttempt * 120))
@@ -996,7 +1040,9 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const record = asRecord(payload)
         const rawSessions = Array.isArray(record?.sessions) ? record.sessions : []
         let sessionRows = parseOpenClawSessionRows({ sessions: rawSessions })
-        let sessions = sessionRows.filter((row) => !isHeartbeatSessionRecord(row))
+        let sessions = sessionRows.filter(
+          (row) => !isHeartbeatSessionRecord(row) && isChatCapableSessionRecord(row),
+        )
 
         if (sessions.length === 0) {
           try {
@@ -1009,9 +1055,20 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
               includeUnknown: true,
             })
             sessionRows = parseOpenClawSessionRows(retryPayload)
-            sessions = sessionRows.filter((row) => !isHeartbeatSessionRecord(row))
+            sessions = sessionRows.filter(
+              (row) => !isHeartbeatSessionRecord(row) && isChatCapableSessionRecord(row),
+            )
           } catch {
-            sessions = sessionRows
+            sessions = []
+          }
+        }
+
+        if (sessions.length === 0) {
+          const mainRow = findOpenClawSessionByKey(sessionRows, 'agent:main:main')
+          if (mainRow && !isHeartbeatSessionRecord(mainRow)) {
+            sessions = [mainRow]
+          } else {
+            sessions = sessionRows.filter((row) => !isHeartbeatSessionRecord(row))
           }
         }
 
@@ -1051,8 +1108,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             await runOpenClawGatewayCall('sessions.list', OPENCLAW_SESSION_LIST_PARAMS),
           )
           const currentRow = findOpenClawSessionByKey(existingRows, targetSessionKey)
-          if (currentRow && isHeartbeatSessionRecord(currentRow)) {
-            targetSessionKey = await createIndependentOpenClawSession(targetSessionKey, '新会话')
+          if (
+            currentRow &&
+            (isHeartbeatSessionRecord(currentRow) || !isChatCapableSessionRecord(currentRow))
+          ) {
+            targetSessionKey = 'agent:main:main'
           }
         } catch {
           // Fallback to caller-provided session key when listing sessions is temporarily unavailable.
