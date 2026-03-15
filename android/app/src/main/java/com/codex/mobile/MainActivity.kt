@@ -161,7 +161,7 @@ class MainActivity : AppCompatActivity() {
             webView.loadUrl("http://127.0.0.1:${serverManager.serverPort}/")
         }
         openClawNewChatButton.setOnClickListener {
-            webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
+            openOpenClawChatWithPreflight(extractSessionFromCurrentUrl())
         }
 
         requestBatteryOptimizationExemption()
@@ -198,7 +198,7 @@ class MainActivity : AppCompatActivity() {
             startGatewayStatusMonitor()
             val targetUrl = pendingLaunchUrl
             if (targetUrl != null && webView.visibility == View.VISIBLE) {
-                webView.loadUrl(targetUrl)
+                loadUrlWithOpenClawPreflight(targetUrl)
                 pendingLaunchUrl = null
             }
         }
@@ -269,7 +269,17 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 url: String,
-            ): Boolean = false
+            ): Boolean {
+                if (isOpenClawEntryUrl(url)) {
+                    val sessionKey =
+                        runCatching { Uri.parse(url).getQueryParameter("session")?.trim() }
+                            .getOrNull()
+                            ?.takeIf { it.isNotEmpty() }
+                    openOpenClawChatWithPreflight(sessionKey)
+                    return true
+                }
+                return false
+            }
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
@@ -646,7 +656,7 @@ class MainActivity : AppCompatActivity() {
             openClawNewChatButton.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
-            webView.loadUrl(consumeLaunchUrlOrDefault())
+            loadUrlWithOpenClawPreflight(consumeLaunchUrlOrDefault())
         }
         checkpoint("core.ui", "ok", "ui-ready")
     }
@@ -868,6 +878,48 @@ class MainActivity : AppCompatActivity() {
             builder.appendQueryParameter("session", normalized)
         }
         return builder.build().toString()
+    }
+
+    private fun isOpenClawEntryUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        return url.contains("127.0.0.1:${serverManager.serverPort}/openclaw/chat")
+    }
+
+    private fun loadUrlWithOpenClawPreflight(url: String) {
+        if (!isOpenClawEntryUrl(url)) {
+            webView.loadUrl(url)
+            return
+        }
+        val sessionKey =
+            runCatching { Uri.parse(url).getQueryParameter("session")?.trim() }
+                .getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+        openOpenClawChatWithPreflight(sessionKey)
+    }
+
+    private fun openOpenClawChatWithPreflight(sessionKey: String?) {
+        openClawNewChatButton.isEnabled = false
+        Thread {
+            val ready =
+                try {
+                    serverManager.ensureOpenClawInteractiveReady()
+                } catch (error: Exception) {
+                    Log.w(TAG, "OpenClaw preflight failed: ${error.message}")
+                    false
+                }
+            runOnUiThread {
+                openClawNewChatButton.isEnabled = true
+                if (!ready) {
+                    Toast.makeText(
+                        this,
+                        "网关正在恢复中，已继续尝试进入聊天页",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                refreshGatewayStatusAsync(announce = false)
+                webView.loadUrl(buildOpenClawChatPageUrl(sessionKey))
+            }
+        }.start()
     }
 
     /**
@@ -1112,7 +1164,7 @@ class MainActivity : AppCompatActivity() {
         if (gatewayStatusChecking) return
         gatewayStatusChecking = true
         Thread {
-            val connected = serverManager.isOpenClawGatewayResponsive()
+            val connected = serverManager.isOpenClawGatewayPortReachable()
             runOnUiThread {
                 gatewayStatusChecking = false
                 applyGatewayConnectedState(connected, announce)
