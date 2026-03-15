@@ -48,6 +48,7 @@ class CodexServerManager(private val context: Context) {
     private var proxyProcess: Process? = null
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
+    private var openClawControlUiTokenSnapshot: String? = null
 
     val isRunning: Boolean
         get() {
@@ -132,6 +133,29 @@ class CodexServerManager(private val context: Context) {
         val sb = StringBuilder()
         runInPrefix(command) { sb.appendLine(it) }
         return sb.toString().trim()
+    }
+
+    private fun isProcessAlive(process: Process?): Boolean {
+        val proc = process ?: return false
+        return try {
+            proc.exitValue()
+            false
+        } catch (_: IllegalThreadStateException) {
+            true
+        }
+    }
+
+    private fun readOpenClawGatewayToken(homeDir: String): String {
+        return try {
+            val cfg = File(homeDir, ".openclaw/openclaw.json")
+            if (!cfg.exists()) return ""
+            val root = JSONTokener(cfg.readText()).nextValue() as? JSONObject ?: return ""
+            val gateway = root.optJSONObject("gateway") ?: return ""
+            val auth = gateway.optJSONObject("auth") ?: return ""
+            auth.optString("token", "").trim()
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     // ── Install checks ─────────────────────────────────────────────────────
@@ -1455,17 +1479,31 @@ H3
      * the installed openclaw npm package at dist/control-ui/.
      */
     fun startOpenClawControlUiServer(): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val expectedGatewayToken = readOpenClawGatewayToken(paths.homeDir)
         if (openClawControlUiProcess != null) {
-            try {
-                openClawControlUiProcess!!.exitValue()
-                openClawControlUiProcess = null
-            } catch (_: IllegalThreadStateException) {
+            val alive = isProcessAlive(openClawControlUiProcess)
+            val tokenMatches =
+                expectedGatewayToken.isBlank() ||
+                    expectedGatewayToken == (openClawControlUiTokenSnapshot ?: "")
+            val responsive = if (alive) isOpenClawControlUiResponsive(timeoutMs = 700) else false
+            if (alive && tokenMatches && responsive) {
                 Log.i(TAG, "OpenClaw Control UI server already running")
                 return true
             }
+            Log.w(
+                TAG,
+                "Restarting Control UI due to stale state (alive=$alive, tokenMatches=$tokenMatches, responsive=$responsive)",
+            )
+            try {
+                openClawControlUiProcess?.destroyForcibly()
+            } catch (_: Exception) {
+            }
+            openClawControlUiProcess = null
+            openClawControlUiTokenSnapshot = null
+            Thread.sleep(220)
         }
 
-        val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths)
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
@@ -1632,9 +1670,13 @@ H3
 
         val proc = pb.start()
         openClawControlUiProcess = proc
+        openClawControlUiTokenSnapshot = expectedGatewayToken.ifBlank { null }
         startProcessLogThread(proc, "openclaw-ui")
 
-        Thread.sleep(1000)
+        if (!waitForOpenClawControlUiReady(proc, timeoutMs = 8_000L, pollMs = 320L)) {
+            Log.w(TAG, "OpenClaw Control UI failed to become responsive")
+            return false
+        }
         Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
         return true
     }
@@ -1718,6 +1760,7 @@ H3
         openClawGatewayProcess = null
         openClawControlUiProcess?.destroy()
         openClawControlUiProcess = null
+        openClawControlUiTokenSnapshot = null
 
         runInPrefix(
             """
@@ -1779,6 +1822,30 @@ H3
             Thread.sleep(pollMs)
         }
         return isOpenClawGatewayResponsive()
+    }
+
+    private fun waitForOpenClawControlUiReady(
+        process: Process?,
+        timeoutMs: Long,
+        pollMs: Long,
+    ): Boolean {
+        val startedAt = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startedAt < timeoutMs) {
+            if (isOpenClawControlUiResponsive(timeoutMs = 700)) {
+                return true
+            }
+            if (process != null) {
+                try {
+                    val code = process.exitValue()
+                    Log.w(TAG, "OpenClaw Control UI exited before ready with code=$code")
+                    return false
+                } catch (_: IllegalThreadStateException) {
+                    // still running
+                }
+            }
+            Thread.sleep(pollMs)
+        }
+        return isOpenClawControlUiResponsive(timeoutMs = 700)
     }
 
     private fun logOpenClawGatewayDiagnostics(reason: String) {
@@ -2438,6 +2505,7 @@ WEOF
         openClawGatewayProcess = null
         openClawControlUiProcess?.destroy()
         openClawControlUiProcess = null
+        openClawControlUiTokenSnapshot = null
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

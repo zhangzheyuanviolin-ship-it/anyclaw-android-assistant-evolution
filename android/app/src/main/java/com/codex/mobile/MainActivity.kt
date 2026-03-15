@@ -562,16 +562,16 @@ class MainActivity : AppCompatActivity() {
             serverManager.configureOpenClawAuth()
 
             updateStatus("Starting OpenClaw gateway…")
-            var gatewayOk = serverManager.startOpenClawGateway()
+            var gatewayOk = serverManager.ensureOpenClawInteractiveReady()
             if (!gatewayOk) {
-                Log.w(TAG, "OpenClaw gateway did not become responsive on first attempt; retrying once")
-                updateDetail("Gateway retrying once…")
+                Log.w(TAG, "OpenClaw interactive preflight failed on first attempt; retrying once")
+                updateDetail("Gateway interactive preflight retrying once…")
                 Thread.sleep(1200)
-                gatewayOk = serverManager.startOpenClawGateway()
+                gatewayOk = serverManager.ensureOpenClawInteractiveReady()
             }
-
-            updateStatus("Starting OpenClaw Control UI…")
-            serverManager.startOpenClawControlUiServer()
+            if (!gatewayOk) {
+                updateDetail("Gateway auto recovery pending; manual connect remains available")
+            }
             gatewayOk
         } catch (error: Exception) {
             Log.e(TAG, "OpenClaw startup failed", error)
@@ -652,9 +652,11 @@ class MainActivity : AppCompatActivity() {
                 if (!ready) {
                     Toast.makeText(
                         this,
-                        "网关正在恢复中，已继续尝试进入聊天页",
+                        "网关尚未就绪，请先点击“连接网关”后重试",
                         Toast.LENGTH_SHORT,
                     ).show()
+                    refreshGatewayStatusAsync(announce = true)
+                    return@runOnUiThread
                 }
                 refreshGatewayStatusAsync(announce = false)
                 webView.loadUrl(buildOpenClawChatPageUrl(sessionKey))
@@ -904,7 +906,9 @@ class MainActivity : AppCompatActivity() {
         if (gatewayStatusChecking) return
         gatewayStatusChecking = true
         Thread {
-            val connected = serverManager.isOpenClawGatewayPortReachable()
+            val connected =
+                serverManager.isOpenClawGatewayResponsive() &&
+                    serverManager.isOpenClawControlUiResponsive(timeoutMs = 900)
             runOnUiThread {
                 gatewayStatusChecking = false
                 applyGatewayConnectedState(connected, announce)
