@@ -622,7 +622,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun isOpenClawEntryUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        return url.contains("127.0.0.1:${serverManager.serverPort}/openclaw/chat")
+        return url.contains("127.0.0.1:${CodexServerManager.SERVER_PORT}/openclaw/chat")
     }
 
     private fun loadUrlWithOpenClawPreflight(url: String) {

@@ -1654,7 +1654,7 @@ H3
     fun isOpenClawGatewayPortReachable(timeoutMs: Int = 260): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress("127.0.0.1", openClawGatewayPort), timeoutMs)
+                socket.connect(InetSocketAddress("127.0.0.1", OPENCLAW_GATEWAY_PORT), timeoutMs)
             }
             true
         } catch (_: Exception) {
@@ -1664,7 +1664,7 @@ H3
 
     fun isOpenClawControlUiResponsive(timeoutMs: Int = 1200): Boolean {
         return try {
-            val url = URL("http://127.0.0.1:$openClawControlUiPort/chat")
+            val url = URL("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT/chat")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 connectTimeout = timeoutMs
                 readTimeout = timeoutMs
