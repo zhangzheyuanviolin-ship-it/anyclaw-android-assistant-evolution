@@ -1,6 +1,7 @@
 package com.codex.mobile
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -11,12 +12,14 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.ValueCallback
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -67,6 +70,11 @@ class MainActivity : AppCompatActivity() {
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingCameraCaptureUri: Uri? = null
+    private var gatewayAutoRecoverRunning = false
+    private var gatewayAutoRecoverLastAtMs = 0L
+    private var userRequestedGatewayDisconnect = false
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -93,6 +101,29 @@ class MainActivity : AppCompatActivity() {
             } else {
                 showStoragePermissionDialog()
             }
+        }
+
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val callback = filePathCallback
+            filePathCallback = null
+            if (callback == null) return@registerForActivityResult
+            val parsed = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            if (result.resultCode != RESULT_OK) {
+                cleanupPendingCameraCapture()
+                callback.onReceiveValue(null)
+                return@registerForActivityResult
+            }
+
+            val cameraUri = pendingCameraCaptureUri
+            pendingCameraCaptureUri = null
+            val uris =
+                when {
+                    parsed != null && parsed.isNotEmpty() -> parsed
+                    cameraUri != null -> arrayOf(cameraUri)
+                    else -> null
+                }
+            callback.onReceiveValue(uris)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -180,6 +211,9 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         cancelOpenClawWatchdog()
         stopGatewayStatusMonitor()
+        cleanupPendingCameraCapture()
+        filePathCallback?.onReceiveValue(null)
+        filePathCallback = null
         shizukuBridgeServer?.stop()
         shizukuBridgeServer = null
         serverManager.stopServer()
@@ -286,6 +320,124 @@ class MainActivity : AppCompatActivity() {
                 Log.d(TAG, "[WebView] ${msg.sourceId()}:${msg.lineNumber()} ${msg.message()}")
                 return true
             }
+
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                if (filePathCallback == null) return false
+
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+
+                if (isCameraCaptureRequest(fileChooserParams)) {
+                    val cameraIntent = createCameraCaptureIntent()
+                    if (cameraIntent == null) {
+                        this@MainActivity.filePathCallback?.onReceiveValue(null)
+                        this@MainActivity.filePathCallback = null
+                        Toast.makeText(
+                            this@MainActivity,
+                            "无法打开相机拍照",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        return false
+                    }
+                    return try {
+                        fileChooserLauncher.launch(cameraIntent)
+                        true
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Failed to launch camera chooser: ${error.message}")
+                        cleanupPendingCameraCapture()
+                        this@MainActivity.filePathCallback?.onReceiveValue(null)
+                        this@MainActivity.filePathCallback = null
+                        Toast.makeText(
+                            this@MainActivity,
+                            "无法启动拍照附件",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        false
+                    }
+                }
+
+                val chooserIntent =
+                    try {
+                        fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                        }
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Failed to create file chooser intent: ${error.message}")
+                        null
+                    }
+
+                if (chooserIntent == null) {
+                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                    this@MainActivity.filePathCallback = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "无法打开附件选择器",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    return false
+                }
+
+                return try {
+                    fileChooserLauncher.launch(chooserIntent)
+                    true
+                } catch (error: Exception) {
+                    Log.w(TAG, "Failed to launch file chooser: ${error.message}")
+                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                    this@MainActivity.filePathCallback = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "无法启动附件选择器",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    false
+                }
+            }
+        }
+    }
+
+    private fun isCameraCaptureRequest(params: WebChromeClient.FileChooserParams?): Boolean {
+        if (params == null || !params.isCaptureEnabled) return false
+        val accepts = params.acceptTypes
+        if (accepts.isNullOrEmpty()) return true
+        for (raw in accepts) {
+            val normalized = raw?.trim()?.lowercase().orEmpty()
+            if (normalized.isEmpty()) continue
+            if (normalized == "image/*" || normalized == "*/*" || normalized.startsWith("image/")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun createCameraCaptureIntent(): Intent? {
+        cleanupPendingCameraCapture()
+        val values =
+            ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "pocketlobster_${System.currentTimeMillis()}.jpg")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PocketLobster")
+                }
+            }
+        val imageUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        pendingCameraCaptureUri = imageUri
+        return Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, imageUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+    }
+
+    private fun cleanupPendingCameraCapture() {
+        val uri = pendingCameraCaptureUri ?: return
+        pendingCameraCaptureUri = null
+        try {
+            contentResolver.delete(uri, null, null)
+        } catch (_: Exception) {
         }
     }
 
@@ -562,17 +714,27 @@ class MainActivity : AppCompatActivity() {
             serverManager.configureOpenClawAuth()
 
             updateStatus("Starting OpenClaw gateway…")
-            var gatewayOk = serverManager.ensureOpenClawInteractiveReady()
+            var gatewayOk = serverManager.startOpenClawGateway()
             if (!gatewayOk) {
-                Log.w(TAG, "OpenClaw interactive preflight failed on first attempt; retrying once")
-                updateDetail("Gateway interactive preflight retrying once…")
+                Log.w(TAG, "OpenClaw gateway did not become responsive on first attempt; retrying once")
+                updateDetail("Gateway retrying once…")
                 Thread.sleep(1200)
-                gatewayOk = serverManager.ensureOpenClawInteractiveReady()
+                gatewayOk = serverManager.startOpenClawGateway()
             }
-            if (!gatewayOk) {
+
+            updateStatus("Starting OpenClaw Control UI…")
+            var controlUiOk = serverManager.startOpenClawControlUiServer()
+            if (!controlUiOk) {
+                Log.w(TAG, "OpenClaw Control UI did not become responsive on first attempt; retrying once")
+                updateDetail("Control UI retrying once…")
+                Thread.sleep(800)
+                controlUiOk = serverManager.startOpenClawControlUiServer()
+            }
+
+            if (!gatewayOk || !controlUiOk) {
                 updateDetail("Gateway auto recovery pending; manual connect remains available")
             }
-            gatewayOk
+            gatewayOk && controlUiOk
         } catch (error: Exception) {
             Log.e(TAG, "OpenClaw startup failed", error)
             false
@@ -642,7 +804,12 @@ class MainActivity : AppCompatActivity() {
         Thread {
             val ready =
                 try {
-                    serverManager.ensureOpenClawInteractiveReady()
+                    var ok = serverManager.reconnectOpenClawGateway()
+                    if (!ok) {
+                        Thread.sleep(600)
+                        ok = serverManager.reconnectOpenClawGateway()
+                    }
+                    ok
                 } catch (error: Exception) {
                     Log.w(TAG, "OpenClaw preflight failed: ${error.message}")
                     false
@@ -652,7 +819,7 @@ class MainActivity : AppCompatActivity() {
                 if (!ready) {
                     Toast.makeText(
                         this,
-                        "网关尚未就绪，请先点击“连接网关”后重试",
+                        "网关暂不可用，正在恢复，请稍后重试或手动点击连接网关",
                         Toast.LENGTH_SHORT,
                     ).show()
                     refreshGatewayStatusAsync(announce = true)
@@ -859,10 +1026,14 @@ class MainActivity : AppCompatActivity() {
                         }
                         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                         applyGatewayConnectedState(false, announce = true)
+                        if (ok) {
+                            userRequestedGatewayDisconnect = true
+                        }
                         gatewayToggleButton.isEnabled = true
                         refreshGatewayStatusAsync(announce = true)
                     }
                 } else {
+                    userRequestedGatewayDisconnect = false
                     val ok = serverManager.reconnectOpenClawGateway()
                     runOnUiThread {
                         val msg = if (ok) {
@@ -907,11 +1078,45 @@ class MainActivity : AppCompatActivity() {
         gatewayStatusChecking = true
         Thread {
             val connected =
-                serverManager.isOpenClawGatewayResponsive() &&
+                serverManager.isOpenClawGatewayPortReachable() &&
                     serverManager.isOpenClawControlUiResponsive(timeoutMs = 900)
             runOnUiThread {
                 gatewayStatusChecking = false
                 applyGatewayConnectedState(connected, announce)
+                if (!connected) {
+                    maybeAutoRecoverGateway()
+                }
+            }
+        }.start()
+    }
+
+    private fun maybeAutoRecoverGateway() {
+        if (!setupStarted) return
+        if (!serverManager.isOpenClawInstalled()) return
+        if (gatewayToggleButton.visibility != View.VISIBLE) return
+        if (!gatewayToggleButton.isEnabled) return
+        if (userRequestedGatewayDisconnect) return
+        if (gatewayAutoRecoverRunning) return
+
+        val now = System.currentTimeMillis()
+        if (now - gatewayAutoRecoverLastAtMs < 15_000L) return
+        gatewayAutoRecoverLastAtMs = now
+        gatewayAutoRecoverRunning = true
+
+        Thread {
+            val ok =
+                try {
+                    serverManager.reconnectOpenClawGateway()
+                } catch (error: Exception) {
+                    Log.w(TAG, "Auto gateway recovery failed: ${error.message}")
+                    false
+                }
+            runOnUiThread {
+                gatewayAutoRecoverRunning = false
+                if (ok) {
+                    applyGatewayConnectedState(true, announce = true)
+                    refreshGatewayStatusAsync(announce = false)
+                }
             }
         }.start()
     }
@@ -919,6 +1124,9 @@ class MainActivity : AppCompatActivity() {
     private fun applyGatewayConnectedState(connected: Boolean, announce: Boolean) {
         val changed = connected != gatewayConnected
         gatewayConnected = connected
+        if (connected) {
+            userRequestedGatewayDisconnect = false
+        }
         if (connected) {
             gatewayToggleButton.text = getString(R.string.gateway_toggle_button_connected)
             gatewayToggleButton.contentDescription = getString(R.string.gateway_toggle_button_desc_connected)
