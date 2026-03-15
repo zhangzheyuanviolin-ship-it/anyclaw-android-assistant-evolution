@@ -6,7 +6,9 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.io.InterruptedIOException
+import java.net.InetSocketAddress
 import java.net.HttpURLConnection
+import java.net.Socket
 import java.net.URL
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
@@ -1643,6 +1645,71 @@ H3
             "openclaw gateway call health --json --params '{}' >/dev/null 2>&1",
         )
         return code == 0
+    }
+
+    /**
+     * Fast reachability probe for UI polling.
+     * This avoids the expensive full CLI health RPC on every status tick.
+     */
+    fun isOpenClawGatewayPortReachable(timeoutMs: Int = 260): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress("127.0.0.1", openClawGatewayPort), timeoutMs)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun isOpenClawControlUiResponsive(timeoutMs: Int = 1200): Boolean {
+        return try {
+            val url = URL("http://127.0.0.1:$openClawControlUiPort/chat")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                instanceFollowRedirects = false
+                requestMethod = "GET"
+            }
+            conn.connect()
+            val code = conn.responseCode
+            conn.disconnect()
+            code in 200..399
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Unify auto-path and manual-path readiness checks before entering OpenClaw chat.
+     * Ensures gateway auth/profile + control UI are truly ready, otherwise reconnect.
+     */
+    fun ensureOpenClawInteractiveReady(): Boolean {
+        try {
+            configureOpenClawAuth()
+        } catch (_: Exception) {
+        }
+
+        var gatewayOk = isOpenClawGatewayResponsive()
+        if (!gatewayOk) {
+            gatewayOk = reconnectOpenClawGateway()
+        } else {
+            try {
+                startOpenClawControlUiServer()
+            } catch (_: Exception) {
+            }
+            if (!isOpenClawControlUiResponsive()) {
+                gatewayOk = reconnectOpenClawGateway()
+            }
+        }
+
+        if (!gatewayOk) return false
+
+        try {
+            startOpenClawControlUiServer()
+        } catch (_: Exception) {
+        }
+        return isOpenClawControlUiResponsive()
     }
 
     fun disconnectOpenClawGateway(): Boolean {
