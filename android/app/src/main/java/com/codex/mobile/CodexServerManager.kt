@@ -36,6 +36,8 @@ class CodexServerManager(private val context: Context) {
         private const val ANYCLAW_UBUNTU_PLUGIN_ID = "anyclaw-ubuntu-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
         private const val OPENCLAW_DAVEY_VERSION = "0.1.10"
+        private const val NPM_REGISTRY_PRIMARY = "https://registry.npmjs.org"
+        private const val NPM_REGISTRY_MIRROR = "https://registry.npmmirror.com"
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT = 60
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_STEP = 40
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
@@ -718,23 +720,8 @@ H3
         runInPrefix("node $npmCli cache clean --force 2>&1") { Log.d(TAG, "[npm-cache] $it") }
 
         onProgress("Installing OpenClaw (npm)…")
-        val installAttempts = listOf(
-            "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            "node $npmCli cache clean --force 2>&1 && node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            "npm_config_optional=false node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-        )
-        var installOk = false
-        for ((index, cmd) in installAttempts.withIndex()) {
-            onProgress("OpenClaw npm attempt ${index + 1}/${installAttempts.size}…")
-            val code = runInPrefix(cmd, onOutput = { onProgress(it) })
-            if (code == 0) {
-                installOk = true
-                break
-            }
-            Log.w(TAG, "npm install openclaw attempt ${index + 1} failed with code $code")
-        }
-        if (!installOk) {
-            Log.e(TAG, "npm install openclaw failed after all retry attempts")
+        if (!installOpenClawPackage(prefix, npmCli, onProgress)) {
+            Log.e(TAG, "npm install openclaw failed after all install channels")
             return false
         }
 
@@ -782,12 +769,8 @@ H3
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
 
         onProgress("Aligning OpenClaw to stable version $OPENCLAW_TARGET_VERSION…")
-        val code = runInPrefix(
-            "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            onOutput = { onProgress(it) },
-        )
-        if (code != 0) {
-            Log.e(TAG, "OpenClaw version alignment failed with code $code")
+        if (!installOpenClawPackage(prefix, npmCli, onProgress)) {
+            Log.e(TAG, "OpenClaw version alignment failed: all install channels exhausted")
             return false
         }
 
@@ -857,6 +840,100 @@ EOF
             return false
         }
         onProgress("OpenClaw CLI runtime ready")
+        return true
+    }
+
+    private fun ensureOpenClawNpmPrerequisites(
+        prefix: String,
+        npmCli: String,
+        onProgress: (String) -> Unit,
+    ): Boolean {
+        onProgress("Preparing npm prerequisites…")
+        val cmd = """
+            set +e
+            export DEBIAN_FRONTEND=noninteractive
+            for t in node npm; do
+              command -v "${'$'}t" >/dev/null 2>&1 || { echo "missing-required:${'$'}t"; exit 31; }
+            done
+
+            missing_extra=""
+            for t in git tar xz; do
+              command -v "${'$'}t" >/dev/null 2>&1 || missing_extra="${'$'}missing_extra ${'$'}t"
+            done
+            if [ -n "${'$'}missing_extra" ]; then
+              echo "installing-extra:${'$'}missing_extra"
+              apt-get update --allow-insecure-repositories 2>&1 || true
+              apt-get install -y --allow-unauthenticated git tar xz-utils 2>&1 || true
+              pkg install -y git tar xz-utils 2>&1 || true
+            fi
+
+            command -v git >/dev/null 2>&1 || { echo "missing-required:git"; exit 32; }
+            command -v tar >/dev/null 2>&1 || { echo "missing-required:tar"; exit 33; }
+
+            node "$npmCli" config set registry "$NPM_REGISTRY_PRIMARY" 2>&1 || true
+            node "$npmCli" cache clean --force 2>&1 || true
+            echo "npm-prerequisites-ready"
+        """.trimIndent()
+        val code = runInPrefix(cmd, onOutput = { onProgress(it) })
+        return code == 0
+    }
+
+    private fun installOpenClawPackage(
+        prefix: String,
+        npmCli: String,
+        onProgress: (String) -> Unit,
+    ): Boolean {
+        if (!ensureOpenClawNpmPrerequisites(prefix, npmCli, onProgress)) {
+            return false
+        }
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val logFile = File(paths.homeDir, ".openclaw-android/state/openclaw-install-last.log")
+        logFile.parentFile?.mkdirs()
+        val diagnostics = StringBuilder()
+
+        val attempts = listOf(
+            "default-registry" to "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+            "default-force" to "node $npmCli cache clean --force 2>&1 && node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+            "npmmirror-force" to "node $npmCli config set registry $NPM_REGISTRY_MIRROR 2>&1 && node $npmCli cache clean --force 2>&1 && node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+            "pack-then-local-install" to """
+                node $npmCli config set registry $NPM_REGISTRY_MIRROR 2>&1 || true
+                rm -rf "$prefix/tmp/openclaw-pack" && mkdir -p "$prefix/tmp/openclaw-pack"
+                node $npmCli pack openclaw@$OPENCLAW_TARGET_VERSION --pack-destination "$prefix/tmp/openclaw-pack" 2>&1
+                PACK_FILE="${'$'}(ls "$prefix/tmp/openclaw-pack"/openclaw-*.tgz 2>/dev/null | head -n 1)"
+                [ -n "${'$'}PACK_FILE" ] || exit 71
+                node $npmCli install -g --ignore-scripts --force "${'$'}PACK_FILE" 2>&1
+            """.trimIndent().replace("\n", " && "),
+        )
+
+        var ok = false
+        for ((index, attempt) in attempts.withIndex()) {
+            val name = attempt.first
+            val cmd = attempt.second
+            onProgress("Installing OpenClaw via $name (${index + 1}/${attempts.size})…")
+            val buffer = StringBuilder()
+            val code = runInPrefix(cmd, onOutput = {
+                onProgress(it)
+                buffer.appendLine(it)
+            })
+            diagnostics.appendLine("===== attempt:$name code:$code =====")
+            diagnostics.append(buffer.toString())
+            if (code == 0 && isOpenClawInstalled()) {
+                ok = true
+                break
+            }
+        }
+
+        // Always restore primary registry so other npm flows stay deterministic.
+        runInPrefix("node $npmCli config set registry $NPM_REGISTRY_PRIMARY 2>&1") {
+            Log.d(TAG, "[npm-registry-reset] $it")
+        }
+
+        if (!ok) {
+            logFile.writeText(diagnostics.toString())
+            onProgress("OpenClaw install log saved: ${logFile.absolutePath}")
+            return false
+        }
         return true
     }
 
