@@ -847,6 +847,7 @@ EOF
         prefix: String,
         npmCli: String,
         onProgress: (String) -> Unit,
+        onLine: ((String) -> Unit)? = null,
     ): Boolean {
         onProgress("Preparing npm prerequisites…")
         val cmd = """
@@ -861,20 +862,41 @@ EOF
               command -v "${'$'}t" >/dev/null 2>&1 || missing_extra="${'$'}missing_extra ${'$'}t"
             done
             if [ -n "${'$'}missing_extra" ]; then
+              echo "missing-extra:${'$'}missing_extra"
               echo "installing-extra:${'$'}missing_extra"
               apt-get update --allow-insecure-repositories 2>&1 || true
               apt-get install -y --allow-unauthenticated git tar xz-utils 2>&1 || true
               pkg install -y git tar xz-utils 2>&1 || true
+
+              mkdir -p "$prefix/tmp/_npm_prereq_stage"
+              cd "$prefix/tmp" || true
+              rm -f git*.deb tar*.deb xz-utils*.deb 2>/dev/null || true
+              apt-get download --allow-unauthenticated git 2>&1 || true
+              apt-get download --allow-unauthenticated tar 2>&1 || true
+              apt-get download --allow-unauthenticated xz-utils 2>&1 || true
+              for deb in git*.deb tar*.deb xz-utils*.deb; do
+                [ -f "${'$'}deb" ] && dpkg-deb -x "${'$'}deb" _npm_prereq_stage/ 2>&1 || true
+              done
+              if [ -d "_npm_prereq_stage/data/data/com.termux/files/usr" ]; then
+                cp -a _npm_prereq_stage/data/data/com.termux/files/usr/* "$prefix/" 2>&1 || true
+              elif [ -d "_npm_prereq_stage/usr" ]; then
+                cp -a _npm_prereq_stage/usr/* "$prefix/" 2>&1 || true
+              fi
+              rm -rf _npm_prereq_stage git*.deb tar*.deb xz-utils*.deb 2>/dev/null || true
             fi
 
-            command -v git >/dev/null 2>&1 || { echo "missing-required:git"; exit 32; }
-            command -v tar >/dev/null 2>&1 || { echo "missing-required:tar"; exit 33; }
+            command -v git >/dev/null 2>&1 && echo "extra-ready:git" || echo "extra-missing:git"
+            command -v tar >/dev/null 2>&1 && echo "extra-ready:tar" || echo "extra-missing:tar"
+            command -v xz >/dev/null 2>&1 && echo "extra-ready:xz" || echo "extra-missing:xz"
 
             node "$npmCli" config set registry "$NPM_REGISTRY_PRIMARY" 2>&1 || true
             node "$npmCli" cache clean --force 2>&1 || true
             echo "npm-prerequisites-ready"
         """.trimIndent()
-        val code = runInPrefix(cmd, onOutput = { onProgress(it) })
+        val code = runInPrefix(cmd, onOutput = {
+            onProgress(it)
+            onLine?.invoke(it)
+        })
         return code == 0
     }
 
@@ -883,14 +905,25 @@ EOF
         npmCli: String,
         onProgress: (String) -> Unit,
     ): Boolean {
-        if (!ensureOpenClawNpmPrerequisites(prefix, npmCli, onProgress)) {
-            return false
-        }
-
         val paths = BootstrapInstaller.getPaths(context)
         val logFile = File(paths.homeDir, ".openclaw-android/state/openclaw-install-last.log")
         logFile.parentFile?.mkdirs()
         val diagnostics = StringBuilder()
+        diagnostics.appendLine("===== openclaw-install-start =====")
+        diagnostics.appendLine("targetVersion=$OPENCLAW_TARGET_VERSION")
+
+        if (!ensureOpenClawNpmPrerequisites(
+                prefix = prefix,
+                npmCli = npmCli,
+                onProgress = onProgress,
+                onLine = { diagnostics.appendLine(it) },
+            )
+        ) {
+            diagnostics.appendLine("===== prerequisites-failed =====")
+            logFile.writeText(diagnostics.toString())
+            onProgress("OpenClaw install log saved: ${logFile.absolutePath}")
+            return false
+        }
 
         val attempts = listOf(
             "default-registry" to "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
