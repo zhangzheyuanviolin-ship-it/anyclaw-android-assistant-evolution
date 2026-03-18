@@ -479,23 +479,33 @@ class MainActivity : AppCompatActivity() {
         // Step 2d: Install OpenClaw
         if (!serverManager.isOpenClawInstalled()) {
             updateStatus("Installing build dependencies…")
-            serverManager.installOpenClawDeps { msg -> updateDetail(msg) }
+            val depsOk = serverManager.installOpenClawDeps { msg -> updateDetail(msg) }
+            if (!depsOk) {
+                throw RuntimeException("Failed to prepare OpenClaw build dependencies")
+            }
 
             updateStatus("Installing OpenClaw…", "This may take several minutes")
             val openclawOk = serverManager.installOpenClaw { msg -> updateDetail(msg) }
             if (!openclawOk) {
-                Log.w(TAG, "OpenClaw install failed — continuing without it")
-            } else {
-                updateStatus("OpenClaw installed")
+                throw RuntimeException("Failed to install OpenClaw")
             }
+            updateStatus("OpenClaw installed")
         }
 
         if (serverManager.isOpenClawInstalled()) {
             updateStatus("Checking OpenClaw version…")
             val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
             if (!versionOk) {
-                Log.w(TAG, "OpenClaw version alignment failed — continuing with current install")
+                throw RuntimeException("Failed to align OpenClaw version")
             }
+            updateStatus("Validating OpenClaw runtime…")
+            val runtimeReady = serverManager.ensureOpenClawRuntimeReady { msg -> updateDetail(msg) }
+            if (!runtimeReady) {
+                throw RuntimeException("OpenClaw runtime validation failed")
+            }
+            updateStatus("OpenClaw runtime ready")
+        } else {
+            throw RuntimeException("OpenClaw package missing after installation")
         }
 
         // Step 3: Install Codex CLI

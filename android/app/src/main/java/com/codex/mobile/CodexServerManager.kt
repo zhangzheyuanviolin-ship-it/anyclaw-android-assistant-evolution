@@ -360,7 +360,8 @@ WEOF
     fun isOpenClawInstalled(): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val npmRoot = "${paths.prefixDir}/lib/node_modules"
-        return File(npmRoot, "openclaw/package.json").exists()
+        return File(npmRoot, "openclaw/package.json").exists() &&
+            File(npmRoot, "openclaw/openclaw.mjs").exists()
     }
 
     /**
@@ -460,6 +461,12 @@ WEOF
 
         onProgress("Creating header stubs…")
         createHeaderStubs(prefix)
+
+        onProgress("Final toolchain verification…")
+        val finalPreflight = runOpenClawToolchainPreflight(onProgress)
+        if (!finalPreflight) {
+            Log.w(TAG, "OpenClaw dependency toolchain final preflight failed (non-fatal)")
+        }
 
         return true
     }
@@ -711,12 +718,29 @@ H3
         runInPrefix("node $npmCli cache clean --force 2>&1") { Log.d(TAG, "[npm-cache] $it") }
 
         onProgress("Installing OpenClaw (npm)…")
-        val installCode = runInPrefix(
+        val installAttempts = listOf(
             "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            onOutput = { onProgress(it) },
+            "node $npmCli cache clean --force 2>&1 && node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
+            "npm_config_optional=false node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
         )
-        if (installCode != 0) {
-            Log.e(TAG, "npm install openclaw failed with code $installCode")
+        var installOk = false
+        for ((index, cmd) in installAttempts.withIndex()) {
+            onProgress("OpenClaw npm attempt ${index + 1}/${installAttempts.size}…")
+            val code = runInPrefix(cmd, onOutput = { onProgress(it) })
+            if (code == 0) {
+                installOk = true
+                break
+            }
+            Log.w(TAG, "npm install openclaw attempt ${index + 1} failed with code $code")
+        }
+        if (!installOk) {
+            Log.e(TAG, "npm install openclaw failed after all retry attempts")
+            return false
+        }
+
+        onProgress("Verifying OpenClaw command wrapper…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            Log.e(TAG, "OpenClaw command wrapper verification failed after install")
             return false
         }
 
@@ -773,6 +797,12 @@ H3
             Log.w(TAG, "koffi rebuild failed after OpenClaw alignment")
         }
 
+        onProgress("Verifying OpenClaw command wrapper…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            Log.e(TAG, "OpenClaw command wrapper verification failed after version alignment")
+            return false
+        }
+
         onProgress("Re-applying OpenClaw Android patches…")
         patchOpenClawPaths()
         patchGatewayForAndroid()
@@ -782,6 +812,52 @@ H3
             return false
         }
         return isOpenClawInstalled()
+    }
+
+    private fun ensureOpenClawCommandWrapper(onProgress: (String) -> Unit): Boolean {
+        val prefix = BootstrapInstaller.getPaths(context).prefixDir
+        val cmd = """
+            set -eu
+            OPENCLAW_DIR="$prefix/lib/node_modules/openclaw"
+            OPENCLAW_MJS="${'$'}OPENCLAW_DIR/openclaw.mjs"
+            [ -f "${'$'}OPENCLAW_MJS" ] || { echo "openclaw-mjs-missing"; exit 21; }
+
+            cat > "$prefix/bin/openclaw" <<'EOF'
+#!/system/bin/sh
+exec $prefix/bin/node $prefix/lib/node_modules/openclaw/openclaw.mjs "${'$'}@"
+EOF
+            chmod 700 "$prefix/bin/openclaw"
+
+            command -v openclaw >/dev/null 2>&1 || exit 22
+            openclaw --version >/dev/null 2>&1 || exit 23
+            echo "openclaw-wrapper-ready"
+        """.trimIndent()
+        val code = runInPrefix(cmd, onOutput = { onProgress(it) })
+        return code == 0
+    }
+
+    fun ensureOpenClawRuntimeReady(onProgress: (String) -> Unit): Boolean {
+        val prefix = BootstrapInstaller.getPaths(context).prefixDir
+        if (!isOpenClawInstalled()) {
+            onProgress("OpenClaw package not found")
+            return false
+        }
+
+        onProgress("Validating OpenClaw CLI runtime…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            return false
+        }
+
+        val checkCode = runInPrefix(
+            "openclaw --version >/dev/null 2>&1 && test -f \"$prefix/lib/node_modules/openclaw/openclaw.mjs\"",
+            onOutput = { onProgress(it) },
+        )
+        if (checkCode != 0) {
+            onProgress("OpenClaw CLI runtime check failed")
+            return false
+        }
+        onProgress("OpenClaw CLI runtime ready")
+        return true
     }
 
     /**
