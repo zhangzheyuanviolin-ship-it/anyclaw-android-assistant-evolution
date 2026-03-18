@@ -1,0 +1,37 @@
+{
+  "id": "anyclaw-ubuntu-suite",
+  "name": "AnyClaw Ubuntu Suite",
+  "description": "Optional Ubuntu/proot terminal tools for OpenClaw on Android.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "timeoutSeconds": {
+        "type": "number",
+        "minimum": 10,
+        "maximum": 300
+      },
+      "installTimeoutSeconds": {
+        "type": "number",
+        "minimum": 60,
+        "maximum": 3600
+      },
+      "distroName": {
+        "type": "string"
+      },
+      "prootDistroBin": {
+        "type": "string"
+      },
+      "autoInstallProotDistro": {
+        "type": "boolean"
+      },
+      "autoInstallDistro": {
+        "type": "boolean"
+      },
+      "workspaceRoot": {
+        "type": "string"
+      }
+    }
+  }
+}
