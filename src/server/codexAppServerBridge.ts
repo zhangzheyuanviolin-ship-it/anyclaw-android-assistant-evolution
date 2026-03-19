@@ -1004,6 +1004,13 @@ function toLightweightSessionSummary(session: LightweightSession): Record<string
 
 async function listLightweightSessions(limit: number): Promise<Record<string, unknown>[]> {
   const state = await readLightweightState()
+  if (state.sessions.length === 0) {
+    const created = buildDefaultLightweightSession('agent:main:main')
+    created.title = '新会话'
+    created.updatedAt = Date.now()
+    state.sessions.push(created)
+    await writeLightweightState(state)
+  }
   const sorted = [...state.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
   return sorted.slice(0, limit).map(toLightweightSessionSummary)
 }
