@@ -5,6 +5,7 @@ import android.system.Os
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.io.SequenceInputStream
 import java.util.Collections
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -16,6 +17,7 @@ object OfflineOpenClawRuntimeInstaller {
     private const val TAG = "OfflineOpenClawRuntime"
     private const val RUNTIME_VERSION = "2026.3.2-offline-r1"
     private const val RUNTIME_DIR = "runtime"
+    private const val RUNTIME_ARCHIVE = "openclaw-runtime-2026.3.2.tar.gz"
     private const val RUNTIME_PART_PREFIX = "openclaw-runtime-2026.3.2.part"
     private const val DAVEY_ASSET = "runtime/davey.android-arm64.node"
 
@@ -34,13 +36,9 @@ object OfflineOpenClawRuntimeInstaller {
             return true
         }
 
-        val assetNames =
-            (context.assets.list(RUNTIME_DIR) ?: emptyArray())
-                .filter { it.startsWith(RUNTIME_PART_PREFIX) }
-                .sorted()
-
-        if (assetNames.isEmpty()) {
-            Log.e(TAG, "Offline OpenClaw runtime parts are missing from APK assets")
+        val runtimeAssets = resolveRuntimeAssets(context)
+        if (runtimeAssets == null) {
+            Log.e(TAG, "Offline OpenClaw runtime archive is missing from APK assets")
             return false
         }
 
@@ -53,7 +51,7 @@ object OfflineOpenClawRuntimeInstaller {
 
         return try {
             onProgress("Installing OpenClaw offline runtime…")
-            extractRuntimeArchive(context, assetNames, stagingRoot, onProgress)
+            extractRuntimeArchive(runtimeAssets, stagingRoot, onProgress)
 
             if (!stagingDir.exists()) {
                 Log.e(TAG, "Offline runtime staging directory missing after extraction")
@@ -72,13 +70,39 @@ object OfflineOpenClawRuntimeInstaller {
             }
 
             installBundledDavey(context, nativeFile, onProgress)
-            writeMarker(markerFile, assetNames.size)
+            writeMarker(markerFile, runtimeAssets.assetCount)
             true
         } catch (error: Exception) {
             Log.e(TAG, "Offline runtime install failed", error)
             stagingRoot.deleteRecursively()
             false
         }
+    }
+
+    private fun resolveRuntimeAssets(context: Context): RuntimeAssets? {
+        val assetNames = context.assets.list(RUNTIME_DIR) ?: emptyArray()
+        if (assetNames.contains(RUNTIME_ARCHIVE)) {
+            return RuntimeAssets(
+                assetCount = 1,
+                openStream = { context.assets.open("$RUNTIME_DIR/$RUNTIME_ARCHIVE") },
+            )
+        }
+
+        val partNames =
+            assetNames
+                .filter { it.startsWith(RUNTIME_PART_PREFIX) }
+                .sorted()
+        if (partNames.isEmpty()) {
+            return null
+        }
+
+        return RuntimeAssets(
+            assetCount = partNames.size,
+            openStream = {
+                val streams = partNames.map { part -> context.assets.open("$RUNTIME_DIR/$part") }
+                SequenceInputStream(Collections.enumeration(streams))
+            },
+        )
     }
 
     private fun isCurrentInstallValid(
@@ -101,16 +125,12 @@ object OfflineOpenClawRuntimeInstaller {
     }
 
     private fun extractRuntimeArchive(
-        context: Context,
-        assetNames: List<String>,
+        runtimeAssets: RuntimeAssets,
         targetRoot: File,
         onProgress: (String) -> Unit,
     ) {
-        val streams =
-            assetNames
-                .map { part -> context.assets.open("$RUNTIME_DIR/$part") }
-        val concat = SequenceInputStream(Collections.enumeration(streams))
-        GzipCompressorInputStream(concat).use { gzip ->
+        runtimeAssets.openStream().use { archiveStream ->
+        GzipCompressorInputStream(archiveStream).use { gzip ->
             TarArchiveInputStream(gzip).use { tar ->
                 var entry = tar.nextTarEntry
                 while (entry != null) {
@@ -154,6 +174,7 @@ object OfflineOpenClawRuntimeInstaller {
                 }
             }
         }
+        }
         onProgress("Offline OpenClaw runtime extracted")
     }
 
@@ -184,4 +205,9 @@ object OfflineOpenClawRuntimeInstaller {
                 .put("installedAt", java.time.Instant.now().toString())
         markerFile.writeText(payload.toString(2))
     }
+
+    private data class RuntimeAssets(
+        val assetCount: Int,
+        val openStream: () -> InputStream,
+    )
 }
