@@ -479,23 +479,10 @@ class MainActivity : AppCompatActivity() {
         // Step 2d: Install OpenClaw (optional in lightweight mode)
         var openClawAvailable = serverManager.isOpenClawInstalled()
         if (!openClawAvailable) {
-            updateStatus("Installing build dependencies…")
-            val depsOk = serverManager.installOpenClawDeps { msg -> updateDetail(msg) }
-            if (!depsOk) {
-                Log.w(TAG, "OpenClaw deps install failed — continue with lightweight mode")
-                updateStatus("OpenClaw deps unavailable", "Continuing in lightweight mode")
-            } else {
-                updateStatus("Installing OpenClaw…", "This may take several minutes")
-                val openclawOk = serverManager.installOpenClaw { msg -> updateDetail(msg) }
-                if (!openclawOk) {
-                    Log.w(TAG, "OpenClaw install failed — continue with lightweight mode")
-                    updateStatus("OpenClaw install unavailable", "Continuing in lightweight mode")
-                } else {
-                    updateStatus("OpenClaw installed")
-                }
-            }
+            updateStatus("Lightweight proxy mode", "Skipping OpenClaw npm installation")
+        } else {
+            updateStatus("OpenClaw detected", "Using installed OpenClaw runtime")
         }
-        openClawAvailable = serverManager.isOpenClawInstalled()
 
         if (openClawAvailable) {
             updateStatus("Checking OpenClaw version…")
