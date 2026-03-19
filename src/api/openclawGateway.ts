@@ -105,6 +105,7 @@ export async function listOpenClawSessions(limit = 200): Promise<OpenClawSession
     `/openclaw-api/sessions?limit=${encodeURIComponent(String(limit))}`,
     undefined,
     'Failed to load OpenClaw sessions',
+    20_000,
   )
 
   const rows = Array.isArray(payload.sessions) ? payload.sessions : []

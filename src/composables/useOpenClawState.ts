@@ -449,6 +449,13 @@ export function useOpenClawState() {
     await refreshHealth()
 
     await refreshSessions(preferredSessionKey)
+    if (!selectedSessionKey.value.trim()) {
+      try {
+        await createSession()
+      } catch (error) {
+        lastError.value = error instanceof Error ? error.message : '创建初始会话失败'
+      }
+    }
     if (selectedSessionKey.value) {
       await refreshHistory()
     }
