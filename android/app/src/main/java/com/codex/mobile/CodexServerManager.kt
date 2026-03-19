@@ -925,17 +925,50 @@ EOF
             return false
         }
 
+        val commonInstallPrefix = """
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf
+            export GIT_CONFIG_VALUE_0=ssh://git@github.com/
+            export GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf
+            export GIT_CONFIG_VALUE_1=git@github.com:
+            export npm_config_fetch_retries=0
+            export npm_config_fetch_retry_mintimeout=1000
+            export npm_config_fetch_retry_maxtimeout=5000
+            rm -rf "${'$'}HOME/.npm/_cacache/tmp/git-clone"* "${'$'}HOME/.npm/_cacache/tmp/tmp"* 2>/dev/null || true
+        """.trimIndent().replace("\n", " && ")
+
         val attempts = listOf(
-            "default-registry" to "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            "default-force" to "node $npmCli cache clean --force 2>&1 && node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            "npmmirror-force" to "node $npmCli config set registry $NPM_REGISTRY_MIRROR 2>&1 && node $npmCli cache clean --force 2>&1 && node $npmCli install -g --ignore-scripts --force openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            "pack-then-local-install" to """
+            "default-registry" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-default"
+                rm -rf "${'$'}CACHE_DIR" && mkdir -p "${'$'}CACHE_DIR"
+                $commonInstallPrefix
+                node $npmCli install -g --ignore-scripts --cache "${'$'}CACHE_DIR" openclaw@$OPENCLAW_TARGET_VERSION 2>&1
+            """.trimIndent().replace("\n", " && "),
+            "default-force" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-force"
+                rm -rf "${'$'}CACHE_DIR" && mkdir -p "${'$'}CACHE_DIR"
+                $commonInstallPrefix
+                node $npmCli cache clean --force 2>&1 || true
+                node $npmCli install -g --ignore-scripts --force --cache "${'$'}CACHE_DIR" openclaw@$OPENCLAW_TARGET_VERSION 2>&1
+            """.trimIndent().replace("\n", " && "),
+            "npmmirror-force" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-mirror"
+                rm -rf "${'$'}CACHE_DIR" && mkdir -p "${'$'}CACHE_DIR"
+                $commonInstallPrefix
                 node $npmCli config set registry $NPM_REGISTRY_MIRROR 2>&1 || true
-                rm -rf "$prefix/tmp/openclaw-pack" && mkdir -p "$prefix/tmp/openclaw-pack"
+                node $npmCli cache clean --force 2>&1 || true
+                node $npmCli install -g --ignore-scripts --force --cache "${'$'}CACHE_DIR" openclaw@$OPENCLAW_TARGET_VERSION 2>&1
+            """.trimIndent().replace("\n", " && "),
+            "pack-then-local-install" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-pack"
+                rm -rf "${'$'}CACHE_DIR" "$prefix/tmp/openclaw-pack" && mkdir -p "${'$'}CACHE_DIR" "$prefix/tmp/openclaw-pack"
+                $commonInstallPrefix
+                node $npmCli config set registry $NPM_REGISTRY_MIRROR 2>&1 || true
                 node $npmCli pack openclaw@$OPENCLAW_TARGET_VERSION --pack-destination "$prefix/tmp/openclaw-pack" 2>&1
                 PACK_FILE="${'$'}(ls "$prefix/tmp/openclaw-pack"/openclaw-*.tgz 2>/dev/null | head -n 1)"
                 [ -n "${'$'}PACK_FILE" ] || exit 71
-                node $npmCli install -g --ignore-scripts --force "${'$'}PACK_FILE" 2>&1
+                node $npmCli install -g --ignore-scripts --force --cache "${'$'}CACHE_DIR" "${'$'}PACK_FILE" 2>&1
             """.trimIndent().replace("\n", " && "),
         )
 
