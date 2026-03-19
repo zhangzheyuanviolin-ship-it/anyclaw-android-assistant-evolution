@@ -476,27 +476,35 @@ class MainActivity : AppCompatActivity() {
         // Step 2c: Install bionic-compat.js (Android platform shim for Node.js)
         serverManager.ensureBionicCompat()
 
-        // Step 2d: Install OpenClaw (optional in lightweight mode)
+        // Step 2d: Install OpenClaw from offline runtime assets
         var openClawAvailable = serverManager.isOpenClawInstalled()
         if (!openClawAvailable) {
-            updateStatus("Lightweight proxy mode", "Skipping OpenClaw npm installation")
-        } else {
-            updateStatus("OpenClaw detected", "Using installed OpenClaw runtime")
+            updateStatus("Installing OpenClaw (offline runtime)…", "Using bundled runtime assets")
+            val offlineOk = OfflineOpenClawRuntimeInstaller.install(this) { msg -> updateDetail(msg) }
+            if (!offlineOk) {
+                throw RuntimeException("Failed to install bundled OpenClaw runtime")
+            }
+
+            updateStatus("Preparing OpenClaw runtime…")
+            val prepared = serverManager.prepareOfflineOpenClawRuntime { msg -> updateDetail(msg) }
+            if (!prepared) {
+                throw RuntimeException("Failed to prepare bundled OpenClaw runtime")
+            }
+            openClawAvailable = serverManager.isOpenClawInstalled()
         }
+        updateStatus("OpenClaw runtime ready")
 
         if (openClawAvailable) {
             updateStatus("Checking OpenClaw version…")
             val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
             if (!versionOk) {
-                Log.w(TAG, "OpenClaw version alignment failed — continue with lightweight mode")
-                openClawAvailable = false
+                throw RuntimeException("Failed to align bundled OpenClaw runtime")
             }
             if (openClawAvailable) {
                 updateStatus("Validating OpenClaw runtime…")
                 val runtimeReady = serverManager.ensureOpenClawRuntimeReady { msg -> updateDetail(msg) }
                 if (!runtimeReady) {
-                    Log.w(TAG, "OpenClaw runtime validation failed — continue with lightweight mode")
-                    openClawAvailable = false
+                    throw RuntimeException("Bundled OpenClaw runtime failed validation")
                 } else {
                     updateStatus("OpenClaw runtime ready")
                 }
@@ -562,11 +570,7 @@ class MainActivity : AppCompatActivity() {
             startOpenClawServicesSync()
         } else {
             // Existing installs keep Codex page availability as the first priority.
-            if (openClawAvailable) {
-                startOpenClawServicesAsync()
-            } else {
-                updateStatus("Lightweight proxy mode ready", "OpenClaw gateway is optional")
-            }
+            startOpenClawServicesAsync()
         }
 
         // Step 8: Start web server

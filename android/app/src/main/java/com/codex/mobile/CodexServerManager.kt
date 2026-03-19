@@ -755,6 +755,40 @@ H3
         return isOpenClawInstalled()
     }
 
+    fun prepareOfflineOpenClawRuntime(onProgress: (String) -> Unit): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+
+        runInPrefix("mkdir -p $prefix/tmp/openclaw ${paths.homeDir}/.openclaw-android/patches ${paths.homeDir}/.openclaw")
+
+        val systemctlStub = File(prefix, "bin/systemctl")
+        if (!systemctlStub.exists()) {
+            systemctlStub.writeText(
+                "#!/system/bin/sh\n" +
+                    "exit 0\n"
+            )
+            systemctlStub.setExecutable(true)
+        }
+
+        onProgress("Verifying OpenClaw command wrapper…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            return false
+        }
+
+        onProgress("Patching OpenClaw paths…")
+        patchOpenClawPaths()
+
+        onProgress("Patching gateway for Android…")
+        patchGatewayForAndroid()
+
+        onProgress("Repairing OpenClaw native bindings…")
+        if (!ensureOpenClawNativeBinding(onProgress)) {
+            return false
+        }
+
+        return isOpenClawInstalled()
+    }
+
     fun ensureOpenClawVersion(onProgress: (String) -> Unit): Boolean {
         if (!isOpenClawInstalled()) return true
 
