@@ -30,6 +30,7 @@ const HISTORY_STEP = 40
 const POLL_INTERVAL_MS = 2500
 const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
+const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
 
 type SessionSelectOptions = {
   syncHistory?: boolean
@@ -446,19 +447,37 @@ export function useOpenClawState() {
   }
 
   async function initialize(preferredSessionKey = ''): Promise<void> {
-    await refreshHealth()
+    await ensureSessionReady(preferredSessionKey)
+  }
 
-    await refreshSessions(preferredSessionKey)
-    if (!selectedSessionKey.value.trim()) {
+  async function ensureSessionReady(preferredSessionKey = ''): Promise<string> {
+    const preferred = preferredSessionKey.trim()
+
+    for (let attempt = 0; attempt < OPENCLAW_BOOTSTRAP_RETRY_LIMIT; attempt += 1) {
+      await refreshHealth()
+      await refreshSessions(preferred)
+
+      const currentSession = selectedSessionKey.value.trim()
+      if (currentSession) {
+        await refreshHistory()
+        lastError.value = ''
+        return currentSession
+      }
+
       try {
-        await createSession()
+        const createdSession = await createSession()
+        if (createdSession.trim()) {
+          lastError.value = ''
+          return createdSession
+        }
       } catch (error) {
         lastError.value = error instanceof Error ? error.message : '创建初始会话失败'
       }
+
+      await new Promise((resolve) => setTimeout(resolve, 300 + attempt * 300))
     }
-    if (selectedSessionKey.value) {
-      await refreshHistory()
-    }
+
+    return ''
   }
 
   async function createSession(label?: string): Promise<string> {
@@ -579,10 +598,13 @@ export function useOpenClawState() {
 
   async function pollOnce(): Promise<void> {
     if (pollInFlight) return
-    if (!selectedSessionKey.value.trim()) return
 
     pollInFlight = true
     try {
+      if (!selectedSessionKey.value.trim()) {
+        await ensureSessionReady()
+        return
+      }
       pollTick += 1
       if (pollTick % 3 === 0) {
         await refreshSessions(selectedSessionKey.value)
@@ -622,6 +644,7 @@ export function useOpenClawState() {
     liveOverlay,
     lastError,
     initialize,
+    ensureSessionReady,
     refreshHealth,
     refreshSessions,
     refreshHistory,

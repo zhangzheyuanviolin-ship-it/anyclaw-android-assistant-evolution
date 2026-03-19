@@ -403,6 +403,7 @@ const {
   liveOverlay: openClawLiveOverlay,
   lastError: openClawLastError,
   initialize: initializeOpenClaw,
+  ensureSessionReady: ensureOpenClawSessionReady,
   refreshHealth: refreshOpenClawHealth,
   refreshSessions: refreshOpenClawSessions,
   refreshHistory: refreshOpenClawHistory,
@@ -904,11 +905,14 @@ watch(
     if (!hasInitialized.value) return
     if (isActive) {
       startOpenClawPolling()
-      if (routeOpenClawSessionKey.value) {
-        void selectOpenClawSession(routeOpenClawSessionKey.value)
-      } else if (openClawSelectedSessionKey.value) {
-        void router.replace({ name: 'openclaw-chat', query: { session: openClawSelectedSessionKey.value } })
-      }
+      void (async () => {
+        await ensureOpenClawSessionReady(routeOpenClawSessionKey.value)
+        if (routeOpenClawSessionKey.value) {
+          await selectOpenClawSession(routeOpenClawSessionKey.value)
+        } else if (openClawSelectedSessionKey.value) {
+          await router.replace({ name: 'openclaw-chat', query: { session: openClawSelectedSessionKey.value } })
+        }
+      })()
       return
     }
     stopOpenClawPolling()

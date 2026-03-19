@@ -342,8 +342,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun isOpenClawChatUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        return url.contains(":${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}") &&
-            (url.contains("/chat") || url.contains("/index.html"))
+        val isLegacyControlUi =
+            url.contains(":${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}") &&
+                (url.contains("/chat") || url.contains("/index.html"))
+        val isNewChatPage =
+            url.contains(":${CodexServerManager.SERVER_PORT}") &&
+                url.contains("/openclaw/chat")
+        return isLegacyControlUi || isNewChatPage
     }
 
     private fun cancelOpenClawWatchdog() {
@@ -397,7 +402,7 @@ class MainActivity : AppCompatActivity() {
             null,
         )
 
-        val fallback = "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat"
+        val fallback = "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/openclaw/chat"
         val parsed = Uri.parse(originalUrl ?: fallback)
         val builder = parsed.buildUpon().clearQuery()
         for (name in parsed.queryParameterNames) {

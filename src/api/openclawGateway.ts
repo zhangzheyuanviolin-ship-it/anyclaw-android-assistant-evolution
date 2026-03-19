@@ -26,33 +26,49 @@ async function requestOpenClaw<T>(
   fallbackMessage = 'OpenClaw request failed',
   timeoutMs = 9000,
 ): Promise<T> {
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
   const timerHost = typeof globalThis !== 'undefined' ? globalThis : null
-  const timeout =
-    controller && timeoutMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
-      ? timerHost.setTimeout(() => {
-          controller.abort()
-        }, timeoutMs)
-      : null
+  let response: Response | null = null
+  let lastError: unknown = null
 
-  let response: Response
-  try {
-    response = await fetch(path, {
-      ...options,
-      signal: controller?.signal,
-    })
-  } catch (error) {
-    if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
-      timerHost.clearTimeout(timeout)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const timeout =
+      controller && timeoutMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
+        ? timerHost.setTimeout(() => {
+            controller.abort()
+          }, timeoutMs)
+        : null
+
+    try {
+      response = await fetch(path, {
+        ...options,
+        signal: controller?.signal,
+      })
+      if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
+        timerHost.clearTimeout(timeout)
+      }
+      break
+    } catch (error) {
+      if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
+        timerHost.clearTimeout(timeout)
+      }
+      lastError = error
+      const message = error instanceof Error ? error.message : String(error ?? '')
+      const isTimeout = error instanceof DOMException && error.name === 'AbortError'
+      const retryable = isTimeout || /failed to fetch/i.test(message)
+      if (attempt < 2 && retryable) {
+        await new Promise((resolve) => timerHost?.setTimeout?.(resolve, 250 + attempt * 250) ?? resolve(null))
+        continue
+      }
+      if (isTimeout) {
+        throw new Error(`${fallbackMessage}: request timeout`)
+      }
+      throw error
     }
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`${fallbackMessage}: request timeout`)
-    }
-    throw error
   }
 
-  if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
-    timerHost.clearTimeout(timeout)
+  if (!response) {
+    throw (lastError instanceof Error ? lastError : new Error(fallbackMessage))
   }
 
   let payload: unknown = null
