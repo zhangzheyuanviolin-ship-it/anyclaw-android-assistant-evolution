@@ -897,6 +897,54 @@ EOF
             onProgress(it)
             onLine?.invoke(it)
         })
+        if (code == 0) {
+            patchNpmGitCloneRetryBug(prefix, onProgress, onLine)
+        }
+        return code == 0
+    }
+
+    private fun patchNpmGitCloneRetryBug(
+        prefix: String,
+        onProgress: (String) -> Unit,
+        onLine: ((String) -> Unit)? = null,
+    ): Boolean {
+        val cmd = """
+            set +e
+            SPAWN_JS="$prefix/lib/node_modules/npm/node_modules/@npmcli/git/lib/spawn.js"
+            [ -f "${'$'}SPAWN_JS" ] || { echo "npm-git-spawn-missing"; exit 0; }
+            SPAWN_JS="${'$'}SPAWN_JS" node <<'NODE'
+            const fs = require('fs')
+            const p = process.env.SPAWN_JS
+            let src = fs.readFileSync(p, 'utf8')
+            if (src.includes('anyclaw-git-clone-cleanup')) {
+              console.log('npm-git-spawn-patch:already')
+              process.exit(0)
+            }
+            const needle = "    return spawn(gitPath, args, makeOpts(opts))\\n"
+            if (!src.includes(needle)) {
+              console.log('npm-git-spawn-patch:needle-missing')
+              process.exit(2)
+            }
+            const injected = [
+              "    // anyclaw-git-clone-cleanup",
+              "    try {",
+              "      const cloneIdx = args.indexOf('clone')",
+              "      if (cloneIdx >= 0 && args[cloneIdx + 2]) {",
+              "        require('fs').rmSync(args[cloneIdx + 2], { recursive: true, force: true })",
+              "      }",
+              "    } catch {}",
+              needle.trimEnd(),
+              "",
+            ].join("\\n")
+            src = src.replace(needle, injected)
+            fs.writeFileSync(p, src)
+            console.log('npm-git-spawn-patch:ok')
+            NODE
+        """.trimIndent()
+        val code = runInPrefix(cmd, onOutput = {
+            onProgress(it)
+            onLine?.invoke(it)
+        })
         return code == 0
     }
 
