@@ -511,31 +511,25 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Step 3: Install Codex CLI
-        if (!serverManager.isCodexInstalled()) {
-            updateStatus("Installing Codex CLI…", "This may take a few minutes")
-            val codexOk = serverManager.installCodex { msg -> updateDetail(msg) }
-            if (!codexOk) {
-                throw RuntimeException("Failed to install Codex")
-            }
+        // Step 3: Codex is optional on first run. Do not block OpenClaw-only users.
+        val codexCliInstalled = serverManager.isCodexInstalled()
+        if (codexCliInstalled) {
+            serverManager.ensureCodexWrapperScript()
+        } else {
+            updateStatus("Skipping optional Codex CLI install", "You can install it later in Permission Center")
         }
-
-        // Ensure codex wrapper script exists
-        serverManager.ensureCodexWrapperScript()
 
         // Step 3a: Extract web UI from APK assets (every launch)
         updateStatus("Updating web UI…")
         serverManager.installServerBundle { msg -> updateDetail(msg) }
 
-        // Step 3b: Install native platform binary
-        if (!serverManager.isPlatformBinaryInstalled()) {
-            updateStatus("Installing Codex platform binary…")
-            val binOk = serverManager.installPlatformBinary { msg -> updateDetail(msg) }
-            if (!binOk) {
-                throw RuntimeException("Failed to install Codex platform binary")
-            }
+        // Step 3b: Codex platform binary is also optional and can be installed later.
+        val codexBinaryInstalled = serverManager.isPlatformBinaryInstalled()
+        when {
+            codexCliInstalled && codexBinaryInstalled -> updateStatus("Codex ready")
+            codexCliInstalled -> updateStatus("Codex native binary not installed", "You can complete it later in Permission Center")
+            else -> updateStatus("Codex optional install skipped", "OpenClaw mode is ready")
         }
-        updateStatus("Codex ready")
 
         // Step 3c: Write full-access config, create default workspace, and bridge shared storage paths
         serverManager.ensureFullAccessConfig()
@@ -552,13 +546,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Step 5: Codex auth is optional. Do not block startup for OpenClaw-only users.
-        updateStatus("Checking Codex authentication…")
-        val codexLoggedIn = serverManager.isLoggedIn()
-        if (!codexLoggedIn) {
-            updateStatus("Codex not logged in", "Continuing in OpenClaw mode")
+        if (codexCliInstalled && codexBinaryInstalled) {
+            updateStatus("Checking Codex authentication…")
+            val codexLoggedIn = serverManager.isLoggedIn()
+            if (!codexLoggedIn) {
+                updateStatus("Codex not logged in", "Continuing in OpenClaw mode")
+            } else {
+                // Keep startup fast and non-blocking even when Codex network is unavailable.
+                updateStatus("Codex authenticated")
+            }
         } else {
-            // Keep startup fast and non-blocking even when Codex network is unavailable.
-            updateStatus("Codex authenticated")
+            updateStatus("Codex not installed", "Continuing in OpenClaw mode")
         }
 
         // Step 7: On a fresh install, complete one full OpenClaw bring-up pass

@@ -143,6 +143,17 @@
             android:text="@string/codex_auth_open_browser_text"
             android:textAllCaps="false" />
 
+        <Button
+            android:id="@+id/btnCodexInstall"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:contentDescription="@string/codex_install_button_desc"
+            android:importantForAccessibility="yes"
+            android:minHeight="48dp"
+            android:text="@string/codex_install_button_text"
+            android:textAllCaps="false" />
+
         <TextView
             android:id="@+id/tvRevokeHint"
             android:layout_width="match_parent"

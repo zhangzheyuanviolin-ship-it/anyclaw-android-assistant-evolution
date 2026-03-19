@@ -19,8 +19,11 @@ class PermissionManagerActivity : AppCompatActivity() {
     private lateinit var btnOpenShizuku: Button
     private lateinit var btnRefresh: Button
     private lateinit var btnCodexAuthBrowser: Button
+    private lateinit var btnCodexInstall: Button
     @Volatile
     private var codexLoginRunning = false
+    @Volatile
+    private var codexInstallRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -34,6 +37,7 @@ class PermissionManagerActivity : AppCompatActivity() {
         btnOpenShizuku = findViewById(R.id.btnOpenShizukuApp)
         btnRefresh = findViewById(R.id.btnRefreshShizukuStatus)
         btnCodexAuthBrowser = findViewById(R.id.btnCodexAuthBrowser)
+        btnCodexInstall = findViewById(R.id.btnCodexInstall)
 
         switchBridge.isChecked = ShizukuController.isBridgeEnabled(this)
         switchBridge.setOnCheckedChangeListener { _, isChecked ->
@@ -73,6 +77,7 @@ class PermissionManagerActivity : AppCompatActivity() {
             refreshCodexAuthStatus()
         }
         btnCodexAuthBrowser.setOnClickListener { startCodexBrowserAuth() }
+        btnCodexInstall.setOnClickListener { startCodexInstallRepair() }
     }
 
     override fun onResume() {
@@ -118,21 +123,35 @@ class PermissionManagerActivity : AppCompatActivity() {
             getString(R.string.codex_auth_status_checking),
         )
         Thread {
-            val loggedIn = runCatching { serverManager.isLoggedIn() }.getOrElse { false }
+            val cliInstalled = runCatching { serverManager.isCodexInstalled() }.getOrElse { false }
+            val binaryInstalled = runCatching { serverManager.isPlatformBinaryInstalled() }.getOrElse { false }
+            val loggedIn = if (cliInstalled && binaryInstalled) {
+                runCatching { serverManager.isLoggedIn() }.getOrElse { false }
+            } else {
+                false
+            }
             runOnUiThread {
-                val text = if (loggedIn) {
-                    getString(R.string.codex_auth_status_logged_in)
-                } else {
-                    getString(R.string.codex_auth_status_logged_out)
+                val text = when {
+                    !cliInstalled -> getString(R.string.codex_install_status_missing)
+                    !binaryInstalled -> getString(R.string.codex_install_status_binary_missing)
+                    loggedIn -> getString(R.string.codex_auth_status_logged_in)
+                    else -> getString(R.string.codex_auth_status_logged_out)
                 }
                 tvCodexAuthStatus.text = getString(R.string.codex_auth_status_template, text)
+                btnCodexAuthBrowser.isEnabled = !codexLoginRunning && cliInstalled && binaryInstalled
+                btnCodexInstall.isEnabled = !codexInstallRunning
+                btnCodexInstall.text = if (cliInstalled && binaryInstalled) {
+                    getString(R.string.codex_install_repair_text)
+                } else {
+                    getString(R.string.codex_install_button_text)
+                }
             }
         }.start()
     }
 
     private fun startCodexBrowserAuth() {
         if (codexLoginRunning) return
-        if (!serverManager.isCodexInstalled()) {
+        if (!serverManager.isCodexInstalled() || !serverManager.isPlatformBinaryInstalled()) {
             Toast.makeText(this, getString(R.string.codex_not_installed), Toast.LENGTH_LONG).show()
             return
         }
@@ -182,6 +201,48 @@ class PermissionManagerActivity : AppCompatActivity() {
                     }
                     Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 }
+                refreshCodexAuthStatus()
+            }
+        }.start()
+    }
+
+    private fun startCodexInstallRepair() {
+        if (codexInstallRunning) return
+        codexInstallRunning = true
+        btnCodexInstall.isEnabled = false
+        btnCodexAuthBrowser.isEnabled = false
+        Toast.makeText(this, getString(R.string.codex_install_starting), Toast.LENGTH_SHORT).show()
+
+        Thread {
+            val cliInstalled =
+                if (serverManager.isCodexInstalled()) {
+                    true
+                } else {
+                    serverManager.installCodex { }
+                }
+
+            val binaryInstalled =
+                if (cliInstalled && serverManager.isPlatformBinaryInstalled()) {
+                    true
+                } else if (cliInstalled) {
+                    serverManager.installPlatformBinary { }
+                } else {
+                    false
+                }
+
+            if (cliInstalled) {
+                runCatching { serverManager.ensureCodexWrapperScript() }
+            }
+
+            runOnUiThread {
+                codexInstallRunning = false
+                btnCodexInstall.isEnabled = true
+                val message = if (cliInstalled && binaryInstalled) {
+                    getString(R.string.codex_install_success)
+                } else {
+                    getString(R.string.codex_install_failed)
+                }
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 refreshCodexAuthStatus()
             }
         }.start()
