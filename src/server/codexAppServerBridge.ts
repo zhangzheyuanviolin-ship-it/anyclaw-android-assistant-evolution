@@ -268,12 +268,48 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
   return JSON.parse(payload) as unknown
 }
 
+async function tryRunOpenClawGatewayCall(method: string, params: unknown): Promise<unknown | null> {
+  try {
+    return await runOpenClawGatewayCall(method, params)
+  } catch {
+    return null
+  }
+}
+
+async function isNativeOpenClawReady(): Promise<boolean> {
+  return (await tryRunOpenClawGatewayCall('health', {})) !== null
+}
+
 function readPositiveInt(value: string | null, fallback: number): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return fallback
   const normalized = Math.floor(parsed)
   if (normalized < 1) return fallback
   return normalized
+}
+
+function toOpenClawSessionSummary(row: Record<string, unknown>): Record<string, unknown> | null {
+  const key = normalizeText(row.key)
+  if (!key) return null
+
+  const updatedAt =
+    typeof row.updatedAt === 'number' && Number.isFinite(row.updatedAt)
+      ? row.updatedAt
+      : Date.now()
+
+  return {
+    key,
+    displayName:
+      normalizeText(row.displayName) ||
+      normalizeText(row.label) ||
+      normalizeText(row.derivedTitle) ||
+      key,
+    label: normalizeText(row.label) || normalizeText(row.displayName) || '',
+    updatedAt,
+    lastMessagePreview: normalizeText(row.lastMessagePreview),
+    modelProvider: normalizeText(row.modelProvider),
+    model: normalizeText(row.model),
+  }
 }
 
 function truncateText(value: string, limit: number): string {
@@ -1867,6 +1903,20 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/openclaw-api/health') {
+        const nativeHealth = await tryRunOpenClawGatewayCall('health', {})
+        if (nativeHealth !== null) {
+          const record = asRecord(nativeHealth) ?? {}
+          setJson(res, 200, {
+            ok: true,
+            data: {
+              mode: 'native-gateway',
+              gatewayRequired: true,
+              ...record,
+            },
+          })
+          return
+        }
+
         setJson(res, 200, {
           ok: true,
           data: {
@@ -1879,6 +1929,24 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
       if (req.method === 'GET' && url.pathname === '/openclaw-api/sessions') {
         const limit = readPositiveInt(url.searchParams.get('limit'), 200)
+        if (await isNativeOpenClawReady()) {
+          const nativeSessions = await runOpenClawGatewayCall('sessions.list', {
+            limit,
+            includeDerivedTitles: true,
+            includeLastMessage: true,
+            includeGlobal: true,
+            includeUnknown: true,
+          })
+          const record = asRecord(nativeSessions)
+          const sessions = Array.isArray(record?.sessions)
+            ? record.sessions
+              .map((row) => toOpenClawSessionSummary(asRecord(row) ?? {}))
+              .filter((row): row is Record<string, unknown> => row !== null)
+            : []
+          setJson(res, 200, { sessions })
+          return
+        }
+
         const sessions = await listLightweightSessions(limit)
         setJson(res, 200, { sessions })
         return
@@ -1892,6 +1960,20 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
         const limit = readPositiveInt(String(payload?.limit ?? ''), 60)
+        if (await isNativeOpenClawReady()) {
+          const nativeHistory = await runOpenClawGatewayCall('chat.history', {
+            sessionKey,
+            limit,
+          })
+          const record = asRecord(nativeHistory) ?? {}
+          setJson(res, 200, {
+            sessionKey: normalizeText(record.sessionKey) || sessionKey,
+            messages: Array.isArray(record.messages) ? record.messages : [],
+            thinkingLevel: normalizeText(record.thinkingLevel) || 'medium',
+          })
+          return
+        }
+
         const result = await readLightweightHistory(sessionKey, limit)
         setJson(res, 200, result)
         return
@@ -1906,6 +1988,26 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey and message/attachments' })
           return
         }
+
+        if (await isNativeOpenClawReady()) {
+          const nativeRun = await runOpenClawGatewayCall('chat.send', {
+            sessionKey,
+            message,
+            deliver: payload?.deliver === true,
+            attachments: attachments.length > 0 ? attachments : undefined,
+            timeoutMs: 12000,
+            idempotencyKey: `mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          })
+          const record = asRecord(nativeRun)
+          const runId = normalizeText(record?.runId)
+          if (!runId) {
+            setJson(res, 502, { error: 'chat.send missing runId' })
+            return
+          }
+          setJson(res, 200, { ok: true, runId })
+          return
+        }
+
         const run = await sendLightweightMessage({
           sessionKey,
           message,
@@ -1951,7 +2053,9 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const label = normalizeText(payload?.label) || '新会话'
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
-        const sessionKey = await createLightweightSession(label, currentSessionKey)
+        const sessionKey = await (await isNativeOpenClawReady()
+          ? createIndependentOpenClawSession(currentSessionKey, label)
+          : createLightweightSession(label, currentSessionKey))
         setJson(res, 200, { sessionKey })
         return
       }
@@ -1959,7 +2063,9 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/reset') {
         const payload = asRecord(await readJsonBody(req))
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
-        const sessionKey = await resetLightweightSession(currentSessionKey)
+        const sessionKey = await (await isNativeOpenClawReady()
+          ? resetCurrentOpenClawSession(currentSessionKey)
+          : resetLightweightSession(currentSessionKey))
         setJson(res, 200, { sessionKey })
         return
       }
@@ -1972,7 +2078,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey or label' })
           return
         }
-        await renameLightweightSession(sessionKey, label)
+        if (await isNativeOpenClawReady()) {
+          await runOpenClawGatewayCall('sessions.patch', {
+            key: sessionKey,
+            label,
+          })
+        } else {
+          await renameLightweightSession(sessionKey, label)
+        }
         setJson(res, 200, { ok: true })
         return
       }
@@ -1984,7 +2097,15 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey' })
           return
         }
-        await deleteLightweightSession(sessionKey)
+        if (await isNativeOpenClawReady()) {
+          await runOpenClawGatewayCall('sessions.delete', {
+            key: sessionKey,
+            deleteTranscript: true,
+            emitLifecycleHooks: false,
+          })
+        } else {
+          await deleteLightweightSession(sessionKey)
+        }
         setJson(res, 200, { ok: true })
         return
       }
