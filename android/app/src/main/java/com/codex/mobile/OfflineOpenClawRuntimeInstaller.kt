@@ -3,9 +3,11 @@ package com.codex.mobile
 import android.content.Context
 import android.system.Os
 import android.util.Log
+import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.PushbackInputStream
 import java.io.SequenceInputStream
 import java.util.Collections
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -17,7 +19,8 @@ object OfflineOpenClawRuntimeInstaller {
     private const val TAG = "OfflineOpenClawRuntime"
     private const val RUNTIME_VERSION = "2026.3.2-offline-r1"
     private const val RUNTIME_DIR = "runtime"
-    private const val RUNTIME_ARCHIVE = "openclaw-runtime-2026.3.2.tar.gz"
+    private const val RUNTIME_ARCHIVE_TAR = "openclaw-runtime-2026.3.2.tar"
+    private const val RUNTIME_ARCHIVE_TAR_GZ = "openclaw-runtime-2026.3.2.tar.gz"
     private const val RUNTIME_PART_PREFIX = "openclaw-runtime-2026.3.2.part"
     private const val DAVEY_ASSET = "runtime/davey.android-arm64.node"
 
@@ -81,10 +84,16 @@ object OfflineOpenClawRuntimeInstaller {
 
     private fun resolveRuntimeAssets(context: Context): RuntimeAssets? {
         val assetNames = context.assets.list(RUNTIME_DIR) ?: emptyArray()
-        if (assetNames.contains(RUNTIME_ARCHIVE)) {
+        if (assetNames.contains(RUNTIME_ARCHIVE_TAR)) {
             return RuntimeAssets(
                 assetCount = 1,
-                openStream = { context.assets.open("$RUNTIME_DIR/$RUNTIME_ARCHIVE") },
+                openStream = { context.assets.open("$RUNTIME_DIR/$RUNTIME_ARCHIVE_TAR") },
+            )
+        }
+        if (assetNames.contains(RUNTIME_ARCHIVE_TAR_GZ)) {
+            return RuntimeAssets(
+                assetCount = 1,
+                openStream = { context.assets.open("$RUNTIME_DIR/$RUNTIME_ARCHIVE_TAR_GZ") },
             )
         }
 
@@ -129,9 +138,24 @@ object OfflineOpenClawRuntimeInstaller {
         targetRoot: File,
         onProgress: (String) -> Unit,
     ) {
-        runtimeAssets.openStream().use { archiveStream ->
-        GzipCompressorInputStream(archiveStream).use { gzip ->
-            TarArchiveInputStream(gzip).use { tar ->
+        runtimeAssets.openStream().use { rawStream ->
+            val buffered = BufferedInputStream(rawStream)
+            PushbackInputStream(buffered, 2).use { pushback ->
+                val b1 = pushback.read()
+                val b2 = pushback.read()
+                if (b2 != -1) {
+                    pushback.unread(byteArrayOf(b1.toByte(), b2.toByte()))
+                } else if (b1 != -1) {
+                    pushback.unread(byteArrayOf(b1.toByte()))
+                }
+                val isGzip = (b1 == 0x1f && b2 == 0x8b)
+                val tarInput =
+                    if (isGzip) {
+                        TarArchiveInputStream(GzipCompressorInputStream(pushback))
+                    } else {
+                        TarArchiveInputStream(pushback)
+                    }
+                tarInput.use { tar ->
                 var entry = tar.nextTarEntry
                 while (entry != null) {
                     val name = entry.name.removePrefix("./")
@@ -173,7 +197,7 @@ object OfflineOpenClawRuntimeInstaller {
                     entry = tar.nextTarEntry
                 }
             }
-        }
+            }
         }
         onProgress("Offline OpenClaw runtime extracted")
     }

@@ -48,7 +48,7 @@ jobs:
             --pattern "davey.android-arm64.node" \
             --dir android/app/src/main/assets/runtime
           mv android/app/src/main/assets/runtime/openclaw_installed_2026_3_2.tar.gz \
-            android/app/src/main/assets/runtime/openclaw-runtime-2026.3.2.tar.gz
+            android/app/src/main/assets/runtime/openclaw-runtime-2026.3.2.tar
           ls -lh android/app/src/main/assets/runtime
 
       - name: Set up JDK 17

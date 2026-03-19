@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 138
-        versionName = "0.3.84-beta-v138-testpkg-offline-openclaw-r1"
+        versionCode = 139
+        versionName = "0.3.84-beta-v139-testpkg-offline-openclaw-r1fix"
     }
 
     signingConfigs {
@@ -100,7 +100,7 @@ android {
 
     // Don't compress bootstrap zip or server bundle in assets
     androidResources {
-        noCompress += listOf("zip", "tar.gz")
+        noCompress += listOf("zip", "tar", "node")
     }
 
 }
