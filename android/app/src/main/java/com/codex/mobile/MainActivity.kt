@@ -476,36 +476,44 @@ class MainActivity : AppCompatActivity() {
         // Step 2c: Install bionic-compat.js (Android platform shim for Node.js)
         serverManager.ensureBionicCompat()
 
-        // Step 2d: Install OpenClaw
-        if (!serverManager.isOpenClawInstalled()) {
+        // Step 2d: Install OpenClaw (optional in lightweight mode)
+        var openClawAvailable = serverManager.isOpenClawInstalled()
+        if (!openClawAvailable) {
             updateStatus("Installing build dependencies…")
             val depsOk = serverManager.installOpenClawDeps { msg -> updateDetail(msg) }
             if (!depsOk) {
-                throw RuntimeException("Failed to prepare OpenClaw build dependencies")
+                Log.w(TAG, "OpenClaw deps install failed — continue with lightweight mode")
+                updateStatus("OpenClaw deps unavailable", "Continuing in lightweight mode")
+            } else {
+                updateStatus("Installing OpenClaw…", "This may take several minutes")
+                val openclawOk = serverManager.installOpenClaw { msg -> updateDetail(msg) }
+                if (!openclawOk) {
+                    Log.w(TAG, "OpenClaw install failed — continue with lightweight mode")
+                    updateStatus("OpenClaw install unavailable", "Continuing in lightweight mode")
+                } else {
+                    updateStatus("OpenClaw installed")
+                }
             }
-
-            updateStatus("Installing OpenClaw…", "This may take several minutes")
-            val openclawOk = serverManager.installOpenClaw { msg -> updateDetail(msg) }
-            if (!openclawOk) {
-                throw RuntimeException("Failed to install OpenClaw")
-            }
-            updateStatus("OpenClaw installed")
         }
+        openClawAvailable = serverManager.isOpenClawInstalled()
 
-        if (serverManager.isOpenClawInstalled()) {
+        if (openClawAvailable) {
             updateStatus("Checking OpenClaw version…")
             val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
             if (!versionOk) {
-                throw RuntimeException("Failed to align OpenClaw version")
+                Log.w(TAG, "OpenClaw version alignment failed — continue with lightweight mode")
+                openClawAvailable = false
             }
-            updateStatus("Validating OpenClaw runtime…")
-            val runtimeReady = serverManager.ensureOpenClawRuntimeReady { msg -> updateDetail(msg) }
-            if (!runtimeReady) {
-                throw RuntimeException("OpenClaw runtime validation failed")
+            if (openClawAvailable) {
+                updateStatus("Validating OpenClaw runtime…")
+                val runtimeReady = serverManager.ensureOpenClawRuntimeReady { msg -> updateDetail(msg) }
+                if (!runtimeReady) {
+                    Log.w(TAG, "OpenClaw runtime validation failed — continue with lightweight mode")
+                    openClawAvailable = false
+                } else {
+                    updateStatus("OpenClaw runtime ready")
+                }
             }
-            updateStatus("OpenClaw runtime ready")
-        } else {
-            throw RuntimeException("OpenClaw package missing after installation")
         }
 
         // Step 3: Install Codex CLI
@@ -561,13 +569,17 @@ class MainActivity : AppCompatActivity() {
         // Step 7: On a fresh install, complete one full OpenClaw bring-up pass
         // before showing the UI so users do not need to restart the app to get
         // a working gateway. Existing installs still use the async fast path.
-        val needsBlockingOpenClawBootstrap = !hadOpenClawAtStart && serverManager.isOpenClawInstalled()
+        val needsBlockingOpenClawBootstrap = !hadOpenClawAtStart && openClawAvailable
         if (needsBlockingOpenClawBootstrap) {
             updateStatus("Finalizing OpenClaw…", "Completing first-run gateway setup")
             startOpenClawServicesSync()
         } else {
             // Existing installs keep Codex page availability as the first priority.
-            startOpenClawServicesAsync()
+            if (openClawAvailable) {
+                startOpenClawServicesAsync()
+            } else {
+                updateStatus("Lightweight proxy mode ready", "OpenClaw gateway is optional")
+            }
         }
 
         // Step 8: Start web server

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -13,6 +14,16 @@ const OPENCLAW_UPLOAD_DIR = homeDir
   ? join(homeDir, '.openclaw', 'workspace', 'uploads')
   : join(process.cwd(), '.openclaw', 'workspace', 'uploads')
 const OPENCLAW_UPLOAD_MAX_BYTES = 15_000_000
+const OPENCLAW_CONFIG_PATH = homeDir
+  ? join(homeDir, '.openclaw', 'openclaw.json')
+  : join(process.cwd(), '.openclaw', 'openclaw.json')
+const LIGHTWEIGHT_STATE_PATH = homeDir
+  ? join(homeDir, '.openclaw-android', 'state', 'lightweight-openclaw-sessions.json')
+  : join(process.cwd(), '.openclaw-android', 'state', 'lightweight-openclaw-sessions.json')
+const LIGHTWEIGHT_MAX_CONTEXT_MESSAGES = 24
+const LIGHTWEIGHT_MAX_TOOL_STEPS = 6
+const LIGHTWEIGHT_COMMAND_TIMEOUT_MS = 35_000
+const LIGHTWEIGHT_OUTPUT_LIMIT = 14_000
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -50,6 +61,44 @@ type PendingServerRequest = {
   method: string
   params: unknown
   receivedAtIso: string
+}
+
+type LightweightContentItem = {
+  type: string
+  text?: string
+  thinking?: string
+  name?: string
+  arguments?: unknown
+}
+
+type LightweightHistoryMessage = {
+  role: string
+  timestamp: number
+  content: LightweightContentItem[]
+  toolName?: string
+  isError?: boolean
+}
+
+type LightweightSession = {
+  key: string
+  title: string
+  updatedAt: number
+  lastMessagePreview: string
+  modelProvider: string
+  model: string
+  messages: LightweightHistoryMessage[]
+}
+
+type LightweightState = {
+  sessions: LightweightSession[]
+}
+
+type LightweightModelConfig = {
+  modelId: string
+  modelName: string
+  providerName: string
+  baseUrl: string
+  apiKey: string
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -220,6 +269,505 @@ function readPositiveInt(value: string | null, fallback: number): number {
   const normalized = Math.floor(parsed)
   if (normalized < 1) return fallback
   return normalized
+}
+
+function truncateText(value: string, limit: number): string {
+  if (value.length <= limit) return value
+  return `${value.slice(0, limit)}\n\n[output truncated]`
+}
+
+function toTextContent(text: string): LightweightContentItem[] {
+  return [{ type: 'text', text }]
+}
+
+function toThinkingContent(text: string): LightweightContentItem[] {
+  return [{ type: 'thinking', thinking: text }]
+}
+
+function extractMessageText(message: LightweightHistoryMessage): string {
+  const chunks: string[] = []
+  for (const item of message.content) {
+    if (item.type === 'text' && typeof item.text === 'string' && item.text.trim().length > 0) {
+      chunks.push(item.text.trim())
+    }
+  }
+  return chunks.join('\n\n').trim()
+}
+
+function buildSessionPreview(messages: LightweightHistoryMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = extractMessageText(messages[index])
+    if (text.length > 0) {
+      return text.slice(0, 120)
+    }
+  }
+  return ''
+}
+
+function createDefaultLightweightState(): LightweightState {
+  return { sessions: [] }
+}
+
+async function readLightweightState(): Promise<LightweightState> {
+  try {
+    const raw = await readFile(LIGHTWEIGHT_STATE_PATH, 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    const record = asRecord(parsed)
+    const rows = Array.isArray(record?.sessions) ? record.sessions : []
+    const sessions: LightweightSession[] = []
+    for (const row of rows) {
+      const item = asRecord(row)
+      if (!item) continue
+      const key = normalizeText(item.key)
+      if (!key) continue
+      const title = normalizeText(item.title) || normalizeText(item.label) || key
+      const updatedAt = typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt)
+        ? item.updatedAt
+        : Date.now()
+      const modelProvider = normalizeText(item.modelProvider)
+      const model = normalizeText(item.model)
+      const messagesRaw = Array.isArray(item.messages) ? item.messages : []
+      const messages: LightweightHistoryMessage[] = []
+      for (const msgRow of messagesRaw) {
+        const msg = asRecord(msgRow)
+        if (!msg) continue
+        const role = normalizeText(msg.role)
+        if (!role) continue
+        const timestamp = typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp)
+          ? msg.timestamp
+          : Date.now()
+        const contentRows = Array.isArray(msg.content) ? msg.content : []
+        const content: LightweightContentItem[] = []
+        for (const c of contentRows) {
+          const itemRow = asRecord(c)
+          if (!itemRow) continue
+          const type = normalizeText(itemRow.type)
+          if (!type) continue
+          const text = normalizeText(itemRow.text)
+          const thinking = normalizeText(itemRow.thinking)
+          const name = normalizeText(itemRow.name)
+          content.push({
+            type,
+            text: text || undefined,
+            thinking: thinking || undefined,
+            name: name || undefined,
+            arguments: itemRow.arguments,
+          })
+        }
+        messages.push({
+          role,
+          timestamp,
+          content,
+          toolName: normalizeText(msg.toolName) || undefined,
+          isError: msg.isError === true,
+        })
+      }
+      sessions.push({
+        key,
+        title,
+        updatedAt,
+        lastMessagePreview: normalizeText(item.lastMessagePreview),
+        modelProvider,
+        model,
+        messages,
+      })
+    }
+    return { sessions }
+  } catch {
+    return createDefaultLightweightState()
+  }
+}
+
+async function writeLightweightState(state: LightweightState): Promise<void> {
+  await mkdir(dirname(LIGHTWEIGHT_STATE_PATH), { recursive: true })
+  await writeFile(LIGHTWEIGHT_STATE_PATH, JSON.stringify(state, null, 2), 'utf8')
+}
+
+function buildDefaultLightweightSession(key = ''): LightweightSession {
+  const sessionKey = key.trim() || `agent:main:light-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const now = Date.now()
+  return {
+    key: sessionKey,
+    title: '新会话',
+    updatedAt: now,
+    lastMessagePreview: '',
+    modelProvider: '',
+    model: '',
+    messages: [],
+  }
+}
+
+async function ensureLightweightSession(
+  state: LightweightState,
+  preferredKey: string,
+): Promise<LightweightSession> {
+  const normalized = preferredKey.trim()
+  if (normalized.length > 0) {
+    const existing = state.sessions.find((row) => row.key === normalized)
+    if (existing) return existing
+    const created = buildDefaultLightweightSession(normalized)
+    state.sessions.push(created)
+    await writeLightweightState(state)
+    return created
+  }
+  if (state.sessions.length > 0) {
+    const sorted = [...state.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+    return sorted[0]
+  }
+  const created = buildDefaultLightweightSession()
+  state.sessions.push(created)
+  await writeLightweightState(state)
+  return created
+}
+
+function normalizeBaseUrl(baseUrl: string): string {
+  let normalized = baseUrl.trim()
+  if (!normalized) return ''
+  if (normalized.endsWith('/chat/completions')) {
+    normalized = normalized.slice(0, -'/chat/completions'.length)
+  }
+  if (normalized.endsWith('/responses')) {
+    normalized = normalized.slice(0, -'/responses'.length)
+  }
+  return normalized.replace(/\/+$/gu, '')
+}
+
+function parseProviderModelIds(providerName: string, providerConfig: Record<string, unknown>): string[] {
+  const ids = new Set<string>()
+  const directModel = normalizeText(providerConfig.model)
+  if (directModel) {
+    ids.add(directModel.includes('/') ? directModel : `${providerName}/${directModel}`)
+  }
+
+  const modelsValue = providerConfig.models
+  if (Array.isArray(modelsValue)) {
+    for (const row of modelsValue) {
+      const rowRecord = asRecord(row)
+      const rawId = rowRecord ? normalizeText(rowRecord.id) : normalizeText(row)
+      if (!rawId) continue
+      ids.add(rawId.includes('/') ? rawId : `${providerName}/${rawId}`)
+    }
+  }
+
+  return [...ids]
+}
+
+function normalizeModelIdForProvider(providerName: string, modelId: string): string {
+  const trimmed = modelId.trim()
+  if (!trimmed) return ''
+  if (trimmed.includes('/')) return trimmed
+  return `${providerName}/${trimmed}`
+}
+
+async function readLightweightModelConfig(): Promise<LightweightModelConfig> {
+  const raw = await readFile(OPENCLAW_CONFIG_PATH, 'utf8')
+  const parsed = JSON.parse(raw) as unknown
+  const root = asRecord(parsed)
+  if (!root) {
+    throw new Error('OpenClaw config is missing or invalid')
+  }
+
+  const agents = asRecord(root.agents)
+  const defaults = asRecord(agents?.defaults)
+  const model = asRecord(defaults?.model)
+  const primary = normalizeText(model?.primary)
+  const providerFromPrimary = primary.includes('/') ? primary.split('/')[0] ?? '' : ''
+
+  const models = asRecord(root.models)
+  const providers = asRecord(models?.providers)
+  if (!providers || Object.keys(providers).length === 0) {
+    throw new Error('No configured providers found in model config')
+  }
+
+  const providerName = providerFromPrimary || Object.keys(providers)[0]
+  const providerConfig = asRecord(providers[providerName])
+  if (!providerConfig) {
+    throw new Error(`Provider config missing: ${providerName}`)
+  }
+
+  const apiKey = normalizeText(providerConfig.apiKey)
+  if (!apiKey) {
+    throw new Error(`Provider API key missing: ${providerName}`)
+  }
+
+  const baseUrl = normalizeBaseUrl(normalizeText(providerConfig.baseUrl))
+  if (!baseUrl) {
+    throw new Error(`Provider baseUrl missing: ${providerName}`)
+  }
+
+  let modelId = normalizeModelIdForProvider(providerName, primary)
+  if (!modelId) {
+    const ids = parseProviderModelIds(providerName, providerConfig)
+    modelId = ids[0] ?? ''
+  }
+  if (!modelId) {
+    throw new Error(`Provider model missing: ${providerName}`)
+  }
+
+  const modelName = modelId.includes('/') ? modelId.slice(modelId.indexOf('/') + 1) : modelId
+  return {
+    modelId,
+    modelName,
+    providerName,
+    baseUrl,
+    apiKey,
+  }
+}
+
+type LightweightChatMessage = {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string
+  tool_call_id?: string
+  tool_calls?: Array<Record<string, unknown>>
+}
+
+async function runShellCommand(command: string): Promise<{ output: string; exitCode: number }> {
+  const cmd = command.trim()
+  if (!cmd) return { output: 'Empty command', exitCode: 1 }
+
+  return new Promise((resolve) => {
+    const env = { ...process.env }
+    if (prefixBin) {
+      const currentPath = typeof env.PATH === 'string' ? env.PATH : ''
+      if (!currentPath.split(':').includes(prefixBin)) {
+        env.PATH = currentPath.length > 0 ? `${prefixBin}:${currentPath}` : prefixBin
+      }
+    }
+
+    const child = spawn(shellPath, ['-lc', cmd], {
+      cwd: homeDir || process.cwd(),
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    let output = ''
+    let settled = false
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      output += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      output += chunk
+    })
+
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill('SIGKILL')
+      const body = truncateText(output.trim(), LIGHTWEIGHT_OUTPUT_LIMIT)
+      resolve({
+        output: body ? `${body}\n\n[timeout after ${Math.floor(LIGHTWEIGHT_COMMAND_TIMEOUT_MS / 1000)}s]` : '[timeout]',
+        exitCode: 124,
+      })
+    }, LIGHTWEIGHT_COMMAND_TIMEOUT_MS)
+
+    child.on('error', (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ output: `command launch failed: ${error.message}`, exitCode: 127 })
+    })
+
+    child.on('exit', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      const text = truncateText(output.trim(), LIGHTWEIGHT_OUTPUT_LIMIT)
+      resolve({
+        output: text || '[no output]',
+        exitCode: typeof code === 'number' ? code : 0,
+      })
+    })
+  })
+}
+
+function buildLightweightContextMessages(
+  session: LightweightSession,
+): LightweightChatMessage[] {
+  const contextRows = session.messages.slice(-LIGHTWEIGHT_MAX_CONTEXT_MESSAGES)
+  const output: LightweightChatMessage[] = []
+  for (const row of contextRows) {
+    if (row.role === 'user') {
+      const text = extractMessageText(row)
+      if (!text) continue
+      output.push({ role: 'user', content: text })
+      continue
+    }
+    if (row.role === 'assistant') {
+      const text = extractMessageText(row)
+      if (!text) continue
+      output.push({ role: 'assistant', content: text })
+      continue
+    }
+  }
+  return output
+}
+
+function stringifyToolResult(command: string, result: { output: string; exitCode: number }): string {
+  return [
+    `command: ${command}`,
+    `exit_code: ${result.exitCode}`,
+    'output:',
+    result.output,
+  ].join('\n')
+}
+
+async function callProviderChatCompletions(
+  model: LightweightModelConfig,
+  messages: LightweightChatMessage[],
+): Promise<Record<string, unknown>> {
+  const endpoint = `${model.baseUrl}/chat/completions`
+  const payload: Record<string, unknown> = {
+    model: model.modelName,
+    messages,
+    stream: false,
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'terminal_exec',
+          description: 'Execute a shell command on local Android terminal and return stdout/stderr.',
+          parameters: {
+            type: 'object',
+            properties: {
+              command: {
+                type: 'string',
+                description: 'Shell command to execute',
+              },
+            },
+            required: ['command'],
+            additionalProperties: false,
+          },
+        },
+      },
+    ],
+    tool_choice: 'auto',
+  }
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${model.apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  })
+
+  const raw = await response.text()
+  let parsed: unknown = null
+  try {
+    parsed = raw ? JSON.parse(raw) : null
+  } catch {
+    parsed = null
+  }
+
+  if (!response.ok) {
+    const record = asRecord(parsed)
+    const errorMessage = normalizeText(record?.error) ||
+      normalizeText(asRecord(record?.error)?.message) ||
+      `HTTP ${response.status}`
+    throw new Error(`Model request failed: ${errorMessage}`)
+  }
+
+  return asRecord(parsed) ?? {}
+}
+
+async function runLightweightTurn(session: LightweightSession): Promise<void> {
+  const model = await readLightweightModelConfig()
+  session.model = model.modelId
+  session.modelProvider = model.providerName
+
+  const systemPrompt =
+    '你是口袋大龙虾轻量代理模式。你可以调用 terminal_exec 工具执行终端命令来完成任务。只在必要时调用工具，优先给出可执行结果。'
+  const contextMessages = buildLightweightContextMessages(session)
+  const requestMessages: LightweightChatMessage[] = [
+    { role: 'system', content: systemPrompt },
+    ...contextMessages,
+  ]
+
+  let finalAssistantText = ''
+  for (let step = 0; step < LIGHTWEIGHT_MAX_TOOL_STEPS; step += 1) {
+    const envelope = await callProviderChatCompletions(model, requestMessages)
+    const choices = Array.isArray(envelope.choices) ? envelope.choices : []
+    const firstChoice = asRecord(choices[0])
+    const message = asRecord(firstChoice?.message)
+    if (!message) {
+      throw new Error('Model response missing message')
+    }
+
+    const textContent = normalizeText(message.content)
+    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+
+    if (toolCalls.length === 0) {
+      finalAssistantText = textContent || '任务已完成。'
+      break
+    }
+
+    const assistantToolItems: LightweightContentItem[] = []
+    requestMessages.push({
+      role: 'assistant',
+      content: textContent,
+      tool_calls: toolCalls.map((row) => asRecord(row) ?? {}),
+    })
+
+    for (const call of toolCalls) {
+      const callRecord = asRecord(call)
+      const callId = normalizeText(callRecord?.id) || randomUUID()
+      const fn = asRecord(callRecord?.function)
+      const fnName = normalizeText(fn?.name)
+      const fnArgsRaw = normalizeText(fn?.arguments)
+      if (fnName !== 'terminal_exec') {
+        continue
+      }
+
+      let command = ''
+      try {
+        const args = JSON.parse(fnArgsRaw || '{}') as unknown
+        command = normalizeText(asRecord(args)?.command)
+      } catch {
+        command = ''
+      }
+
+      assistantToolItems.push({
+        type: 'toolCall',
+        name: 'terminal_exec',
+        arguments: { command },
+      })
+
+      const result = await runShellCommand(command)
+      const rendered = stringifyToolResult(command, result)
+      session.messages.push({
+        role: 'toolResult',
+        timestamp: Date.now(),
+        toolName: 'terminal_exec',
+        isError: result.exitCode !== 0,
+        content: toTextContent(rendered),
+      })
+      requestMessages.push({
+        role: 'tool',
+        tool_call_id: callId,
+        content: rendered,
+      })
+    }
+
+    if (assistantToolItems.length > 0) {
+      session.messages.push({
+        role: 'assistant',
+        timestamp: Date.now(),
+        content: assistantToolItems,
+      })
+    }
+  }
+
+  if (!finalAssistantText) {
+    finalAssistantText = '任务执行结束。'
+  }
+  session.messages.push({
+    role: 'assistant',
+    timestamp: Date.now(),
+    content: toTextContent(finalAssistantText),
+  })
 }
 
 function sanitizeOpenClawUploadFileName(fileName: string): string {
@@ -440,6 +988,154 @@ async function resetCurrentOpenClawSession(currentSessionKey: string): Promise<s
   }
   const fallbackSessionKey = pickNewestOpenClawSessionKey(sessionRows, '')
   return fallbackSessionKey || current
+}
+
+function toLightweightSessionSummary(session: LightweightSession): Record<string, unknown> {
+  return {
+    key: session.key,
+    displayName: session.title,
+    label: session.title,
+    updatedAt: session.updatedAt,
+    lastMessagePreview: session.lastMessagePreview,
+    modelProvider: session.modelProvider,
+    model: session.model,
+  }
+}
+
+async function listLightweightSessions(limit: number): Promise<Record<string, unknown>[]> {
+  const state = await readLightweightState()
+  const sorted = [...state.sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+  return sorted.slice(0, limit).map(toLightweightSessionSummary)
+}
+
+async function createLightweightSession(label: string, currentSessionKey: string): Promise<string> {
+  const state = await readLightweightState()
+  const used = new Set(state.sessions.map((row) => row.title))
+  const nextTitle = buildUniqueOpenClawSessionLabel(label.trim() || '新会话', used)
+  const session = buildDefaultLightweightSession(buildOpenClawSessionKey(currentSessionKey))
+  session.title = nextTitle
+  session.updatedAt = Date.now()
+  state.sessions.push(session)
+  await writeLightweightState(state)
+  return session.key
+}
+
+async function renameLightweightSession(sessionKey: string, label: string): Promise<void> {
+  const key = sessionKey.trim()
+  const nextLabel = label.trim()
+  if (!key || !nextLabel) return
+  const state = await readLightweightState()
+  const target = state.sessions.find((row) => row.key === key)
+  if (!target) {
+    throw new Error('Session not found')
+  }
+  target.title = nextLabel
+  target.updatedAt = Date.now()
+  await writeLightweightState(state)
+}
+
+async function resetLightweightSession(currentSessionKey: string): Promise<string> {
+  const key = currentSessionKey.trim()
+  if (!key) {
+    throw new Error('Missing current session key')
+  }
+  const state = await readLightweightState()
+  const target = state.sessions.find((row) => row.key === key)
+  if (!target) {
+    throw new Error('Session not found')
+  }
+  target.messages = []
+  target.updatedAt = Date.now()
+  target.lastMessagePreview = ''
+  await writeLightweightState(state)
+  return target.key
+}
+
+async function readLightweightHistory(sessionKey: string, limit: number): Promise<{
+  sessionKey: string
+  messages: LightweightHistoryMessage[]
+  thinkingLevel: string
+}> {
+  const key = sessionKey.trim()
+  if (!key) {
+    throw new Error('Missing session key')
+  }
+  const state = await readLightweightState()
+  const target = state.sessions.find((row) => row.key === key)
+  if (!target) {
+    const created = buildDefaultLightweightSession(key)
+    state.sessions.push(created)
+    await writeLightweightState(state)
+    return {
+      sessionKey: created.key,
+      messages: [],
+      thinkingLevel: 'medium',
+    }
+  }
+  const messages = target.messages.slice(-Math.max(1, limit))
+  return {
+    sessionKey: target.key,
+    messages,
+    thinkingLevel: 'medium',
+  }
+}
+
+function normalizeImageAttachmentsForLightweight(value: unknown): LightweightContentItem[] {
+  if (!Array.isArray(value)) return []
+  const items: LightweightContentItem[] = []
+  for (const row of value) {
+    const item = asRecord(row)
+    if (!item) continue
+    const type = normalizeText(item.type)
+    if (type !== 'image') continue
+    const mimeType = normalizeText(item.mimeType) || 'image/png'
+    const content = normalizeText(item.content)
+    if (!content) continue
+    items.push({
+      type: 'image',
+      text: `[image:${mimeType}] data:image omitted`,
+      arguments: {
+        mimeType,
+        sizeBytes: Math.floor((content.length * 3) / 4),
+        fileName: normalizeText(item.fileName),
+      },
+    })
+  }
+  return items
+}
+
+async function sendLightweightMessage(payload: Record<string, unknown>): Promise<{ runId: string }> {
+  const sessionKey = normalizeText(payload.sessionKey)
+  const message = normalizeText(payload.message)
+  const attachments = normalizeImageAttachmentsForLightweight(payload.attachments)
+  if (!sessionKey || (!message && attachments.length === 0)) {
+    throw new Error('Missing sessionKey and message/attachments')
+  }
+
+  const state = await readLightweightState()
+  const session = await ensureLightweightSession(state, sessionKey)
+
+  const userContent: LightweightContentItem[] = []
+  if (message) {
+    userContent.push(...toTextContent(message))
+  }
+  userContent.push(...attachments)
+  session.messages.push({
+    role: 'user',
+    timestamp: Date.now(),
+    content: userContent,
+  })
+
+  session.updatedAt = Date.now()
+  session.lastMessagePreview = buildSessionPreview(session.messages)
+  await runLightweightTurn(session)
+  session.updatedAt = Date.now()
+  session.lastMessagePreview = buildSessionPreview(session.messages)
+  await writeLightweightState(state)
+
+  return {
+    runId: `lite_${Date.now().toString(36)}`,
+  }
 }
 
 function buildCapabilitySummary(statusRecord: Record<string, unknown> | null): string {
@@ -943,22 +1639,19 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/openclaw-api/health') {
-        const payload = await runOpenClawGatewayCall('health', {})
-        setJson(res, 200, { ok: true, data: payload })
+        setJson(res, 200, {
+          ok: true,
+          data: {
+            mode: 'lightweight-proxy',
+            gatewayRequired: false,
+          },
+        })
         return
       }
 
       if (req.method === 'GET' && url.pathname === '/openclaw-api/sessions') {
         const limit = readPositiveInt(url.searchParams.get('limit'), 200)
-        const payload = await runOpenClawGatewayCall('sessions.list', {
-          limit,
-          includeDerivedTitles: true,
-          includeLastMessage: true,
-          includeGlobal: true,
-          includeUnknown: true,
-        })
-        const record = asRecord(payload)
-        const sessions = Array.isArray(record?.sessions) ? record.sessions : []
+        const sessions = await listLightweightSessions(limit)
         setJson(res, 200, { sessions })
         return
       }
@@ -971,10 +1664,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
         const limit = readPositiveInt(String(payload?.limit ?? ''), 60)
-        const result = await runOpenClawGatewayCall('chat.history', {
-          sessionKey,
-          limit,
-        })
+        const result = await readLightweightHistory(sessionKey, limit)
         setJson(res, 200, result)
         return
       }
@@ -988,15 +1678,13 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey and message/attachments' })
           return
         }
-        const runId = `run_${Date.now().toString(36)}`
-        await runOpenClawGatewayCall('chat.send', {
+        const run = await sendLightweightMessage({
           sessionKey,
           message,
           deliver: payload?.deliver === true,
-          idempotencyKey: runId,
           attachments: attachments.length > 0 ? attachments : undefined,
         })
-        setJson(res, 200, { ok: true, runId })
+        setJson(res, 200, { ok: true, runId: run.runId })
         return
       }
 
@@ -1035,7 +1723,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const label = normalizeText(payload?.label) || '新会话'
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
-        const sessionKey = await createIndependentOpenClawSession(currentSessionKey, label)
+        const sessionKey = await createLightweightSession(label, currentSessionKey)
         setJson(res, 200, { sessionKey })
         return
       }
@@ -1043,7 +1731,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/reset') {
         const payload = asRecord(await readJsonBody(req))
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
-        const sessionKey = await resetCurrentOpenClawSession(currentSessionKey)
+        const sessionKey = await resetLightweightSession(currentSessionKey)
         setJson(res, 200, { sessionKey })
         return
       }
@@ -1056,10 +1744,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey or label' })
           return
         }
-        await runOpenClawGatewayCall('sessions.patch', {
-          key: sessionKey,
-          label,
-        })
+        await renameLightweightSession(sessionKey, label)
         setJson(res, 200, { ok: true })
         return
       }
