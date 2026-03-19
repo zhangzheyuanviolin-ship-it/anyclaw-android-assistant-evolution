@@ -193,6 +193,32 @@ class ConversationManagerActivity : AppCompatActivity() {
     }
 
     private fun loadOpenClawRows(): List<ConversationRow> {
+        var gatewayError: Exception? = null
+        var apiError: Exception? = null
+        val merged = LinkedHashMap<String, ConversationRow>()
+
+        try {
+            mergeOpenClawRows(merged, loadOpenClawRowsFromGateway())
+        } catch (error: Exception) {
+            gatewayError = error
+        }
+
+        try {
+            mergeOpenClawRows(merged, loadOpenClawRowsFromApi())
+        } catch (error: Exception) {
+            apiError = error
+        }
+
+        if (merged.isEmpty() && gatewayError != null && apiError != null) {
+            throw IllegalStateException(
+                "Gateway unavailable: ${gatewayError.message ?: "unknown"}; " +
+                    "Lightweight API unavailable: ${apiError.message ?: "unknown"}",
+            )
+        }
+        return merged.values.toList()
+    }
+
+    private fun loadOpenClawRowsFromGateway(): List<ConversationRow> {
         val payload = gateway.call(
             "sessions.list",
             JSONObject()
@@ -202,13 +228,28 @@ class ConversationManagerActivity : AppCompatActivity() {
                 .put("includeGlobal", true)
                 .put("includeUnknown", true),
         )
-        val sessions = payload.optJSONArray("sessions") ?: JSONArray()
+        return parseOpenClawRows(payload.optJSONArray("sessions"))
+    }
+
+    private fun loadOpenClawRowsFromApi(): List<ConversationRow> {
+        val payload = LocalBridgeClients.callOpenClawApi(
+            "/openclaw-api/sessions?limit=300",
+            method = "GET",
+            connectTimeoutMs = 9_000,
+            readTimeoutMs = 20_000,
+        )
+        return parseOpenClawRows(payload.optJSONArray("sessions"))
+    }
+
+    private fun parseOpenClawRows(sessions: JSONArray?): List<ConversationRow> {
+        if (sessions == null) return emptyList()
         val rows = mutableListOf<ConversationRow>()
         for (index in 0 until sessions.length()) {
             val item = sessions.optJSONObject(index) ?: continue
             val key = item.optString("key", "").trim()
             if (key.isEmpty()) continue
-            val title = item.optString("label", "").trim()
+            val title = item.optString("displayName", "").trim()
+                .ifEmpty { item.optString("label", "").trim() }
                 .ifEmpty { item.optString("derivedTitle", "").trim() }
                 .ifEmpty { key }
             rows += ConversationRow(
@@ -220,6 +261,15 @@ class ConversationManagerActivity : AppCompatActivity() {
             )
         }
         return rows
+    }
+
+    private fun mergeOpenClawRows(target: LinkedHashMap<String, ConversationRow>, rows: List<ConversationRow>) {
+        for (row in rows) {
+            val existing = target[row.id]
+            if (existing == null || row.updatedAtMs >= existing.updatedAtMs) {
+                target[row.id] = row
+            }
+        }
     }
 
     private fun applyFilterAndRender() {
@@ -363,12 +413,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                         )
                     }
                     SourceType.OPENCLAW -> {
-                        gateway.call(
-                            "sessions.patch",
-                            JSONObject()
-                                .put("key", row.id)
-                                .put("label", newTitle),
-                        )
+                        renameOpenClawSession(row.id, newTitle)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -421,13 +466,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                         deleteCodexTranscriptFileIfPossible(row)
                     }
                     SourceType.OPENCLAW -> {
-                        gateway.call(
-                            "sessions.delete",
-                            JSONObject()
-                                .put("key", row.id)
-                                .put("deleteTranscript", true)
-                                .put("emitLifecycleHooks", false),
-                        )
+                        deleteOpenClawSession(row.id)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -659,12 +698,7 @@ class ConversationManagerActivity : AppCompatActivity() {
     }
 
     private fun loadOpenClawTranscript(row: ConversationRow): String {
-        val payload = gateway.call(
-            "chat.history",
-            JSONObject()
-                .put("sessionKey", row.id)
-                .put("limit", 400),
-        )
+        val payload = loadOpenClawHistoryPayload(row.id)
         val messages = payload.optJSONArray("messages") ?: JSONArray()
         val out = StringBuilder()
         out.appendLine(row.title)
@@ -681,6 +715,71 @@ class ConversationManagerActivity : AppCompatActivity() {
             out.appendLine()
         }
         return out.toString().trim()
+    }
+
+    private fun renameOpenClawSession(sessionKey: String, label: String) {
+        val gatewayError = runCatching {
+            gateway.call(
+                "sessions.patch",
+                JSONObject()
+                    .put("key", sessionKey)
+                    .put("label", label),
+            )
+        }.exceptionOrNull()
+        if (gatewayError == null) return
+
+        LocalBridgeClients.callOpenClawApi(
+            "/openclaw-api/sessions/rename",
+            method = "POST",
+            body = JSONObject()
+                .put("sessionKey", sessionKey)
+                .put("label", label),
+            connectTimeoutMs = 9_000,
+            readTimeoutMs = 20_000,
+        )
+    }
+
+    private fun deleteOpenClawSession(sessionKey: String) {
+        val gatewayError = runCatching {
+            gateway.call(
+                "sessions.delete",
+                JSONObject()
+                    .put("key", sessionKey)
+                    .put("deleteTranscript", true)
+                    .put("emitLifecycleHooks", false),
+            )
+        }.exceptionOrNull()
+        if (gatewayError == null) return
+
+        LocalBridgeClients.callOpenClawApi(
+            "/openclaw-api/sessions/delete",
+            method = "POST",
+            body = JSONObject().put("sessionKey", sessionKey),
+            connectTimeoutMs = 9_000,
+            readTimeoutMs = 20_000,
+        )
+    }
+
+    private fun loadOpenClawHistoryPayload(sessionKey: String): JSONObject {
+        val gatewayResult = runCatching {
+            gateway.call(
+                "chat.history",
+                JSONObject()
+                    .put("sessionKey", sessionKey)
+                    .put("limit", 400),
+            )
+        }
+        if (gatewayResult.isSuccess) return gatewayResult.getOrThrow()
+
+        return LocalBridgeClients.callOpenClawApi(
+            "/openclaw-api/history",
+            method = "POST",
+            body = JSONObject()
+                .put("sessionKey", sessionKey)
+                .put("limit", 400),
+            connectTimeoutMs = 9_000,
+            readTimeoutMs = 30_000,
+        )
     }
 
     private fun parseOpenClawMessageText(content: JSONArray?): String {

@@ -205,6 +205,7 @@ export async function readOpenClawHistory(request: OpenClawHistoryRequest): Prom
       }),
     },
     'Failed to load OpenClaw history',
+    30_000,
   )
 
   const messages = Array.isArray(payload.messages) ? payload.messages : []
@@ -245,6 +246,7 @@ export async function sendOpenClawMessage(request: OpenClawSendRequest): Promise
       }),
     },
     'Failed to send OpenClaw message',
+    240_000,
   )
 
   return {

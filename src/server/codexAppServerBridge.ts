@@ -17,13 +17,18 @@ const OPENCLAW_UPLOAD_MAX_BYTES = 15_000_000
 const OPENCLAW_CONFIG_PATH = homeDir
   ? join(homeDir, '.openclaw', 'openclaw.json')
   : join(process.cwd(), '.openclaw', 'openclaw.json')
+const OPENCLAW_WORKSPACE_DIR = homeDir
+  ? join(homeDir, '.openclaw', 'workspace')
+  : join(process.cwd(), '.openclaw', 'workspace')
 const LIGHTWEIGHT_STATE_PATH = homeDir
   ? join(homeDir, '.openclaw-android', 'state', 'lightweight-openclaw-sessions.json')
   : join(process.cwd(), '.openclaw-android', 'state', 'lightweight-openclaw-sessions.json')
-const LIGHTWEIGHT_MAX_CONTEXT_MESSAGES = 24
-const LIGHTWEIGHT_MAX_TOOL_STEPS = 6
-const LIGHTWEIGHT_COMMAND_TIMEOUT_MS = 35_000
-const LIGHTWEIGHT_OUTPUT_LIMIT = 14_000
+const LIGHTWEIGHT_MAX_CONTEXT_MESSAGES = 80
+const LIGHTWEIGHT_MAX_TOOL_STEPS = 32
+const LIGHTWEIGHT_COMMAND_TIMEOUT_MS = 180_000
+const LIGHTWEIGHT_OUTPUT_LIMIT = 120_000
+const LIGHTWEIGHT_BOOTSTRAP_TARGET_VERSION = '2026.3.2'
+const LIGHTWEIGHT_DOC_MAX_CHARS = 4_000
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -276,6 +281,33 @@ function truncateText(value: string, limit: number): string {
   return `${value.slice(0, limit)}\n\n[output truncated]`
 }
 
+async function readOptionalTextFile(path: string, limit = LIGHTWEIGHT_DOC_MAX_CHARS): Promise<string> {
+  try {
+    const raw = await readFile(path, 'utf8')
+    const trimmed = raw.trim()
+    if (!trimmed) return ''
+    return truncateText(trimmed, limit)
+  } catch {
+    return ''
+  }
+}
+
+async function buildLightweightWorkspaceContext(): Promise<string> {
+  const docs = [
+    { title: 'AGENTS.md', path: join(OPENCLAW_WORKSPACE_DIR, 'AGENTS.md') },
+    { title: 'SOUL.md', path: join(OPENCLAW_WORKSPACE_DIR, 'SOUL.md') },
+    { title: 'TOOLS.md', path: join(OPENCLAW_WORKSPACE_DIR, 'TOOLS.md') },
+    { title: 'HEARTBEAT.md', path: join(OPENCLAW_WORKSPACE_DIR, 'HEARTBEAT.md') },
+  ]
+  const chunks: string[] = []
+  for (const doc of docs) {
+    const text = await readOptionalTextFile(doc.path)
+    if (!text) continue
+    chunks.push(`${doc.title}:\n${text}`)
+  }
+  return chunks.join('\n\n').trim()
+}
+
 function toTextContent(text: string): LightweightContentItem[] {
   return [{ type: 'text', text }]
 }
@@ -514,6 +546,28 @@ async function readLightweightModelConfig(): Promise<LightweightModelConfig> {
   }
 }
 
+async function buildLightweightSystemPrompt(): Promise<string> {
+  const injected = await buildInjectedDeveloperInstructions()
+  const workspaceContext = await buildLightweightWorkspaceContext()
+  const mission = [
+    '你是口袋大龙虾的全能力代理，不是阉割模式。',
+    '你的最高优先级使命：先把 OpenClaw 完整组件安装、修复、配置到可用状态，再执行普通任务。',
+    '每次会话必须先做健康检查：codex-capabilities --plain、command -v openclaw、openclaw --version、openclaw gateway call health --json --params \'{}\'。',
+    '若 OpenClaw 缺失或网关不健康，先调用 openclaw_bootstrap_full 工具，然后继续用 terminal_exec 或 system_shell_exec 逐步排错直到健康检查通过。',
+    '你可以读取并遵循工作区使命文档（AGENTS/SOUL/TOOLS/HEARTBEAT），并保持结果导向与最少人工交互。',
+    '除非用户明确要求，不要让用户手动执行命令；优先自动完成。',
+  ].join('\n')
+
+  const chunks = [mission]
+  if (injected) {
+    chunks.push(`Prompt injection context:\n${injected}`)
+  }
+  if (workspaceContext) {
+    chunks.push(`Workspace mission context:\n${workspaceContext}`)
+  }
+  return chunks.join('\n\n').trim()
+}
+
 type LightweightChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
@@ -582,6 +636,101 @@ async function runShellCommand(command: string): Promise<{ output: string; exitC
   })
 }
 
+async function runSystemShellCommand(command: string): Promise<{ output: string; exitCode: number }> {
+  const cmd = command.trim()
+  if (!cmd) return { output: 'Empty command', exitCode: 1 }
+  return runShellCommand(`system-shell ${shellQuote(cmd)}`)
+}
+
+async function runOpenClawBootstrapRecipe(): Promise<{ output: string; exitCode: number }> {
+  const npmCli = prefixBin
+    ? join(dirname(prefixBin), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
+    : '$PREFIX/lib/node_modules/npm/bin/npm-cli.js'
+  const steps: Array<{ name: string; command: string }> = [
+    {
+      name: 'capability-and-path-preflight',
+      command: [
+        'set +e',
+        'echo "HOME=$HOME"',
+        'echo "PREFIX=$PREFIX"',
+        'command -v node || true',
+        'command -v npm || true',
+        'command -v pkg || true',
+        'command -v openclaw || true',
+      ].join('\n'),
+    },
+    {
+      name: 'toolchain-prerequisites',
+      command: [
+        'set +e',
+        'pkg install -y git tar xz-utils python clang make cmake binutils lld >/dev/null 2>&1 || true',
+        'apt-get update --allow-insecure-repositories >/dev/null 2>&1 || true',
+        'apt-get install -y --allow-unauthenticated git tar xz-utils >/dev/null 2>&1 || true',
+      ].join('\n'),
+    },
+    {
+      name: 'install-openclaw-npm',
+      command: [
+        'set +e',
+        `NPM_CLI="${npmCli}"`,
+        'if [ ! -f "$NPM_CLI" ]; then',
+        '  echo "npm-cli-missing:$NPM_CLI"',
+        '  exit 21',
+        'fi',
+        'node "$NPM_CLI" config set registry https://registry.npmjs.org >/dev/null 2>&1 || true',
+        'node "$NPM_CLI" cache clean --force >/dev/null 2>&1 || true',
+        `node "$NPM_CLI" install -g --ignore-scripts --force openclaw@${LIGHTWEIGHT_BOOTSTRAP_TARGET_VERSION} 2>&1`,
+      ].join('\n'),
+    },
+    {
+      name: 'ensure-openclaw-wrapper',
+      command: [
+        'set +e',
+        'if [ -f "$PREFIX/lib/node_modules/openclaw/openclaw.mjs" ]; then',
+        '  cat > "$PREFIX/bin/openclaw" <<EOF',
+        '#!/system/bin/sh',
+        'exec $PREFIX/bin/node $PREFIX/lib/node_modules/openclaw/openclaw.mjs "$@"',
+        'EOF',
+        '  chmod 700 "$PREFIX/bin/openclaw"',
+        'fi',
+        'command -v openclaw || true',
+      ].join('\n'),
+    },
+    {
+      name: 'verify-openclaw-health',
+      command: [
+        'set +e',
+        'openclaw --version 2>&1 || true',
+        'openclaw gateway call health --json --params \'{}\' 2>&1 || true',
+      ].join('\n'),
+    },
+  ]
+
+  const logs: string[] = []
+  let hardFailure = false
+  for (const step of steps) {
+    const result = await runShellCommand(step.command)
+    logs.push(`### ${step.name} (exit=${result.exitCode})`)
+    logs.push(result.output)
+    logs.push('')
+    if (step.name === 'install-openclaw-npm' && result.exitCode !== 0) {
+      hardFailure = true
+    }
+  }
+
+  const verify = await runShellCommand('command -v openclaw >/dev/null 2>&1 && openclaw --version >/dev/null 2>&1')
+  if (verify.exitCode !== 0) {
+    hardFailure = true
+    logs.push('### final-check')
+    logs.push('openclaw command is still unavailable after bootstrap recipe')
+  }
+
+  return {
+    output: truncateText(logs.join('\n'), LIGHTWEIGHT_OUTPUT_LIMIT),
+    exitCode: hardFailure ? 1 : 0,
+  }
+}
+
 function buildLightweightContextMessages(
   session: LightweightSession,
 ): LightweightChatMessage[] {
@@ -641,6 +790,41 @@ async function callProviderChatCompletions(
           },
         },
       },
+      {
+        type: 'function',
+        function: {
+          name: 'system_shell_exec',
+          description: 'Execute Android system-level shell command via system-shell bridge.',
+          parameters: {
+            type: 'object',
+            properties: {
+              command: {
+                type: 'string',
+                description: 'System-level shell command to execute',
+              },
+            },
+            required: ['command'],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'openclaw_bootstrap_full',
+          description: 'Run full OpenClaw bootstrap/repair recipe (npm install, wrapper fix, health probes).',
+          parameters: {
+            type: 'object',
+            properties: {
+              reason: {
+                type: 'string',
+                description: 'Why bootstrap is requested',
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
     ],
     tool_choice: 'auto',
   }
@@ -678,8 +862,7 @@ async function runLightweightTurn(session: LightweightSession): Promise<void> {
   session.model = model.modelId
   session.modelProvider = model.providerName
 
-  const systemPrompt =
-    '你是口袋大龙虾轻量代理模式。你可以调用 terminal_exec 工具执行终端命令来完成任务。只在必要时调用工具，优先给出可执行结果。'
+  const systemPrompt = await buildLightweightSystemPrompt()
   const contextMessages = buildLightweightContextMessages(session)
   const requestMessages: LightweightChatMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -717,11 +900,8 @@ async function runLightweightTurn(session: LightweightSession): Promise<void> {
       const fn = asRecord(callRecord?.function)
       const fnName = normalizeText(fn?.name)
       const fnArgsRaw = normalizeText(fn?.arguments)
-      if (fnName !== 'terminal_exec') {
-        continue
-      }
-
       let command = ''
+      let result: { output: string; exitCode: number }
       try {
         const args = JSON.parse(fnArgsRaw || '{}') as unknown
         command = normalizeText(asRecord(args)?.command)
@@ -729,18 +909,39 @@ async function runLightweightTurn(session: LightweightSession): Promise<void> {
         command = ''
       }
 
-      assistantToolItems.push({
-        type: 'toolCall',
-        name: 'terminal_exec',
-        arguments: { command },
-      })
+      if (fnName === 'terminal_exec') {
+        assistantToolItems.push({
+          type: 'toolCall',
+          name: 'terminal_exec',
+          arguments: { command },
+        })
+        result = await runShellCommand(command)
+      } else if (fnName === 'system_shell_exec') {
+        assistantToolItems.push({
+          type: 'toolCall',
+          name: 'system_shell_exec',
+          arguments: { command },
+        })
+        result = await runSystemShellCommand(command)
+      } else if (fnName === 'openclaw_bootstrap_full') {
+        assistantToolItems.push({
+          type: 'toolCall',
+          name: 'openclaw_bootstrap_full',
+          arguments: { reason: command || 'runtime bootstrap request' },
+        })
+        result = await runOpenClawBootstrapRecipe()
+      } else {
+        continue
+      }
 
-      const result = await runShellCommand(command)
-      const rendered = stringifyToolResult(command, result)
+      const rendered = stringifyToolResult(
+        fnName === 'openclaw_bootstrap_full' ? fnName : (command || fnName),
+        result,
+      )
       session.messages.push({
         role: 'toolResult',
         timestamp: Date.now(),
-        toolName: 'terminal_exec',
+        toolName: fnName,
         isError: result.exitCode !== 0,
         content: toTextContent(rendered),
       })
@@ -1038,6 +1239,26 @@ async function renameLightweightSession(sessionKey: string, label: string): Prom
   }
   target.title = nextLabel
   target.updatedAt = Date.now()
+  await writeLightweightState(state)
+}
+
+async function deleteLightweightSession(sessionKey: string): Promise<void> {
+  const key = sessionKey.trim()
+  if (!key) {
+    throw new Error('Missing session key')
+  }
+  const state = await readLightweightState()
+  const before = state.sessions.length
+  state.sessions = state.sessions.filter((row) => row.key !== key)
+  if (state.sessions.length === before) {
+    throw new Error('Session not found')
+  }
+  if (state.sessions.length === 0) {
+    const created = buildDefaultLightweightSession('agent:main:main')
+    created.title = '新会话'
+    created.updatedAt = Date.now()
+    state.sessions.push(created)
+  }
   await writeLightweightState(state)
 }
 
@@ -1752,6 +1973,18 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
         await renameLightweightSession(sessionKey, label)
+        setJson(res, 200, { ok: true })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/delete') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        if (!sessionKey) {
+          setJson(res, 400, { error: 'Missing sessionKey' })
+          return
+        }
+        await deleteLightweightSession(sessionKey)
         setJson(res, 200, { ok: true })
         return
       }

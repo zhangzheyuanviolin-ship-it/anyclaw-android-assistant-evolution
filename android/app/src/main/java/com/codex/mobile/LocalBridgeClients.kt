@@ -65,6 +65,46 @@ object LocalBridgeClients {
         return envelope.getJSONObject("result")
     }
 
+    fun callOpenClawApi(
+        path: String,
+        method: String = "GET",
+        body: JSONObject? = null,
+        connectTimeoutMs: Int = 10_000,
+        readTimeoutMs: Int = 35_000,
+    ): JSONObject {
+        val normalizedPath = if (path.startsWith("/")) path else "/$path"
+        val url = URL("http://127.0.0.1:${CodexServerManager.SERVER_PORT}$normalizedPath")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = method.uppercase()
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
+            doOutput = body != null
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        }
+
+        if (body != null) {
+            conn.outputStream.use { stream ->
+                OutputStreamWriter(stream, Charsets.UTF_8).use { writer ->
+                    writer.write(body.toString())
+                }
+            }
+        }
+
+        val responseCode = conn.responseCode
+        val rawResponse = try {
+            val input = if (responseCode in 200..299) conn.inputStream else conn.errorStream
+            input?.bufferedReader(Charsets.UTF_8)?.use { reader -> reader.readText() }.orEmpty()
+        } finally {
+            conn.disconnect()
+        }
+
+        if (responseCode !in 200..299) {
+            throw IllegalStateException("OpenClaw API HTTP $responseCode: $rawResponse")
+        }
+        if (rawResponse.isBlank()) return JSONObject()
+        return JSONObject(rawResponse)
+    }
+
     class OpenClawGateway(private val serverManager: CodexServerManager) {
         fun call(method: String, params: JSONObject = JSONObject()): JSONObject {
             val command =
