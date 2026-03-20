@@ -31,6 +31,7 @@ const POLL_INTERVAL_MS = 2500
 const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
+const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
 
 type SessionSelectOptions = {
   syncHistory?: boolean
@@ -331,6 +332,8 @@ export function useOpenClawState() {
   let pollInFlight = false
   let lastSendAtMs = 0
   let pollTick = 0
+  let bootstrapInFlight: Promise<string> | null = null
+  let lastBootstrapAttemptAtMs = 0
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
@@ -375,7 +378,7 @@ export function useOpenClawState() {
     return sessions.value[0]?.key ?? ''
   }
 
-  async function refreshSessions(preferredSessionKey = ''): Promise<void> {
+  async function refreshSessions(preferredSessionKey = ''): Promise<boolean> {
     isLoadingSessions.value = true
     try {
       const rows = await listOpenClawSessions(240)
@@ -385,8 +388,10 @@ export function useOpenClawState() {
         selectedSessionKey.value = nextKey
       }
       lastError.value = ''
+      return true
     } catch (error) {
       lastError.value = error instanceof Error ? error.message : '加载会话失败'
+      return false
     } finally {
       isLoadingSessions.value = false
     }
@@ -450,7 +455,7 @@ export function useOpenClawState() {
     await ensureSessionReady(preferredSessionKey)
   }
 
-  async function ensureSessionReady(preferredSessionKey = ''): Promise<string> {
+  async function runSessionBootstrap(preferredSessionKey = ''): Promise<string> {
     const preferred = preferredSessionKey.trim()
 
     for (let attempt = 0; attempt < OPENCLAW_BOOTSTRAP_RETRY_LIMIT; attempt += 1) {
@@ -480,11 +485,39 @@ export function useOpenClawState() {
     return ''
   }
 
+  async function ensureSessionReady(preferredSessionKey = ''): Promise<string> {
+    const active = selectedSessionKey.value.trim()
+    if (active) {
+      return active
+    }
+
+    if (bootstrapInFlight) {
+      return bootstrapInFlight
+    }
+
+    const now = Date.now()
+    if (now - lastBootstrapAttemptAtMs < OPENCLAW_BOOTSTRAP_COOLDOWN_MS) {
+      return ''
+    }
+    lastBootstrapAttemptAtMs = now
+
+    bootstrapInFlight = (async () => {
+      try {
+        return await runSessionBootstrap(preferredSessionKey)
+      } finally {
+        bootstrapInFlight = null
+      }
+    })()
+
+    return bootstrapInFlight
+  }
+
   async function createSession(label?: string): Promise<string> {
     try {
       const payload = await createOpenClawSession(label, selectedSessionKey.value)
+      selectedSessionKey.value = payload.sessionKey
       await refreshSessions(payload.sessionKey)
-      await selectSession(payload.sessionKey)
+      await refreshHistory()
       lastError.value = ''
       return payload.sessionKey
     } catch (error) {

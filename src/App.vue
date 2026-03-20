@@ -345,9 +345,11 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const { localePreference, setLocalePreference, t } = useUiI18n()
 const openClawDashboardUrl = computed(() => {
   const params = new URLSearchParams({
+    gatewayUrl: 'ws://127.0.0.1:18789',
     localePref: localePreference.value,
+    simple: '1',
   })
-  return `/openclaw/chat?${params.toString()}`
+  return `http://127.0.0.1:19001/chat?${params.toString()}`
 })
 
 const {
@@ -906,11 +908,15 @@ watch(
     if (isActive) {
       startOpenClawPolling()
       void (async () => {
-        await ensureOpenClawSessionReady(routeOpenClawSessionKey.value)
-        if (routeOpenClawSessionKey.value) {
-          await selectOpenClawSession(routeOpenClawSessionKey.value)
-        } else if (openClawSelectedSessionKey.value) {
-          await router.replace({ name: 'openclaw-chat', query: { session: openClawSelectedSessionKey.value } })
+        try {
+          await ensureOpenClawSessionReady(routeOpenClawSessionKey.value)
+          if (routeOpenClawSessionKey.value) {
+            await selectOpenClawSession(routeOpenClawSessionKey.value)
+          } else if (openClawSelectedSessionKey.value) {
+            await router.replace({ name: 'openclaw-chat', query: { session: openClawSelectedSessionKey.value } })
+          }
+        } catch {
+          // Keep route stable and let polling-based bootstrap continue recovering.
         }
       })()
       return
