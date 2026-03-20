@@ -423,6 +423,7 @@ const {
 
 const route = useRoute()
 const router = useRouter()
+const isCodexBridgeAvailable = ref(true)
 const isRouteSyncInProgress = ref(false)
 const hasInitialized = ref(false)
 const newThreadCwd = ref('')
@@ -819,7 +820,10 @@ function normalizeMessageType(rawType: string | undefined, role: string): string
 }
 
 async function initialize(): Promise<void> {
-  await refreshAll()
+  isCodexBridgeAvailable.value = await checkCodexAvailability()
+  if (isCodexBridgeAvailable.value) {
+    await refreshAll()
+  }
   try {
     await initializeOpenClaw(routeOpenClawSessionKey.value)
   } catch {
@@ -827,9 +831,22 @@ async function initialize(): Promise<void> {
   }
   hasInitialized.value = true
   await syncThreadSelectionWithRoute()
-  startPolling()
+  if (isCodexBridgeAvailable.value) {
+    startPolling()
+  }
   if (isOpenClawRoute.value) {
     startOpenClawPolling()
+  }
+}
+
+async function checkCodexAvailability(): Promise<boolean> {
+  try {
+    const response = await fetch('/codex-api/availability')
+    if (!response.ok) return false
+    const payload = await response.json() as { ok?: unknown }
+    return payload?.ok === true
+  } catch {
+    return false
   }
 }
 

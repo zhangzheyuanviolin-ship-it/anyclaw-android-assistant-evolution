@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { accessSync, constants as fsConstants } from 'node:fs'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -1456,17 +1457,45 @@ class AppServerProcess {
   private readBuffer = ''
   private nextId = 1
   private stopping = false
+  private lastStartError: Error | null = null
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>()
   private readonly notificationListeners = new Set<(value: { method: string; params: unknown }) => void>()
   private readonly pendingServerRequests = new Map<number, PendingServerRequest>()
+  private readonly codexBin = prefixBin ? join(prefixBin, 'codex') : 'codex'
+
+  isCommandAvailable(): boolean {
+    if (!prefixBin) return true
+    try {
+      accessSync(this.codexBin, fsConstants.X_OK)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  getUnavailableReason(): string {
+    if (!this.isCommandAvailable()) {
+      return `Codex CLI not installed: missing executable ${this.codexBin}`
+    }
+    if (this.lastStartError && this.lastStartError.message.trim().length > 0) {
+      return this.lastStartError.message
+    }
+    return ''
+  }
 
   private start(): void {
     if (this.process) return
 
+    if (!this.isCommandAvailable()) {
+      const failure = new Error(`Codex CLI not installed: missing executable ${this.codexBin}`)
+      this.lastStartError = failure
+      throw failure
+    }
+
     this.stopping = false
-    const codexBin = prefixBin ? join(prefixBin, 'codex') : 'codex'
-    const proc = spawn(codexBin, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    const proc = spawn(this.codexBin, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] })
     this.process = proc
+    this.lastStartError = null
 
     proc.stdout.setEncoding('utf8')
     proc.stdout.on('data', (chunk: string) => {
@@ -1490,8 +1519,22 @@ class AppServerProcess {
       // Keep stderr silent in dev middleware; JSON-RPC errors are forwarded via responses.
     })
 
+    proc.on('error', (error) => {
+      const failure = new Error(`codex app-server start failed: ${getErrorMessage(error, 'unknown error')}`)
+      this.lastStartError = failure
+      for (const request of this.pending.values()) {
+        request.reject(failure)
+      }
+      this.pending.clear()
+      this.pendingServerRequests.clear()
+      this.process = null
+      this.initialized = false
+      this.readBuffer = ''
+    })
+
     proc.on('exit', () => {
       const failure = new Error(this.stopping ? 'codex app-server stopped' : 'codex app-server exited unexpectedly')
+      this.lastStartError = this.stopping ? null : failure
       for (const request of this.pending.values()) {
         request.reject(failure)
       }
@@ -1876,6 +1919,10 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       const url = new URL(req.url, 'http://localhost')
 
       if (req.method === 'POST' && url.pathname === '/codex-api/rpc') {
+        if (!appServer.isCommandAvailable()) {
+          setJson(res, 503, { error: appServer.getUnavailableReason() || 'Codex CLI not installed' })
+          return
+        }
         const payload = await readJsonBody(req)
         const body = asRecord(payload) as RpcProxyRequest | null
 
@@ -1899,6 +1946,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         const result = await appServer.rpc(body.method, nextParams)
         setJson(res, 200, { result })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/codex-api/availability') {
+        setJson(res, 200, {
+          ok: appServer.isCommandAvailable(),
+          reason: appServer.getUnavailableReason(),
+        })
         return
       }
 
@@ -2111,6 +2166,10 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'POST' && url.pathname === '/codex-api/server-requests/respond') {
+        if (!appServer.isCommandAvailable()) {
+          setJson(res, 503, { error: appServer.getUnavailableReason() || 'Codex CLI not installed' })
+          return
+        }
         const payload = await readJsonBody(req)
         await appServer.respondToServerRequest(payload)
         setJson(res, 200, { ok: true })
@@ -2118,23 +2177,39 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/server-requests/pending') {
+        if (!appServer.isCommandAvailable()) {
+          setJson(res, 200, { data: [] })
+          return
+        }
         setJson(res, 200, { data: appServer.listPendingServerRequests() })
         return
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/meta/methods') {
+        if (!appServer.isCommandAvailable()) {
+          setJson(res, 200, { data: [] })
+          return
+        }
         const methods = await methodCatalog.listMethods()
         setJson(res, 200, { data: methods })
         return
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/meta/notifications') {
+        if (!appServer.isCommandAvailable()) {
+          setJson(res, 200, { data: [] })
+          return
+        }
         const methods = await methodCatalog.listNotificationMethods()
         setJson(res, 200, { data: methods })
         return
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/events') {
+        if (!appServer.isCommandAvailable()) {
+          setJson(res, 503, { error: appServer.getUnavailableReason() || 'Codex CLI not installed' })
+          return
+        }
         res.statusCode = 200
         res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
         res.setHeader('Cache-Control', 'no-cache, no-transform')
