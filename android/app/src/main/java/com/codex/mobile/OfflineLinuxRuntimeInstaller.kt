@@ -13,17 +13,20 @@ import org.json.JSONObject
 object OfflineLinuxRuntimeInstaller {
 
     private const val TAG = "OfflineLinuxRuntime"
-    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-pd-v4.18.0-r1"
+    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-pd-v4.18.0-r2"
 
     private const val ASSET_UBUNTU_ROOTFS = "runtime/ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
     private const val ASSET_PROOT_STATIC = "runtime/proot-v5.3.0-aarch64-static"
+    private const val ASSET_FAKE_SYSDATA = "runtime/setup_fake_sysdata.sh"
 
     data class RuntimePaths(
         val runtimeRoot: File,
         val ubuntuRoot: File,
         val binDir: File,
+        val tmpDir: File,
         val shellScript: File,
         val prootBinary: File,
+        val fakeSysdataScript: File,
         val markerFile: File,
     )
 
@@ -32,15 +35,19 @@ object OfflineLinuxRuntimeInstaller {
         val runtimeRoot = File(base.homeDir, ".openclaw-android/linux-runtime")
         val ubuntuRoot = File(runtimeRoot, "rootfs/ubuntu-noble-aarch64")
         val binDir = File(runtimeRoot, "bin")
+        val tmpDir = File(runtimeRoot, "tmp")
         val shellScript = File(binDir, "ubuntu-shell.sh")
         val prootBinary = File(binDir, "proot-static")
+        val fakeSysdataScript = File(binDir, "setup_fake_sysdata.sh")
         val markerFile = File(base.homeDir, ".openclaw-android/state/offline-linux-runtime.json")
         return RuntimePaths(
             runtimeRoot = runtimeRoot,
             ubuntuRoot = ubuntuRoot,
             binDir = binDir,
+            tmpDir = tmpDir,
             shellScript = shellScript,
             prootBinary = prootBinary,
+            fakeSysdataScript = fakeSysdataScript,
             markerFile = markerFile,
         )
     }
@@ -84,6 +91,12 @@ object OfflineLinuxRuntimeInstaller {
             onProgress("Installing proot runtime…")
             copyAssetToFile(context, ASSET_PROOT_STATIC, File(stageBinDir, "proot-static"), executable = true)
 
+            onProgress("Preparing compatibility runtime…")
+            copyAssetToFile(context, ASSET_FAKE_SYSDATA, File(stageBinDir, "setup_fake_sysdata.sh"), executable = true)
+            val stageTmpDir = File(stageRuntimeRoot, "tmp")
+            stageTmpDir.mkdirs()
+            Os.chmod(stageTmpDir.absolutePath, 0b111_000_000)
+
             onProgress("Preparing runtime wrapper…")
             val wrapper = File(stageBinDir, "ubuntu-shell.sh")
             wrapper.writeText(buildWrapperScript(), Charsets.UTF_8)
@@ -115,6 +128,8 @@ object OfflineLinuxRuntimeInstaller {
         if (!File(paths.ubuntuRoot, "bin/bash").exists()) return false
         if (!paths.prootBinary.exists()) return false
         if (!paths.shellScript.exists()) return false
+        if (!paths.tmpDir.exists()) return false
+        if (!paths.fakeSysdataScript.exists()) return false
 
         return try {
             val marker = JSONObject(paths.markerFile.takeIf { it.exists() }?.readText().orEmpty())
@@ -209,8 +224,19 @@ object OfflineLinuxRuntimeInstaller {
             "RUNTIME_ROOT=\"\$(cd \"\$SCRIPT_DIR/..\" && pwd)\"",
             "UBUNTU_ROOT=\"\$RUNTIME_ROOT/rootfs/ubuntu-noble-aarch64\"",
             "PROOT_BIN=\"\$RUNTIME_ROOT/bin/proot-static\"",
+            "FAKE_SYSDATA_SCRIPT=\"\$RUNTIME_ROOT/bin/setup_fake_sysdata.sh\"",
             "HOME_BIND=\"\${HOME:-\$RUNTIME_ROOT}\"",
-            "TMP_BASE=\"\${TMPDIR:-/data/local/tmp}\"",
+            "TMP_BASE=\"\$RUNTIME_ROOT/tmp\"",
+            "GUEST_TMP_MOUNT=\"/tmp-host\"",
+            "",
+            "ensure_dir() {",
+            "  if [ ! -d \"\$1\" ]; then",
+            "    mkdir -p \"\$1\"",
+            "  fi",
+            "  chmod 700 \"\$1\" 2>/dev/null || true",
+            "}",
+            "",
+            "ensure_dir \"\$TMP_BASE\"",
             "",
             "if [ ! -x \"\$PROOT_BIN\" ]; then",
             "  echo \"linux-runtime-error:proot-missing\"",
@@ -220,19 +246,53 @@ object OfflineLinuxRuntimeInstaller {
             "  echo \"linux-runtime-error:rootfs-missing\"",
             "  exit 22",
             "fi",
+            "if [ ! -d \"\$TMP_BASE\" ] || [ ! -w \"\$TMP_BASE\" ]; then",
+            "  echo \"linux-runtime-error:tmp-unwritable\"",
+            "  exit 23",
+            "fi",
             "",
             "export LD_PRELOAD=",
             "export PROOT_NO_SECCOMP=1",
             "export PROOT_TMP_DIR=\"\$TMP_BASE\"",
             "",
-            "if [ \"\${1:-}\" = \"--status\" ]; then",
+            "prepare_fake_sysdata() {",
+            "  if [ -f \"\$FAKE_SYSDATA_SCRIPT\" ]; then",
+            "    INSTALLED_ROOTFS_DIR=\"\$RUNTIME_ROOT/rootfs\"",
+            "    distro_name=\"ubuntu-noble-aarch64\"",
+            "    . \"\$FAKE_SYSDATA_SCRIPT\"",
+            "    setup_fake_sysdata || true",
+            "  fi",
+            "}",
+            "",
+            "run_proot() {",
             "  exec \"\$PROOT_BIN\" -0 -r \"\$UBUNTU_ROOT\" --link2symlink \\",
             "    -b /dev -b /proc -b /sys -b /dev/pts \\",
             "    -b /storage/emulated/0:/sdcard \\",
             "    -b \"\$HOME_BIND\":\"\$HOME_BIND\" \\",
+            "    -b \"\$TMP_BASE\":\"\$GUEST_TMP_MOUNT\" \\",
             "    -w /root \\",
-            "    /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\",
-            "    /bin/bash -lc 'echo distro=ready; uname -a; command -v python3 || true; command -v apt || true; command -v git || true'",
+            "    /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=C.UTF-8 TMPDIR=\"\$GUEST_TMP_MOUNT\" GUEST_TMP_MOUNT=\"\$GUEST_TMP_MOUNT\" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin COMMAND_TO_EXEC=\"\$COMMAND_TO_EXEC\" \\",
+            "    /bin/bash -lc 'mkdir -p /tmp /var/tmp /run/shm >/dev/null 2>&1 || true; chmod 1777 /tmp /var/tmp >/dev/null 2>&1 || true; [ -d \"$GUEST_TMP_MOUNT\" ] && chmod 700 \"$GUEST_TMP_MOUNT\" >/dev/null 2>&1 || true; export TMPDIR=\"$GUEST_TMP_MOUNT\"; eval \"$COMMAND_TO_EXEC\"'",
+            "}",
+            "",
+            "prepare_fake_sysdata",
+            "",
+            "if [ \"\${1:-}\" = \"--status\" ]; then",
+            "  COMMAND_TO_EXEC='echo distro=ready; uname -a; command -v python3 || true; command -v apt || true; command -v git || true; printf \"tmpdir=%s\\n\" \"${TMPDIR:-unset}\"; mktemp >/dev/null 2>&1 && echo mktemp=ok || echo mktemp=failed'",
+            "  run_proot",
+            "fi",
+            "",
+            "if [ \"\${1:-}\" = \"--doctor\" ]; then",
+            "  echo \"host_runtime_root=\$RUNTIME_ROOT\"",
+            "  echo \"host_tmp_dir=\$TMP_BASE\"",
+            "  echo \"host_tmp_writable=\$( [ -w \"\$TMP_BASE\" ] && echo yes || echo no )\"",
+            "  COMMAND_TO_EXEC='echo distro=ready; pwd; id; command -v bash || true; command -v python3 || true; command -v apt || true; ls -ld /tmp /var/tmp /run/shm 2>/dev/null || true; printf \"guest_tmpdir=%s\\n\" \"${TMPDIR:-unset}\"; mktemp >/dev/null 2>&1 && echo mktemp=ok || echo mktemp=failed'",
+            "  run_proot",
+            "fi",
+            "",
+            "if [ \"\${1:-}\" = \"--session-shell\" ]; then",
+            "  COMMAND_TO_EXEC='/bin/bash --noprofile --norc'",
+            "  run_proot",
             "fi",
             "",
             "if [ \"\${1:-}\" = \"--command\" ]; then",
@@ -245,13 +305,7 @@ object OfflineLinuxRuntimeInstaller {
             "  fi",
             "fi",
             "",
-            "exec \"\$PROOT_BIN\" -0 -r \"\$UBUNTU_ROOT\" --link2symlink \\",
-            "  -b /dev -b /proc -b /sys -b /dev/pts \\",
-            "  -b /storage/emulated/0:/sdcard \\",
-            "  -b \"\$HOME_BIND\":\"\$HOME_BIND\" \\",
-            "  -w /root \\",
-            "  /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin COMMAND_TO_EXEC=\"\$COMMAND_TO_EXEC\" \\",
-            "  /bin/bash -lc 'eval \"\$COMMAND_TO_EXEC\"'",
+            "run_proot",
             "",
         ).joinToString("\n")
     }

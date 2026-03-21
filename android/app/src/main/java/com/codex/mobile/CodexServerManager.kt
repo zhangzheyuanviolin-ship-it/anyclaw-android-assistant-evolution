@@ -1530,7 +1530,15 @@ EOF
         if (!ubuntuSuiteConfig.has("runtimeShellPath")) {
             ubuntuSuiteConfig.put("runtimeShellPath", linuxRuntimePaths.shellScript.absolutePath)
         }
+        if (!ubuntuSuiteConfig.has("runtimeTmpDir")) {
+            ubuntuSuiteConfig.put("runtimeTmpDir", linuxRuntimePaths.tmpDir.absolutePath)
+        }
+        if (!ubuntuSuiteConfig.has("fakeSysdataPath")) {
+            ubuntuSuiteConfig.put("fakeSysdataPath", linuxRuntimePaths.fakeSysdataScript.absolutePath)
+        }
         if (!ubuntuSuiteConfig.has("workspaceRoot")) ubuntuSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
+        if (!ubuntuSuiteConfig.has("sessionTimeoutSeconds")) ubuntuSuiteConfig.put("sessionTimeoutSeconds", 600)
+        if (!ubuntuSuiteConfig.has("maxSessionOutputBytes")) ubuntuSuiteConfig.put("maxSessionOutputBytes", 524288)
 
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0) {
