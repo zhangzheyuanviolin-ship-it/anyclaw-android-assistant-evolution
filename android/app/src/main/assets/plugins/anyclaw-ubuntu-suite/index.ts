@@ -214,11 +214,71 @@ async function runCommand(command: string, args: string[], timeoutMs: number): P
 }
 
 async function runShell(script: string, timeoutMs: number): Promise<CmdResult> {
-  return runCommand("sh", ["-lc", script], timeoutMs);
+  return runCommand("/system/bin/sh", ["-c", script], timeoutMs);
 }
 
 async function runLinuxCommand(runtime: RuntimeConfig, command: string, timeoutMs: number): Promise<CmdResult> {
-  return runCommand(runtime.runtimeShellPath, ["--command", command], timeoutMs);
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let done = false;
+
+    const child = spawn(runtime.runtimeShellPath, ["--command", command], {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: runtime.runtimeRoot,
+      env: runtimeEnv(runtime)
+    });
+
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+      resolve({
+        ok: false,
+        code: -1,
+        stdout: stripInternalNoise(stdout),
+        stderr: stripInternalNoise(stderr),
+        error: "timeout"
+      });
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+
+    child.on("error", (error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({
+        ok: false,
+        code: -1,
+        stdout: stripInternalNoise(stdout),
+        stderr: stripInternalNoise(stderr),
+        error: String(error)
+      });
+    });
+
+    child.on("close", (code) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({
+        ok: code === 0,
+        code: typeof code === "number" ? code : -1,
+        stdout: stripInternalNoise(stdout),
+        stderr: stripInternalNoise(stderr)
+      });
+    });
+  });
 }
 
 async function runLinuxDoctor(runtime: RuntimeConfig): Promise<CmdResult> {
@@ -278,6 +338,24 @@ function attachSessionReaders(session: UbuntuSession, runtime: RuntimeConfig) {
   });
 }
 
+function runtimeBin(runtime: RuntimeConfig): string {
+  return `${runtime.runtimeRoot}/bin`;
+}
+
+function runtimeEnv(runtime: RuntimeConfig): NodeJS.ProcessEnv {
+  const currentPath = String(process.env.PATH || "");
+  const currentLd = String(process.env.LD_LIBRARY_PATH || "");
+  const bin = runtimeBin(runtime);
+  return {
+    ...process.env,
+    PATH: currentPath ? `${bin}:${currentPath}` : bin,
+    LD_LIBRARY_PATH: currentLd ? `${bin}:${currentLd}` : bin,
+    TMPDIR: runtime.runtimeTmpDir,
+    PROOT_TMP_DIR: runtime.runtimeTmpDir,
+    PROOT_LOADER: `${bin}/loader`
+  };
+}
+
 async function waitForCondition(
   session: UbuntuSession,
   runtime: RuntimeConfig,
@@ -313,7 +391,9 @@ async function waitForCondition(
 async function createSession(runtime: RuntimeConfig, workingDir: string): Promise<UbuntuSession> {
   const id = `ubuntu_${randomUUID()}`;
   const process = spawn(runtime.runtimeShellPath, ["--session-shell"], {
-    stdio: ["pipe", "pipe", "pipe"]
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: runtime.runtimeRoot,
+    env: runtimeEnv(runtime)
   });
 
   const session: UbuntuSession = {
@@ -447,14 +527,20 @@ async function collectStatus(runtime: RuntimeConfig): Promise<Record<string, unk
   const runtimeRootExists = existsSync(runtime.runtimeRoot);
   const tmpDirExists = existsSync(runtime.runtimeTmpDir);
   const fakeSysdataExists = existsSync(runtime.fakeSysdataPath);
-  const prootExists = existsSync(`${runtime.runtimeRoot}/bin/proot-static`);
+  const prootExists = existsSync(`${runtime.runtimeRoot}/bin/proot`);
+  const prootCompatExists = existsSync(`${runtime.runtimeRoot}/bin/proot-static`);
+  const loaderExists = existsSync(`${runtime.runtimeRoot}/bin/loader`);
+  const bashExists = existsSync(`${runtime.runtimeRoot}/bin/bash`);
+  const busyboxExists = existsSync(`${runtime.runtimeRoot}/bin/busybox`);
   const rootfsExists = existsSync(`${runtime.runtimeRoot}/rootfs/ubuntu-noble-aarch64`);
 
   const hostCheckScript = [
     "set +e",
     `if [ -d ${shellSingleQuote(runtime.runtimeTmpDir)} ]; then echo tmp_dir=ready; else echo tmp_dir=missing; fi`,
     `if [ -w ${shellSingleQuote(runtime.runtimeTmpDir)} ]; then echo tmp_writable=yes; else echo tmp_writable=no; fi`,
-    `if [ -x ${shellSingleQuote(runtime.fakeSysdataPath)} ]; then echo fake_sysdata=ready; else echo fake_sysdata=missing; fi`
+    `if [ -x ${shellSingleQuote(runtime.fakeSysdataPath)} ]; then echo fake_sysdata=ready; else echo fake_sysdata=missing; fi`,
+    `if [ -x ${shellSingleQuote(`${runtime.runtimeRoot}/bin/proot`)} ]; then echo proot=ready; else echo proot=missing; fi`,
+    `if [ -x ${shellSingleQuote(`${runtime.runtimeRoot}/bin/bash`)} ]; then echo bash=ready; else echo bash=missing; fi`
   ].join("; ");
 
   const hostCheck = await runShell(hostCheckScript, runtime.timeoutMs);
@@ -468,6 +554,10 @@ async function collectStatus(runtime: RuntimeConfig): Promise<Record<string, unk
     shellExists,
     runtimeRootExists,
     prootExists,
+    prootCompatExists,
+    loaderExists,
+    bashExists,
+    busyboxExists,
     rootfsExists,
     tmpDirExists,
     fakeSysdataExists,
@@ -534,7 +624,11 @@ function createInstallTool(runtime: RuntimeConfig) {
         `mkdir -p ${shellSingleQuote(runtime.runtimeTmpDir)}`,
         `chmod 700 ${shellSingleQuote(runtime.runtimeTmpDir)} 2>/dev/null || true`,
         `test -x ${shellSingleQuote(runtime.runtimeShellPath)}`,
+        `test -x ${shellSingleQuote(runtime.runtimeRoot + "/bin/proot")}`,
         `test -x ${shellSingleQuote(runtime.runtimeRoot + "/bin/proot-static")}`,
+        `test -x ${shellSingleQuote(runtime.runtimeRoot + "/bin/loader")}`,
+        `test -x ${shellSingleQuote(runtime.runtimeRoot + "/bin/bash")}`,
+        `test -x ${shellSingleQuote(runtime.runtimeRoot + "/bin/busybox")}`,
         `test -x ${shellSingleQuote(runtime.fakeSysdataPath)}`,
         `test -d ${shellSingleQuote(runtime.runtimeRoot + "/rootfs/ubuntu-noble-aarch64")}`,
         `test -w ${shellSingleQuote(runtime.runtimeTmpDir)}`,
