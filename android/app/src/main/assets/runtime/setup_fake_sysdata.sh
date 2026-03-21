@@ -5,6 +5,9 @@
 # running on a VM with 8 CPUs and 8 GiB of memory. Date 2023.03.28, Linux 6.2.1.
 # Some values edited to fit the PRoot-Distro.
 setup_fake_sysdata() {
+	: "${DEFAULT_FAKE_KERNEL_RELEASE:=6.1.118-android14-anyclaw}"
+	: "${DEFAULT_FAKE_KERNEL_VERSION:=#1 SMP PREEMPT AnyClaw Offline Runtime}"
+
 	local d
 	for d in proc sys sys/.empty; do
 		if [ ! -e "${INSTALLED_ROOTFS_DIR}/${distro_name}/${d}" ]; then

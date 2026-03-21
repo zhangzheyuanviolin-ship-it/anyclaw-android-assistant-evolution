@@ -13,7 +13,7 @@ import org.json.JSONObject
 object OfflineLinuxRuntimeInstaller {
 
     private const val TAG = "OfflineLinuxRuntime"
-    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-pd-v4.18.0-r2"
+    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-pd-v4.18.0-r3"
 
     private const val ASSET_UBUNTU_ROOTFS = "runtime/ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
     private const val ASSET_PROOT_STATIC = "runtime/proot-v5.3.0-aarch64-static"
@@ -259,8 +259,20 @@ object OfflineLinuxRuntimeInstaller {
             "  if [ -f \"\$FAKE_SYSDATA_SCRIPT\" ]; then",
             "    INSTALLED_ROOTFS_DIR=\"\$RUNTIME_ROOT/rootfs\"",
             "    distro_name=\"ubuntu-noble-aarch64\"",
-            "    . \"\$FAKE_SYSDATA_SCRIPT\"",
-            "    setup_fake_sysdata || true",
+            "    DEFAULT_FAKE_KERNEL_RELEASE=\"\${DEFAULT_FAKE_KERNEL_RELEASE:-6.1.118-android14-anyclaw}\"",
+            "    DEFAULT_FAKE_KERNEL_VERSION=\"\${DEFAULT_FAKE_KERNEL_VERSION:-#1 SMP PREEMPT AnyClaw Offline Runtime}\"",
+            "    if ! . \"\$FAKE_SYSDATA_SCRIPT\"; then",
+            "      echo \"linux-runtime-error:fake-sysdata-source-failed\" >&2",
+            "      return 41",
+            "    fi",
+            "    if ! command -v setup_fake_sysdata >/dev/null 2>&1; then",
+            "      echo \"linux-runtime-error:fake-sysdata-function-missing\" >&2",
+            "      return 42",
+            "    fi",
+            "    if ! setup_fake_sysdata; then",
+            "      echo \"linux-runtime-error:fake-sysdata-apply-failed\" >&2",
+            "      return 43",
+            "    fi",
             "  fi",
             "}",
             "",
@@ -275,7 +287,9 @@ object OfflineLinuxRuntimeInstaller {
             "    /bin/bash -lc 'mkdir -p /tmp /var/tmp /run/shm >/dev/null 2>&1 || true; chmod 1777 /tmp /var/tmp >/dev/null 2>&1 || true; [ -d \"\$GUEST_TMP_MOUNT\" ] && chmod 700 \"\$GUEST_TMP_MOUNT\" >/dev/null 2>&1 || true; export TMPDIR=\"\$GUEST_TMP_MOUNT\"; eval \"\$COMMAND_TO_EXEC\"'",
             "}",
             "",
-            "prepare_fake_sysdata",
+            "if ! prepare_fake_sysdata; then",
+            "  exit $?",
+            "fi",
             "",
             "if [ \"\${1:-}\" = \"--status\" ]; then",
             "  COMMAND_TO_EXEC='echo distro=ready; uname -a; command -v python3 || true; command -v apt || true; command -v git || true; printf \"tmpdir=%s\\n\" \"\${TMPDIR:-unset}\"; mktemp >/dev/null 2>&1 && echo mktemp=ok || echo mktemp=failed'",
