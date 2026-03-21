@@ -50,6 +50,12 @@ class CodexServerManager(private val context: Context) {
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
 
+    /**
+     * Use Android system shell for process bootstrap.
+     * This avoids first-run crashes observed with bootstrap-provided dash.
+     */
+    private fun runtimeShell(): String = "/system/bin/sh"
+
     val isRunning: Boolean
         get() {
             val proc = serverProcess ?: return false
@@ -74,7 +80,7 @@ class CodexServerManager(private val context: Context) {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths)
 
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val pb = ProcessBuilder(shell, "-c", command)
         pb.environment().clear()
         pb.environment().putAll(env)
@@ -1740,7 +1746,7 @@ EOF
         """.trimIndent()) { Log.d(TAG, "[openclaw-gw] $it") }
 
         val env = buildEnvironment(paths)
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val cmd = "exec openclaw gateway run --force --port $OPENCLAW_GATEWAY_PORT 2>&1"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
@@ -1794,7 +1800,7 @@ EOF
         }
         ensureOpenClawControlUiHistoryPatch(controlUiRoot)
 
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val serverScript = """
             node -e "
               const http = require('http');
@@ -2421,7 +2427,7 @@ WEOF
         }
 
         val env = buildEnvironment(paths)
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val cmd = "exec node ${proxyScript.absolutePath}"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
@@ -2554,7 +2560,7 @@ WEOF
         env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
         env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
 
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val cmd = "${codexBinPath()} exec --skip-git-repo-check \"say hi\" 2>&1"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
@@ -2621,7 +2627,7 @@ WEOF
             return false
         }
 
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val command = "exec node $serverScript --port $SERVER_PORT --no-password"
 
         Log.i(TAG, "Starting server: $command")
