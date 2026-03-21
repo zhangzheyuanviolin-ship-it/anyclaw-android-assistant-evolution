@@ -1,13 +1,12 @@
 import { jsonResult, readStringParam } from "openclaw/plugin-sdk";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 type RuntimeConfig = {
   timeoutMs: number;
   installTimeoutMs: number;
-  distroName: string;
-  prootDistroBin: string;
-  autoInstallProotDistro: boolean;
-  autoInstallDistro: boolean;
+  runtimeRoot: string;
+  runtimeShellPath: string;
   workspaceRoot: string;
 };
 
@@ -21,8 +20,8 @@ type CmdResult = {
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_INSTALL_TIMEOUT_MS = 30 * 60_000;
-const DEFAULT_DISTRO_NAME = "ubuntu";
-const DEFAULT_PROOT_DISTRO_BIN = "proot-distro";
+const DEFAULT_RUNTIME_ROOT = "~/.openclaw-android/linux-runtime";
+const DEFAULT_RUNTIME_SHELL_PATH = "~/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh";
 const DEFAULT_WORKSPACE_ROOT = "~/.openclaw/workspace";
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -87,15 +86,15 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
   const installTimeoutSecondsRaw =
     typeof cfg.installTimeoutSeconds === "number" ? cfg.installTimeoutSeconds : DEFAULT_INSTALL_TIMEOUT_MS / 1000;
 
-  const distroName =
-    typeof cfg.distroName === "string" && cfg.distroName.trim()
-      ? cfg.distroName.trim()
-      : DEFAULT_DISTRO_NAME;
+  const runtimeRoot =
+    typeof cfg.runtimeRoot === "string" && cfg.runtimeRoot.trim()
+      ? resolvePath(cfg.runtimeRoot)
+      : resolvePath(DEFAULT_RUNTIME_ROOT);
 
-  const prootDistroBin =
-    typeof cfg.prootDistroBin === "string" && cfg.prootDistroBin.trim()
-      ? cfg.prootDistroBin.trim()
-      : DEFAULT_PROOT_DISTRO_BIN;
+  const runtimeShellPath =
+    typeof cfg.runtimeShellPath === "string" && cfg.runtimeShellPath.trim()
+      ? resolvePath(cfg.runtimeShellPath)
+      : resolvePath(DEFAULT_RUNTIME_SHELL_PATH);
 
   const workspaceRoot =
     typeof cfg.workspaceRoot === "string" && cfg.workspaceRoot.trim()
@@ -105,10 +104,8 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
   return {
     timeoutMs: clampNumber(timeoutSecondsRaw, 10, 300) * 1000,
     installTimeoutMs: clampNumber(installTimeoutSecondsRaw, 60, 3600) * 1000,
-    distroName,
-    prootDistroBin,
-    autoInstallProotDistro: readBoolean(cfg.autoInstallProotDistro, true),
-    autoInstallDistro: readBoolean(cfg.autoInstallDistro, false),
+    runtimeRoot,
+    runtimeShellPath,
     workspaceRoot
   };
 }
@@ -179,30 +176,34 @@ async function runShell(script: string, timeoutMs: number): Promise<CmdResult> {
   return runCommand("sh", ["-lc", script], timeoutMs);
 }
 
+function buildLinuxCommand(runtime: RuntimeConfig, command: string): string {
+  return `${shellSingleQuote(runtime.runtimeShellPath)} --command ${shellSingleQuote(command)}`;
+}
+
 async function collectStatus(runtime: RuntimeConfig): Promise<Record<string, unknown>> {
+  const shellExists = existsSync(runtime.runtimeShellPath);
+  const runtimeRootExists = existsSync(runtime.runtimeRoot);
+
   const script = [
     "set +e",
-    "echo home=${HOME:-}",
-    "echo prefix=${PREFIX:-}",
-    `echo proot=$(command -v proot || true)`,
-    `echo proot_distro=$(command -v ${runtime.prootDistroBin} || true)`,
-    `if command -v ${runtime.prootDistroBin} >/dev/null 2>&1; then ${runtime.prootDistroBin} list 2>/dev/null || true; fi`,
-    `if command -v ${runtime.prootDistroBin} >/dev/null 2>&1; then ${runtime.prootDistroBin} login ${runtime.distroName} -- /usr/bin/env bash -lc 'echo distro=ready; uname -a; command -v python3 || true' 2>/dev/null || true; fi`
+    `echo runtime_root=${shellSingleQuote(runtime.runtimeRoot)}`,
+    `if [ -x ${shellSingleQuote(runtime.runtimeShellPath)} ]; then echo runtime_shell=ready; else echo runtime_shell=missing; fi`,
+    `if [ -d ${shellSingleQuote(runtime.runtimeRoot + "/rootfs/ubuntu-noble-aarch64")} ]; then echo rootfs=ready; else echo rootfs=missing; fi`,
+    `${buildLinuxCommand(runtime, "echo distro=ready; uname -a; command -v python3 || true; command -v apt || true")} 2>&1 || true`
   ].join("; ");
 
   const result = await runShell(script, runtime.timeoutMs);
-
   const output = `${result.stdout}\n${result.stderr}`;
-  const hasProot = /proot=\//.test(output);
-  const hasProotDistro = /proot_distro=\//.test(output);
   const distroReady = /distro=ready/.test(output);
 
   return {
     ok: result.ok,
     code: result.code,
-    hasProot,
-    hasProotDistro,
+    shellExists,
+    runtimeRootExists,
     distroReady,
+    runtimeRoot: runtime.runtimeRoot,
+    runtimeShellPath: runtime.runtimeShellPath,
     stdout: result.stdout,
     stderr: result.stderr,
     error: result.error
@@ -213,7 +214,7 @@ function createStatusTool(runtime: RuntimeConfig) {
   return {
     label: "AnyClaw Ubuntu Status",
     name: "anyclaw_ubuntu_status",
-    description: "Check proot/proot-distro availability and Ubuntu distro readiness.",
+    description: "Check bundled Linux runtime and Ubuntu readiness.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -223,7 +224,6 @@ function createStatusTool(runtime: RuntimeConfig) {
       const status = await collectStatus(runtime);
       return jsonResult({
         tool: "anyclaw_ubuntu_status",
-        distro: runtime.distroName,
         ...status
       });
     }
@@ -232,59 +232,39 @@ function createStatusTool(runtime: RuntimeConfig) {
 
 function createInstallTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Ubuntu Install",
+    label: "AnyClaw Ubuntu Repair",
     name: "anyclaw_ubuntu_install",
-    description: "Install proot-distro and Ubuntu rootfs when needed.",
+    description: "Run bundled Ubuntu runtime self-check and repair scripts (no online proot-distro install).",
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
-        distroName: { type: "string" },
-        forceReinstall: { type: "boolean" },
-        installDistro: { type: "boolean" }
+        aptUpdate: { type: "boolean" }
       }
     },
     execute: async (_toolCallId: string, input: unknown) => {
       const args = asObject(input);
-      const distroName = (readStringParam(args, "distroName") || runtime.distroName).trim() || runtime.distroName;
-      const forceReinstall = readBoolean(args.forceReinstall, false);
-      const installDistro = readBoolean(args.installDistro, runtime.autoInstallDistro);
+      const aptUpdate = readBoolean(args.aptUpdate, false);
 
-      const steps: string[] = [
-        "set +e",
-        "export DEBIAN_FRONTEND=noninteractive",
-        "echo [ubuntu-install] start"
+      const checks = [
+        "set -e",
+        `test -x ${shellSingleQuote(runtime.runtimeShellPath)}`,
+        `test -d ${shellSingleQuote(runtime.runtimeRoot + "/rootfs/ubuntu-noble-aarch64")}`,
+        buildLinuxCommand(runtime, "echo distro=ready; command -v bash; command -v python3 || true")
       ];
 
-      if (runtime.autoInstallProotDistro) {
-        steps.push(
-          `if ! command -v ${runtime.prootDistroBin} >/dev/null 2>&1; then apt-get update -y >/dev/null 2>&1 || true; apt-get install -y proot-distro tar xz-utils >/dev/null 2>&1 || pkg install -y proot-distro tar xz-utils >/dev/null 2>&1 || true; fi`
-        );
+      if (aptUpdate) {
+        checks.push(buildLinuxCommand(runtime, "apt-get update -y >/dev/null 2>&1 || true; echo apt_update=done"));
       }
 
-      steps.push(`echo [ubuntu-install] proot_distro=$(command -v ${runtime.prootDistroBin} || true)`);
-      steps.push(`if ! command -v ${runtime.prootDistroBin} >/dev/null 2>&1; then echo [ubuntu-install] missing-proot-distro; exit 2; fi`);
-
-      if (forceReinstall) {
-        steps.push(`${runtime.prootDistroBin} remove ${distroName} >/dev/null 2>&1 || true`);
-      }
-
-      steps.push(`${runtime.prootDistroBin} list 2>/dev/null || true`);
-      if (installDistro) {
-        steps.push(`${runtime.prootDistroBin} install ${distroName} 2>&1`);
-      }
-
-      steps.push(`${runtime.prootDistroBin} login ${distroName} -- /usr/bin/env bash -lc 'echo distro=ready; uname -a; command -v bash; command -v python3 || true' 2>&1`);
-      steps.push("echo [ubuntu-install] done");
-
-      const result = await runShell(steps.join("; "), runtime.installTimeoutMs);
+      const result = await runShell(checks.join("; "), runtime.installTimeoutMs);
       return jsonResult({
         tool: "anyclaw_ubuntu_install",
         ok: result.ok,
         code: result.code,
-        distro: distroName,
-        forceReinstall,
-        installDistro,
+        aptUpdate,
+        runtimeRoot: runtime.runtimeRoot,
+        runtimeShellPath: runtime.runtimeShellPath,
         stdout: result.stdout,
         stderr: result.stderr,
         error: result.error
@@ -297,40 +277,38 @@ function createExecTool(runtime: RuntimeConfig) {
   return {
     label: "AnyClaw Ubuntu Exec",
     name: "anyclaw_ubuntu_exec",
-    description: "Execute shell command inside Ubuntu distro via proot-distro.",
+    description: "Execute shell commands in bundled Ubuntu runtime.",
     parameters: {
       type: "object",
       additionalProperties: false,
       required: ["command"],
       properties: {
         command: { type: "string" },
-        distroName: { type: "string" },
         workingDir: { type: "string" }
       }
     },
     execute: async (_toolCallId: string, input: unknown) => {
       const args = asObject(input);
       const command = (readStringParam(args, "command", { required: true }) || "").trim();
-      const distroName = (readStringParam(args, "distroName") || runtime.distroName).trim() || runtime.distroName;
       const rawWorkingDir = (readStringParam(args, "workingDir") || runtime.workspaceRoot).trim();
       const workingDir = rawWorkingDir || runtime.workspaceRoot;
 
       const wrapped = [
-        `set -e`,
+        "set -e",
         `cd ${shellSingleQuote(workingDir)} 2>/dev/null || cd /`,
         command
       ].join("; ");
 
-      const runner = `${runtime.prootDistroBin} login ${distroName} --shared-tmp -- /usr/bin/env bash -lc ${shellSingleQuote(wrapped)}`;
+      const runner = buildLinuxCommand(runtime, wrapped);
       const result = await runShell(runner, runtime.timeoutMs);
 
       return jsonResult({
         tool: "anyclaw_ubuntu_exec",
         ok: result.ok,
         code: result.code,
-        distro: distroName,
         workingDir,
         command,
+        runtimeRoot: runtime.runtimeRoot,
         stdout: result.stdout,
         stderr: result.stderr,
         error: result.error
@@ -343,7 +321,7 @@ function createExecHostTool(runtime: RuntimeConfig) {
   return {
     label: "AnyClaw Host Exec",
     name: "anyclaw_host_exec",
-    description: "Execute shell command in the current host prefix for diagnostics.",
+    description: "Execute shell command in host prefix for diagnostics.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -361,6 +339,8 @@ function createExecHostTool(runtime: RuntimeConfig) {
         ok: result.ok,
         code: result.code,
         command,
+        runtimeRoot: runtime.runtimeRoot,
+        runtimeShellPath: runtime.runtimeShellPath,
         stdout: result.stdout,
         stderr: result.stderr,
         error: result.error
@@ -376,7 +356,8 @@ export default {
     const runtime = resolveRuntimeConfig(api.pluginConfig);
     if (api.logger && api.logger.info) {
       api.logger.info(
-        "anyclaw-ubuntu-suite loaded distro=" + runtime.distroName +
+        "anyclaw-ubuntu-suite loaded runtimeRoot=" + runtime.runtimeRoot +
+          " runtimeShellPath=" + runtime.runtimeShellPath +
           " timeoutMs=" + runtime.timeoutMs +
           " installTimeoutMs=" + runtime.installTimeoutMs
       );

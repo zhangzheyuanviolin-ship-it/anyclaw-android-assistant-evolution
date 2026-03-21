@@ -1517,10 +1517,13 @@ EOF
         val ubuntuSuiteConfig = ensureObject(ubuntuSuiteEntry, "config")
         if (!ubuntuSuiteConfig.has("timeoutSeconds")) ubuntuSuiteConfig.put("timeoutSeconds", 45)
         if (!ubuntuSuiteConfig.has("installTimeoutSeconds")) ubuntuSuiteConfig.put("installTimeoutSeconds", 1800)
-        if (!ubuntuSuiteConfig.has("distroName")) ubuntuSuiteConfig.put("distroName", "ubuntu")
-        if (!ubuntuSuiteConfig.has("prootDistroBin")) ubuntuSuiteConfig.put("prootDistroBin", "proot-distro")
-        if (!ubuntuSuiteConfig.has("autoInstallProotDistro")) ubuntuSuiteConfig.put("autoInstallProotDistro", true)
-        if (!ubuntuSuiteConfig.has("autoInstallDistro")) ubuntuSuiteConfig.put("autoInstallDistro", false)
+        val linuxRuntimePaths = OfflineLinuxRuntimeInstaller.getRuntimePaths(context)
+        if (!ubuntuSuiteConfig.has("runtimeRoot")) {
+            ubuntuSuiteConfig.put("runtimeRoot", linuxRuntimePaths.runtimeRoot.absolutePath)
+        }
+        if (!ubuntuSuiteConfig.has("runtimeShellPath")) {
+            ubuntuSuiteConfig.put("runtimeShellPath", linuxRuntimePaths.shellScript.absolutePath)
+        }
         if (!ubuntuSuiteConfig.has("workspaceRoot")) ubuntuSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
 
         val allow = plugins.optJSONArray("allow")

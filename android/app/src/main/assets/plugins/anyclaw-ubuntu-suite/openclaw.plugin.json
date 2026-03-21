@@ -17,17 +17,11 @@
         "minimum": 60,
         "maximum": 3600
       },
-      "distroName": {
+      "runtimeRoot": {
         "type": "string"
       },
-      "prootDistroBin": {
+      "runtimeShellPath": {
         "type": "string"
-      },
-      "autoInstallProotDistro": {
-        "type": "boolean"
-      },
-      "autoInstallDistro": {
-        "type": "boolean"
       },
       "workspaceRoot": {
         "type": "string"

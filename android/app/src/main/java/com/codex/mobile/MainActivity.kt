@@ -522,6 +522,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Step 2e: Install bundled full Linux runtime for Ubuntu terminal tools.
+        // This path is local-only and does not rely on online proot-distro install.
+        updateStatus("Installing Linux runtime…", "Preparing bundled Ubuntu terminal")
+        val linuxRuntimeOk = OfflineLinuxRuntimeInstaller.install(this) { msg -> updateDetail(msg) }
+        if (!linuxRuntimeOk) {
+            Log.w(TAG, "Bundled Linux runtime install failed; continuing with base runtime only")
+            updateStatus("Linux runtime install failed", "OpenClaw base mode remains available")
+        } else {
+            updateStatus("Linux runtime ready")
+        }
+
         // Step 3: Codex is optional on first run. Do not block OpenClaw-only users.
         val codexCliInstalled = serverManager.isCodexInstalled()
         if (codexCliInstalled) {

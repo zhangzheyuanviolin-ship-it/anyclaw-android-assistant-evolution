@@ -41,7 +41,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p android/app/src/main/assets/runtime
-          rm -f android/app/src/main/assets/runtime/*
+          # Keep bundled runtime files committed in repo (e.g. Ubuntu rootfs/proot).
+          # Only refresh OpenClaw-specific blobs downloaded from release.
+          rm -f android/app/src/main/assets/runtime/openclaw-runtime-2026.3.2.tar
+          rm -f android/app/src/main/assets/runtime/openclaw_installed_2026_3_2.tar.gz
+          rm -f android/app/src/main/assets/runtime/davey.android-arm64.node
           gh release download runtime-assets-2026-03-19-r1 \
             --repo "${{ github.repository }}" \
             --pattern "openclaw_installed_2026_3_2.tar.gz" \
