@@ -201,58 +201,59 @@ object OfflineLinuxRuntimeInstaller {
     }
 
     private fun buildWrapperScript(): String {
-        return """
-            #!/system/bin/sh
-            set -eu
-
-            SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-            RUNTIME_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-            UBUNTU_ROOT="$RUNTIME_ROOT/rootfs/ubuntu-noble-aarch64"
-            PROOT_BIN="$RUNTIME_ROOT/bin/proot-static"
-            HOME_BIND="${HOME:-$RUNTIME_ROOT}"
-            TMP_BASE="${TMPDIR:-/data/local/tmp}"
-
-            if [ ! -x "$PROOT_BIN" ]; then
-              echo "linux-runtime-error:proot-missing"
-              exit 21
-            fi
-            if [ ! -d "$UBUNTU_ROOT" ] || [ ! -x "$UBUNTU_ROOT/bin/bash" ]; then
-              echo "linux-runtime-error:rootfs-missing"
-              exit 22
-            fi
-
-            export LD_PRELOAD=
-            export PROOT_NO_SECCOMP=1
-            export PROOT_TMP_DIR="$TMP_BASE"
-
-            if [ "${1:-}" = "--status" ]; then
-              exec "$PROOT_BIN" -0 -r "$UBUNTU_ROOT" --link2symlink \
-                -b /dev -b /proc -b /sys -b /dev/pts \
-                -b /storage/emulated/0:/sdcard \
-                -b "$HOME_BIND":"$HOME_BIND" \
-                -w /root \
-                /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-                /bin/bash -lc 'echo distro=ready; uname -a; command -v python3 || true; command -v apt || true; command -v git || true'
-            fi
-
-            if [ "${1:-}" = "--command" ]; then
-              shift
-              COMMAND_TO_EXEC="${1:-/bin/bash -il}"
-            else
-              COMMAND_TO_EXEC="$*"
-              if [ -z "$COMMAND_TO_EXEC" ]; then
-                COMMAND_TO_EXEC="/bin/bash -il"
-              fi
-            fi
-
-            exec "$PROOT_BIN" -0 -r "$UBUNTU_ROOT" --link2symlink \
-              -b /dev -b /proc -b /sys -b /dev/pts \
-              -b /storage/emulated/0:/sdcard \
-              -b "$HOME_BIND":"$HOME_BIND" \
-              -w /root \
-              /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin COMMAND_TO_EXEC="$COMMAND_TO_EXEC" \
-              /bin/bash -lc 'eval "$COMMAND_TO_EXEC"'
-        """.trimIndent() + "\n"
+        return listOf(
+            "#!/system/bin/sh",
+            "set -eu",
+            "",
+            "SCRIPT_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"",
+            "RUNTIME_ROOT=\"\$(cd \"\$SCRIPT_DIR/..\" && pwd)\"",
+            "UBUNTU_ROOT=\"\$RUNTIME_ROOT/rootfs/ubuntu-noble-aarch64\"",
+            "PROOT_BIN=\"\$RUNTIME_ROOT/bin/proot-static\"",
+            "HOME_BIND=\"\${HOME:-\$RUNTIME_ROOT}\"",
+            "TMP_BASE=\"\${TMPDIR:-/data/local/tmp}\"",
+            "",
+            "if [ ! -x \"\$PROOT_BIN\" ]; then",
+            "  echo \"linux-runtime-error:proot-missing\"",
+            "  exit 21",
+            "fi",
+            "if [ ! -d \"\$UBUNTU_ROOT\" ] || [ ! -x \"\$UBUNTU_ROOT/bin/bash\" ]; then",
+            "  echo \"linux-runtime-error:rootfs-missing\"",
+            "  exit 22",
+            "fi",
+            "",
+            "export LD_PRELOAD=",
+            "export PROOT_NO_SECCOMP=1",
+            "export PROOT_TMP_DIR=\"\$TMP_BASE\"",
+            "",
+            "if [ \"\${1:-}\" = \"--status\" ]; then",
+            "  exec \"\$PROOT_BIN\" -0 -r \"\$UBUNTU_ROOT\" --link2symlink \\",
+            "    -b /dev -b /proc -b /sys -b /dev/pts \\",
+            "    -b /storage/emulated/0:/sdcard \\",
+            "    -b \"\$HOME_BIND\":\"\$HOME_BIND\" \\",
+            "    -w /root \\",
+            "    /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\",
+            "    /bin/bash -lc 'echo distro=ready; uname -a; command -v python3 || true; command -v apt || true; command -v git || true'",
+            "fi",
+            "",
+            "if [ \"\${1:-}\" = \"--command\" ]; then",
+            "  shift",
+            "  COMMAND_TO_EXEC=\"\${1:-/bin/bash -il}\"",
+            "else",
+            "  COMMAND_TO_EXEC=\"\$*\"",
+            "  if [ -z \"\$COMMAND_TO_EXEC\" ]; then",
+            "    COMMAND_TO_EXEC=\"/bin/bash -il\"",
+            "  fi",
+            "fi",
+            "",
+            "exec \"\$PROOT_BIN\" -0 -r \"\$UBUNTU_ROOT\" --link2symlink \\",
+            "  -b /dev -b /proc -b /sys -b /dev/pts \\",
+            "  -b /storage/emulated/0:/sdcard \\",
+            "  -b \"\$HOME_BIND\":\"\$HOME_BIND\" \\",
+            "  -w /root \\",
+            "  /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin COMMAND_TO_EXEC=\"\$COMMAND_TO_EXEC\" \\",
+            "  /bin/bash -lc 'eval \"\$COMMAND_TO_EXEC\"'",
+            "",
+        ).joinToString("\n")
     }
 
     private fun writeMarker(markerFile: File) {
