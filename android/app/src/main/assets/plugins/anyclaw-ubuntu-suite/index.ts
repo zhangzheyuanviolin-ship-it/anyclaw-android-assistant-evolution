@@ -348,7 +348,7 @@ function runtimeEnv(runtime: RuntimeConfig): NodeJS.ProcessEnv {
   const bin = runtimeBin(runtime);
   return {
     ...process.env,
-    PATH: currentPath ? `${bin}:${currentPath}` : bin,
+    PATH: currentPath ? `${bin}:/system/bin:/system/xbin:${currentPath}` : `${bin}:/system/bin:/system/xbin`,
     LD_LIBRARY_PATH: currentLd ? `${bin}:${currentLd}` : bin,
     TMPDIR: runtime.runtimeTmpDir,
     PROOT_TMP_DIR: runtime.runtimeTmpDir,
