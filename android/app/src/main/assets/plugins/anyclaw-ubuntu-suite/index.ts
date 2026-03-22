@@ -151,14 +151,26 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
   };
 }
 
-async function runCommand(command: string, args: string[], timeoutMs: number): Promise<CmdResult> {
+type CommandOptions = {
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+};
+
+async function runCommand(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  options?: CommandOptions
+): Promise<CmdResult> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let done = false;
 
     const child = spawn(command, args, {
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: options?.env,
+      cwd: options?.cwd
     });
 
     const timer = setTimeout(() => {
@@ -214,7 +226,9 @@ async function runCommand(command: string, args: string[], timeoutMs: number): P
 }
 
 async function runShell(script: string, timeoutMs: number): Promise<CmdResult> {
-  return runCommand("/system/bin/sh", ["-c", script], timeoutMs);
+  return runCommand("/system/bin/sh", ["-c", script], timeoutMs, {
+    env: hostEnv()
+  });
 }
 
 async function runLinuxCommand(runtime: RuntimeConfig, command: string, timeoutMs: number): Promise<CmdResult> {
@@ -282,7 +296,10 @@ async function runLinuxCommand(runtime: RuntimeConfig, command: string, timeoutM
 }
 
 async function runLinuxDoctor(runtime: RuntimeConfig): Promise<CmdResult> {
-  return runCommand(runtime.runtimeShellPath, ["--doctor"], runtime.installTimeoutMs);
+  return runCommand(runtime.runtimeShellPath, ["--doctor"], runtime.installTimeoutMs, {
+    cwd: runtime.runtimeRoot,
+    env: runtimeEnv(runtime)
+  });
 }
 
 function composeGuestCommand(command: string, workingDir: string): string {
@@ -342,17 +359,37 @@ function runtimeBin(runtime: RuntimeConfig): string {
   return `${runtime.runtimeRoot}/bin`;
 }
 
-function runtimeEnv(runtime: RuntimeConfig): NodeJS.ProcessEnv {
-  const currentPath = String(process.env.PATH || "");
-  const currentLd = String(process.env.LD_LIBRARY_PATH || "");
-  const bin = runtimeBin(runtime);
+function hostEnv(runtime?: RuntimeConfig): NodeJS.ProcessEnv {
+  const home = String(process.env.HOME || "");
+  const user = String(process.env.USER || "app");
+  const tmp = runtime?.runtimeTmpDir || (home ? `${home}/.openclaw-android/linux-runtime/tmp` : "/data/local/tmp");
   return {
-    ...process.env,
-    PATH: currentPath ? `${bin}:/system/bin:/system/xbin:${currentPath}` : `${bin}:/system/bin:/system/xbin`,
-    LD_LIBRARY_PATH: currentLd ? `${bin}:${currentLd}` : bin,
+    HOME: home,
+    USER: user,
+    LOGNAME: user,
+    LANG: "en_US.UTF-8",
+    LC_ALL: "en_US.UTF-8",
+    TERM: "xterm-256color",
+    PATH: "/system/bin:/system/xbin",
+    TMPDIR: tmp,
+    TMP: tmp,
+    TEMP: tmp,
+    ANDROID_ROOT: "/system",
+    ANDROID_DATA: "/data"
+  };
+}
+
+function runtimeEnv(runtime: RuntimeConfig): NodeJS.ProcessEnv {
+  const bin = runtimeBin(runtime);
+  const base = hostEnv(runtime);
+  return {
+    ...base,
+    PATH: `${bin}:/system/bin:/system/xbin`,
+    LD_LIBRARY_PATH: bin,
     TMPDIR: runtime.runtimeTmpDir,
     PROOT_TMP_DIR: runtime.runtimeTmpDir,
-    PROOT_LOADER: `${bin}/loader`
+    PROOT_LOADER: `${bin}/loader`,
+    OPENCLAW_UBUNTU_ISOLATED: "1"
   };
 }
 

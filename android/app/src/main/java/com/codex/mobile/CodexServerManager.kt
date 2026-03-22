@@ -1753,7 +1753,13 @@ EOF
             echo "Gateway state cleaned"
         """.trimIndent()) { Log.d(TAG, "[openclaw-gw] $it") }
 
-        val env = buildEnvironment(paths)
+        val env = buildEnvironment(paths).toMutableMap()
+        // Keep OpenClaw isolated from Termux preloads so Ubuntu runtime tools
+        // don't inherit a broken applet/linker context.
+        env.remove("LD_PRELOAD")
+        env.remove("TERMUX_PREFIX")
+        env.remove("TERMUX__PREFIX")
+        env["OPENCLAW_UBUNTU_ISOLATED"] = "1"
         val shell = runtimeShell()
         val cmd = "exec openclaw gateway run --force --port $OPENCLAW_GATEWAY_PORT 2>&1"
 
@@ -1798,7 +1804,11 @@ EOF
         }
 
         val paths = BootstrapInstaller.getPaths(context)
-        val env = buildEnvironment(paths)
+        val env = buildEnvironment(paths).toMutableMap()
+        env.remove("LD_PRELOAD")
+        env.remove("TERMUX_PREFIX")
+        env.remove("TERMUX__PREFIX")
+        env["OPENCLAW_UBUNTU_ISOLATED"] = "1"
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
 

@@ -450,6 +450,16 @@ class MainActivity : AppCompatActivity() {
         }
         updateStatus("Environment ready")
 
+        // Step 1a: Ubuntu-first runtime bootstrap (primary terminal baseline).
+        // Keep this early so all later OpenClaw/plugin operations can assume the
+        // bundled Linux runtime exists and avoid late-stage environment drift.
+        updateStatus("Installing Linux runtime…", "Preparing bundled Ubuntu terminal")
+        val linuxRuntimeOk = OfflineLinuxRuntimeInstaller.install(this) { msg -> updateDetail(msg) }
+        if (!linuxRuntimeOk) {
+            throw RuntimeException("Failed to install bundled Linux runtime")
+        }
+        updateStatus("Linux runtime ready")
+
         // Step 1b: Install proot (needed for dpkg/apt-get path remapping)
         if (!serverManager.isProotInstalled()) {
             updateStatus("Installing proot…", "Needed for package management")
@@ -520,17 +530,6 @@ class MainActivity : AppCompatActivity() {
                     updateStatus("OpenClaw runtime ready")
                 }
             }
-        }
-
-        // Step 2e: Install bundled full Linux runtime for Ubuntu terminal tools.
-        // This path is local-only and does not rely on online proot-distro install.
-        updateStatus("Installing Linux runtime…", "Preparing bundled Ubuntu terminal")
-        val linuxRuntimeOk = OfflineLinuxRuntimeInstaller.install(this) { msg -> updateDetail(msg) }
-        if (!linuxRuntimeOk) {
-            Log.w(TAG, "Bundled Linux runtime install failed; continuing with base runtime only")
-            updateStatus("Linux runtime install failed", "OpenClaw base mode remains available")
-        } else {
-            updateStatus("Linux runtime ready")
         }
 
         // Step 3: Codex is optional on first run. Do not block OpenClaw-only users.

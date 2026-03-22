@@ -13,7 +13,7 @@ import org.json.JSONObject
 object OfflineLinuxRuntimeInstaller {
 
     private const val TAG = "OfflineLinuxRuntime"
-    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r3"
+    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r4"
 
     private const val ASSET_UBUNTU_ROOTFS = "runtime/ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
     private const val ASSET_FAKE_SYSDATA = "runtime/setup_fake_sysdata.sh"
@@ -397,6 +397,8 @@ object OfflineLinuxRuntimeInstaller {
             "export TMPDIR=\"\$RUNTIME_TMP\"",
             "export PROOT_TMP_DIR=\"\$RUNTIME_TMP\"",
             "export PATH=\"\$SCRIPT_DIR:/system/bin:/system/xbin:\${PATH:-}\"",
+            "unset LD_PRELOAD || true",
+            "unset TERMUX_PREFIX TERMUX__PREFIX || true",
             "",
             "/system/bin/mkdir -p \"\$RUNTIME_TMP\" 2>/dev/null || true",
             "/system/bin/chmod 700 \"\$RUNTIME_TMP\" 2>/dev/null || true",
@@ -468,9 +470,11 @@ object OfflineLinuxRuntimeInstaller {
             "export PROOT_TMP_DIR=\"$tmpDir\"",
             "export LD_LIBRARY_PATH=\"$runtimeBin:${context.applicationInfo.nativeLibraryDir}\"",
             "export PROOT_LOADER=\"$runtimeBin/loader\"",
-            "export PATH=\"$runtimeBin:/system/bin:/system/xbin:$prefixDir/bin\"",
+            "export PATH=\"$runtimeBin:/system/bin:/system/xbin\"",
             "export TERM=\"xterm-256color\"",
             "export LANG=\"en_US.UTF-8\"",
+            "unset LD_PRELOAD || true",
+            "unset TERMUX_PREFIX TERMUX__PREFIX || true",
             "",
             "ensure_dir(){ mkdir -p \"$1\" 2>/dev/null || true; chmod 700 \"$1\" 2>/dev/null || true; }",
             "write_default_dns(){ printf '%s\\n' 'nameserver 8.8.8.8' 'nameserver 1.1.1.1' 'nameserver 223.5.5.5' > \"$1\"; }",
