@@ -13,7 +13,7 @@ import org.json.JSONObject
 object OfflineLinuxRuntimeInstaller {
 
     private const val TAG = "OfflineLinuxRuntime"
-    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r1"
+    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r2"
 
     private const val ASSET_UBUNTU_ROOTFS = "runtime/ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
     private const val ASSET_FAKE_SYSDATA = "runtime/setup_fake_sysdata.sh"
@@ -251,6 +251,79 @@ object OfflineLinuxRuntimeInstaller {
         linkNativeBinary(nativeLibDir, binDir, "libbash.so", "bash", executable = true)
         linkNativeBinary(nativeLibDir, binDir, "libbusybox.so", "busybox", executable = true)
         linkNativeBinary(nativeLibDir, binDir, "liblibtalloc.so.2.so", "libtalloc.so.2", executable = false)
+        installBusyboxApplets(binDir)
+    }
+
+    private fun installBusyboxApplets(binDir: File) {
+        val busybox = File(binDir, "busybox")
+        if (!busybox.exists()) {
+            throw IllegalStateException("Missing busybox runtime binary")
+        }
+
+        val applets =
+            listOf(
+                "sh",
+                "ash",
+                "basename",
+                "cat",
+                "chmod",
+                "chown",
+                "cp",
+                "cut",
+                "dirname",
+                "echo",
+                "env",
+                "find",
+                "grep",
+                "gunzip",
+                "gzip",
+                "head",
+                "id",
+                "ln",
+                "ls",
+                "mkdir",
+                "mktemp",
+                "mv",
+                "printf",
+                "pwd",
+                "readlink",
+                "realpath",
+                "rm",
+                "rmdir",
+                "sed",
+                "shuf",
+                "sleep",
+                "sort",
+                "stat",
+                "tail",
+                "tar",
+                "tee",
+                "test",
+                "touch",
+                "tr",
+                "true",
+                "false",
+                "uname",
+                "uniq",
+                "wc",
+                "which",
+                "xargs",
+                "xz",
+            )
+
+        applets.forEach { applet ->
+            val target = File(binDir, applet)
+            if (target.exists() || target.isDirectory) {
+                target.deleteRecursively()
+            }
+
+            try {
+                Os.symlink(busybox.absolutePath, target.absolutePath)
+            } catch (_: Exception) {
+                busybox.copyTo(target, overwrite = true)
+                Os.chmod(target.absolutePath, 0b111_000_000)
+            }
+        }
     }
 
     private fun linkNativeBinary(
@@ -377,10 +450,10 @@ object OfflineLinuxRuntimeInstaller {
         val filesDir = paths.filesDir
         val homeDir = paths.homeDir
         val prefixDir = paths.prefixDir
-        val tmpDir = "${paths.filesDir}/tmp"
         val runtimeRoot = "$homeDir/.openclaw-android/linux-runtime"
         val ubuntuPath = "$runtimeRoot/rootfs/ubuntu-noble-aarch64"
         val runtimeBin = "$runtimeRoot/bin"
+        val tmpDir = "$runtimeRoot/tmp"
 
         return listOf(
             "export FILES_DIR=\"$filesDir\"",
