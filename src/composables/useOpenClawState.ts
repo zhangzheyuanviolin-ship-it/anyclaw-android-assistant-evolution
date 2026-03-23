@@ -16,7 +16,6 @@ import type {
   OpenClawComposerSubmitPayload,
   OpenClawContentItem,
   OpenClawHistoryMessage,
-  OpenClawImageAttachment,
   OpenClawLocalFileAttachment,
   OpenClawSessionSummary,
 } from '../types/openclaw'
@@ -252,7 +251,11 @@ function estimateBase64DecodedBytes(base64: string): number {
   return Math.floor((normalized.length * 3) / 4) - padding
 }
 
-function toImageAttachment(image: OpenClawComposerImageAttachment): OpenClawImageAttachment | null {
+function toImageUploadPayload(image: OpenClawComposerImageAttachment): {
+  fileName: string
+  mimeType: string
+  contentBase64: string
+} | null {
   const dataUrl = image.dataUrl.trim()
   if (!dataUrl) return null
   const match = /^data:([^;]+);base64,(.+)$/u.exec(dataUrl)
@@ -265,10 +268,9 @@ function toImageAttachment(image: OpenClawComposerImageAttachment): OpenClawImag
     throw new Error(`图片附件过大或格式无效：${image.name}`)
   }
   return {
-    type: 'image',
+    fileName: image.name.trim() || 'image',
     mimeType,
-    content,
-    fileName: image.name.trim() || undefined,
+    contentBase64: content,
   }
 }
 
@@ -559,17 +561,23 @@ export function useOpenClawState() {
     lastSendAtMs = Date.now()
 
     try {
-      const imageAttachments: OpenClawImageAttachment[] = []
       const fileAttachments = normalized.attachments.filter(
         (row): row is OpenClawLocalFileAttachment => row.type === 'file',
       )
-      for (const attachment of normalized.attachments) {
-        if (attachment.type !== 'image') continue
-        const parsed = toImageAttachment(attachment)
-        if (parsed) imageAttachments.push(parsed)
-      }
+      const imageAttachments = normalized.attachments.filter(
+        (row): row is OpenClawComposerImageAttachment => row.type === 'image',
+      )
 
       const uploadedPaths: string[] = []
+      for (const imageAttachment of imageAttachments) {
+        const imageUpload = toImageUploadPayload(imageAttachment)
+        if (!imageUpload) {
+          throw new Error(`图片附件无效：${imageAttachment.name}`)
+        }
+        const uploaded = await uploadOpenClawAttachment(imageUpload)
+        uploadedPaths.push(uploaded.path)
+      }
+
       for (const fileAttachment of fileAttachments) {
         if (fileAttachment.sizeBytes > OPENCLAW_FILE_UPLOAD_MAX_BYTES) {
           throw new Error(`文件超过大小限制（15MB）：${fileAttachment.name}`)
@@ -588,7 +596,6 @@ export function useOpenClawState() {
         sessionKey,
         message,
         deliver: false,
-        attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
       })
       await refreshHistory()
       await refreshSessions(sessionKey)

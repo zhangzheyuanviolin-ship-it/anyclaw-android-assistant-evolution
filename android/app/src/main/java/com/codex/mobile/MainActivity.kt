@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
 import android.view.View
@@ -29,7 +30,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import fi.iki.elonen.NanoHTTPD
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -69,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingCameraImageUri: Uri? = null
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -102,6 +106,16 @@ class MainActivity : AppCompatActivity() {
             val callback = filePathCallback
             filePathCallback = null
             if (callback == null) return@registerForActivityResult
+            val cameraUri = pendingCameraImageUri
+            pendingCameraImageUri = null
+            if (cameraUri != null) {
+                if (result.resultCode == RESULT_OK) {
+                    callback.onReceiveValue(arrayOf(cameraUri))
+                } else {
+                    callback.onReceiveValue(null)
+                }
+                return@registerForActivityResult
+            }
             val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
             callback.onReceiveValue(uris)
         }
@@ -299,6 +313,29 @@ class MainActivity : AppCompatActivity() {
 
                 this@MainActivity.filePathCallback?.onReceiveValue(null)
                 this@MainActivity.filePathCallback = filePathCallback
+                pendingCameraImageUri = null
+
+                if (shouldUseCameraCapture(fileChooserParams)) {
+                    val cameraPair = buildCameraCaptureIntent()
+                    if (cameraPair != null) {
+                        pendingCameraImageUri = cameraPair.second
+                        return try {
+                            fileChooserLauncher.launch(cameraPair.first)
+                            true
+                        } catch (error: Exception) {
+                            Log.w(TAG, "Failed to launch camera chooser: ${error.message}")
+                            pendingCameraImageUri = null
+                            this@MainActivity.filePathCallback?.onReceiveValue(null)
+                            this@MainActivity.filePathCallback = null
+                            Toast.makeText(
+                                this@MainActivity,
+                                "无法启动相机",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            false
+                        }
+                    }
+                }
 
                 val chooserIntent =
                     try {
@@ -337,6 +374,49 @@ class MainActivity : AppCompatActivity() {
                     false
                 }
             }
+        }
+    }
+
+    private fun shouldUseCameraCapture(fileChooserParams: WebChromeClient.FileChooserParams?): Boolean {
+        if (fileChooserParams == null) return false
+        if (!fileChooserParams.isCaptureEnabled) return false
+        val acceptsImage = fileChooserParams.acceptTypes
+            ?.mapNotNull { it?.trim()?.lowercase() }
+            ?.any { value ->
+                value == "image/*" || value.startsWith("image/")
+            } == true
+        return acceptsImage
+    }
+
+    private fun buildCameraCaptureIntent(): Pair<Intent, Uri>? {
+        return try {
+            val attachmentsDir = File(cacheDir, "attachments")
+            if (!attachmentsDir.exists()) {
+                attachmentsDir.mkdirs()
+            }
+            val targetFile = File.createTempFile("openclaw_capture_", ".jpg", attachmentsDir)
+            val authority = "$packageName.fileprovider"
+            val captureUri = FileProvider.getUriForFile(this, authority, targetFile)
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, captureUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+            val activities = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            if (activities.isEmpty()) {
+                null
+            } else {
+                for (resolveInfo in activities) {
+                    grantUriPermission(
+                        resolveInfo.activityInfo.packageName,
+                        captureUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                    )
+                }
+                intent to captureUri
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to prepare camera capture intent: ${error.message}")
+            null
         }
     }
 

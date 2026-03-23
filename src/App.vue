@@ -736,7 +736,6 @@ function onCreateOpenClawSession(): void {
     try {
       const sessionKey = await createOpenClawSession()
       if (sessionKey) {
-        await selectOpenClawSession(sessionKey)
         await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
       }
     } catch (error) {
@@ -756,7 +755,6 @@ function onResetOpenClawSession(): void {
     try {
       const sessionKey = await resetCurrentOpenClawSession()
       if (sessionKey) {
-        await selectOpenClawSession(sessionKey)
         await router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
       }
     } catch (error) {
