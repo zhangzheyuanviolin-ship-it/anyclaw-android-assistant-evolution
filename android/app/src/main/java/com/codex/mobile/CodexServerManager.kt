@@ -2750,6 +2750,7 @@ WEOF
     }
 
     fun ensureStorageBridge() {
+        val paths = BootstrapInstaller.getPaths(context)
         val script = """
             mkdir -p "${'$'}HOME/storage" 2>/dev/null || true
             ln -sfn /sdcard "${'$'}HOME/sdcard" 2>/dev/null || true
