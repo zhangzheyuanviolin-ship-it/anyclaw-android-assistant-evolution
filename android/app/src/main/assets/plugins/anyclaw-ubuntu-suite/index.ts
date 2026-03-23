@@ -25,15 +25,15 @@ type CmdResult = {
 
 type UbuntuSession = {
   id: string;
-  process: ReturnType<typeof spawn>;
   createdAt: string;
   workingDir: string;
+  stateFile: string;
   buffer: string;
   cursor: number;
   closed: boolean;
   closeCode: number | null;
   busy: boolean;
-  waiters: Array<() => void>;
+  activeProcess: ReturnType<typeof spawn> | null;
 };
 
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -156,6 +156,10 @@ type CommandOptions = {
   cwd?: string;
 };
 
+type LinuxCommandHooks = {
+  onSpawn?: (child: ReturnType<typeof spawn>) => void;
+};
+
 async function runCommand(
   command: string,
   args: string[],
@@ -231,7 +235,12 @@ async function runShell(script: string, timeoutMs: number): Promise<CmdResult> {
   });
 }
 
-async function runLinuxCommand(runtime: RuntimeConfig, command: string, timeoutMs: number): Promise<CmdResult> {
+async function runLinuxCommand(
+  runtime: RuntimeConfig,
+  command: string,
+  timeoutMs: number,
+  hooks?: LinuxCommandHooks
+): Promise<CmdResult> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -242,6 +251,7 @@ async function runLinuxCommand(runtime: RuntimeConfig, command: string, timeoutM
       cwd: runtime.runtimeRoot,
       env: runtimeEnv(runtime)
     });
+    hooks?.onSpawn?.(child);
 
     const timer = setTimeout(() => {
       if (done) return;
@@ -317,42 +327,8 @@ function trimSessionBuffer(session: UbuntuSession, maxBytes: number) {
   session.cursor = Math.max(0, session.cursor - delta);
 }
 
-function notifyWaiters(session: UbuntuSession) {
-  const waiters = session.waiters.splice(0, session.waiters.length);
-  for (const waiter of waiters) {
-    try {
-      waiter();
-    } catch {
-      // ignore
-    }
-  }
-}
-
-function attachSessionReaders(session: UbuntuSession, runtime: RuntimeConfig) {
-  const onChunk = (chunk: Buffer | string) => {
-    session.buffer += String(chunk);
-    trimSessionBuffer(session, runtime.maxSessionOutputBytes);
-    notifyWaiters(session);
-  };
-
-  if (session.process.stdout) {
-    session.process.stdout.on("data", onChunk);
-  }
-  if (session.process.stderr) {
-    session.process.stderr.on("data", onChunk);
-  }
-  session.process.on("close", (code) => {
-    session.closed = true;
-    session.closeCode = typeof code === "number" ? code : -1;
-    notifyWaiters(session);
-  });
-  session.process.on("error", (error) => {
-    session.buffer += `\nsession-error:${String(error)}\n`;
-    trimSessionBuffer(session, runtime.maxSessionOutputBytes);
-    session.closed = true;
-    session.closeCode = -1;
-    notifyWaiters(session);
-  });
+function sessionStateFilePath(id: string): string {
+  return `/dev/shm/anyclaw_session_${id}.env`;
 }
 
 function runtimeBin(runtime: RuntimeConfig): string {
@@ -393,87 +369,35 @@ function runtimeEnv(runtime: RuntimeConfig): NodeJS.ProcessEnv {
   };
 }
 
-async function waitForCondition(
-  session: UbuntuSession,
-  runtime: RuntimeConfig,
-  predicate: () => boolean,
-  timeoutMs: number
-): Promise<boolean> {
-  if (predicate()) return true;
-  return new Promise((resolve) => {
-    let done = false;
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      resolve(false);
-    }, timeoutMs);
-
-    const waiter = () => {
-      if (done) return;
-      if (predicate()) {
-        done = true;
-        clearTimeout(timer);
-        resolve(true);
-      } else if (session.closed) {
-        done = true;
-        clearTimeout(timer);
-        resolve(false);
-      }
-    };
-
-    session.waiters.push(waiter);
-  });
+function escapeRegExp(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function createSession(runtime: RuntimeConfig, workingDir: string): Promise<UbuntuSession> {
   const id = `ubuntu_${randomUUID()}`;
-  const readyMarker = `__ANYCLAW_UBUNTU_READY__:${id}`;
-  const env = {
-    ...runtimeEnv(runtime),
-    ANYCLAW_SESSION_READY_MARKER: readyMarker
-  };
-  const process = spawn(runtime.runtimeShellPath, ["--session-shell"], {
-    stdio: ["pipe", "pipe", "pipe"],
-    cwd: runtime.runtimeRoot,
-    env
-  });
+  const openMarker = `__ANYCLAW_SESSION_OPEN_OK__:${id}`;
+  const probe = await runLinuxCommand(
+    runtime,
+    composeGuestCommand(`printf '%s\\n' '${openMarker}'`, workingDir),
+    runtime.timeoutMs
+  );
+
+  if (!probe.ok || !probe.stdout.includes(openMarker)) {
+    throw new Error(`Ubuntu session bootstrap failed: ${probe.stdout || probe.stderr || probe.error || "no output"}`);
+  }
 
   const session: UbuntuSession = {
     id,
-    process,
     createdAt: new Date().toISOString(),
     workingDir,
+    stateFile: sessionStateFilePath(id),
     buffer: "",
     cursor: 0,
     closed: false,
     closeCode: null,
     busy: false,
-    waiters: []
+    activeProcess: null
   };
-
-  attachSessionReaders(session, runtime);
-  if (!process.stdin) {
-    try {
-      process.kill("SIGKILL");
-    } catch {
-      // ignore
-    }
-    throw new Error("Ubuntu session stdin unavailable");
-  }
-
-  const ready = await waitForCondition(session, runtime, () => session.buffer.includes(readyMarker), runtime.timeoutMs);
-  if (!ready) {
-    try {
-      process.kill("SIGKILL");
-    } catch {
-      // ignore
-    }
-    throw new Error(`Ubuntu session bootstrap failed: ${session.buffer.slice(-1200) || "no output"}`);
-  }
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  if (session.closed) {
-    throw new Error(`Ubuntu session exited during bootstrap: ${session.buffer.slice(-1200) || "no output"}`);
-  }
   sessions.set(id, session);
   return session;
 }
@@ -505,63 +429,99 @@ async function execInSession(
     const token = randomUUID().replace(/-/g, "");
     const beginMarker = `__ANYCLAW_BEGIN__:${token}`;
     const endMarker = `__ANYCLAW_END__:${token}:`;
-    const scriptPath = `\${TMPDIR:-/tmp}/anyclaw_ubuntu_${token}.sh`;
-    const guestCommand = composeGuestCommand(command, workingDir);
-    const cursorStart = session.buffer.length;
+    const cwdMarker = `__ANYCLAW_STATE_CWD__:${token}:`;
+    const envBeginMarker = `__ANYCLAW_STATE_ENV_BEGIN__:${token}`;
+    const envEndMarker = `__ANYCLAW_STATE_ENV_END__:${token}`;
+    const scriptPath = `\${TMPDIR:-/tmp}/anyclaw_session_${token}.sh`;
 
     const payload = [
+      "set +e",
+      `STATE_FILE=${shellSingleQuote(session.stateFile)}`,
+      "if [ -f \"$STATE_FILE\" ]; then . \"$STATE_FILE\"; fi",
+      `cd ${shellSingleQuote(workingDir)} 2>/dev/null || cd /`,
       `printf '%s\\n' '${beginMarker}'`,
-      `cat >\"${scriptPath}\" <<'__ANYCLAW_SCRIPT_${token}__'`,
-      guestCommand,
+      `cat >"${scriptPath}" <<'__ANYCLAW_SCRIPT_${token}__'`,
+      command,
       `__ANYCLAW_SCRIPT_${token}__`,
-      `/bin/bash --noprofile --norc \"${scriptPath}\" </dev/null`,
+      `/bin/bash --noprofile --norc "${scriptPath}" </dev/null`,
       `__anyclaw_rc=$?`,
-      `rm -f \"${scriptPath}\"`,
-      `printf '%s%s\\n' '${endMarker}' \"$__anyclaw_rc\"`
-    ].join("\n") + "\n";
+      `rm -f "${scriptPath}"`,
+      "__anyclaw_cwd=$(pwd)",
+      `printf '%s%s\\n' '${cwdMarker}' "$__anyclaw_cwd"`,
+      `printf '%s\\n' '${envBeginMarker}'`,
+      "( export -p ) > \"$STATE_FILE\" 2>/dev/null || true",
+      "cat \"$STATE_FILE\" 2>/dev/null || true",
+      `printf '%s\\n' '${envEndMarker}'`,
+      `printf '%s%s\\n' '${endMarker}' "$__anyclaw_rc"`
+    ].join("; ");
 
-    if (!session.process.stdin) {
-      throw new Error(`Ubuntu session stdin unavailable: ${session.id}`);
+    const result = await runLinuxCommand(runtime, payload, timeoutMs, {
+      onSpawn: (child) => {
+        session.activeProcess = child;
+      }
+    });
+    session.activeProcess = null;
+
+    if (!result.ok && !result.stdout.includes(endMarker)) {
+      throw new Error(
+        `Ubuntu session command failed: ${result.stdout || result.stderr || result.error || "no output"}`
+      );
     }
-    session.process.stdin.write(payload);
 
-    const finished = await waitForCondition(
-      session,
-      runtime,
-      () => session.buffer.slice(cursorStart).includes(endMarker),
-      timeoutMs
-    );
-
-    if (!finished) {
-      throw new Error(`Ubuntu session command timeout or shell exited: ${session.buffer.slice(-1600) || "no output"}`);
-    }
-
-    const raw = session.buffer.slice(cursorStart);
-    const beginIndex = raw.indexOf(beginMarker);
-    const endIndex = raw.indexOf(endMarker, beginIndex >= 0 ? beginIndex : 0);
-    if (beginIndex < 0 || endIndex < 0) {
+    const raw = result.stdout;
+    const beginRegex = new RegExp(`^${escapeRegExp(beginMarker)}\\s*$`, "m");
+    const beginMatch = beginRegex.exec(raw);
+    const endIndex = raw.lastIndexOf(endMarker);
+    if (!beginMatch || endIndex < 0) {
       throw new Error(`Ubuntu session markers missing: ${raw.slice(-1600) || "no output"}`);
     }
 
-    const output = raw
-      .slice(beginIndex + beginMarker.length, endIndex)
-      .replace(/^\s+/, "")
-      .replace(/\s+$/, "");
-
+    const payloadBlock = raw.slice(beginMatch.index + beginMatch[0].length, endIndex).replace(/^\r?\n/, "");
     const tail = raw.slice(endIndex + endMarker.length);
-    const rcLine = tail.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "-1";
+    const rcLine = tail.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || String(result.code);
     const code = Number.parseInt(rcLine, 10);
 
-    session.workingDir = workingDir;
+    const outputLines: string[] = [];
+    let inEnvSection = false;
+    let nextWorkingDir = workingDir;
+    for (const line of payloadBlock.split(/\r?\n/)) {
+      if (line === envBeginMarker) {
+        inEnvSection = true;
+        continue;
+      }
+      if (line === envEndMarker) {
+        inEnvSection = false;
+        continue;
+      }
+      if (line.startsWith(cwdMarker)) {
+        const parsedCwd = line.slice(cwdMarker.length).trim();
+        if (parsedCwd) nextWorkingDir = parsedCwd;
+        continue;
+      }
+      if (!inEnvSection) {
+        outputLines.push(line);
+      }
+    }
+
+    const cleanOutput = stripInternalNoise(outputLines.join("\n"));
+    if (cleanOutput) {
+      session.buffer += (session.buffer.endsWith("\n") || session.buffer.length === 0 ? "" : "\n") + cleanOutput;
+      session.buffer += "\n";
+      trimSessionBuffer(session, runtime.maxSessionOutputBytes);
+    }
+
+    session.workingDir = nextWorkingDir;
+    session.closeCode = Number.isFinite(code) ? code : result.code;
 
     return {
-      ok: code === 0,
-      code: Number.isFinite(code) ? code : -1,
-      stdout: stripInternalNoise(output),
+      ok: (Number.isFinite(code) ? code : result.code) === 0,
+      code: Number.isFinite(code) ? code : result.code,
+      stdout: cleanOutput,
       sessionId: session.id,
-      workingDir
+      workingDir: nextWorkingDir
     };
   } finally {
+    session.activeProcess = null;
     session.busy = false;
   }
 }
@@ -896,8 +856,16 @@ function createSessionInterruptTool(runtime: RuntimeConfig) {
       const args = asObject(input);
       const sessionId = (readStringParam(args, "sessionId", { required: true }) || "").trim();
       const session = getSession(sessionId);
+      if (!session.activeProcess) {
+        return jsonResult({
+          tool: "anyclaw_ubuntu_session_interrupt",
+          ok: false,
+          sessionId,
+          error: "session-not-running"
+        });
+      }
       try {
-        session.process.kill("SIGINT");
+        session.activeProcess.kill("SIGINT");
       } catch (error) {
         return jsonResult({
           tool: "anyclaw_ubuntu_session_interrupt",
@@ -933,11 +901,13 @@ function createSessionCloseTool(runtime: RuntimeConfig) {
       const sessionId = (readStringParam(args, "sessionId", { required: true }) || "").trim();
       const session = getSession(sessionId);
       try {
-        session.process.kill("SIGKILL");
+        session.activeProcess?.kill("SIGKILL");
       } catch {
         // ignore
       }
+      session.activeProcess = null;
       session.closed = true;
+      session.closeCode = session.closeCode ?? 0;
       sessions.delete(sessionId);
       return jsonResult({
         tool: "anyclaw_ubuntu_session_close",
