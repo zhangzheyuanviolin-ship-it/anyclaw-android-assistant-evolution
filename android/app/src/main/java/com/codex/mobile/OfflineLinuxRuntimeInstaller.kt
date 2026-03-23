@@ -13,7 +13,7 @@ import org.json.JSONObject
 object OfflineLinuxRuntimeInstaller {
 
     private const val TAG = "OfflineLinuxRuntime"
-    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r4"
+    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r5"
 
     private const val ASSET_UBUNTU_ROOTFS = "runtime/ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
     private const val ASSET_FAKE_SYSDATA = "runtime/setup_fake_sysdata.sh"
@@ -426,8 +426,7 @@ object OfflineLinuxRuntimeInstaller {
             "    exec \"\$RUNTIME_BASH\" -c '. \"\$1\"; ubuntu_doctor' sh \"\$COMMON_SH\"",
             "    ;;",
             "  --session-shell)",
-            "    export ANYCLAW_COMMAND='/bin/bash --noprofile --norc'",
-            "    exec \"\$RUNTIME_BASH\" -c '. \"\$1\"; login_ubuntu \"\$ANYCLAW_COMMAND\"' sh \"\$COMMON_SH\"",
+            "    exec \"\$RUNTIME_BASH\" -c '. \"\$1\"; login_ubuntu_session' sh \"\$COMMON_SH\"",
             "    ;;",
             "  --command)",
             "    export ANYCLAW_COMMAND=\"\${1:-/bin/bash -il}\"",
@@ -539,6 +538,19 @@ object OfflineLinuxRuntimeInstaller {
             "  exec \"\$BIN/proot\" -0 -r \"\$UBUNTU_PATH\" --link2symlink \$PROOT_BIND_ARGS -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=en_US.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin COMMAND_TO_EXEC=\"\$COMMAND_TO_EXEC\" /bin/bash -lc 'echo LOGIN_SUCCESSFUL; echo TERMINAL_READY; mkdir -p /tmp /var/tmp /run/shm >/dev/null 2>&1 || true; chmod 1777 /tmp /var/tmp >/dev/null 2>&1 || true; export TMPDIR=/tmp; eval \"\$COMMAND_TO_EXEC\"'",
             "}",
             "",
+            "run_guest_session(){",
+            "  PROOT_BIND_ARGS=''",
+            "  append_proot_bind_arg '/dev' '/dev'",
+            "  append_proot_bind_arg '/proc' '/proc'",
+            "  append_proot_bind_arg '/sys' '/sys'",
+            "  append_proot_bind_arg '/dev/pts' '/dev/pts'",
+            "  append_proot_bind_arg '/storage/emulated/0' '/sdcard'",
+            "  append_proot_bind_arg \"\$FILES_DIR\" \"\$FILES_DIR\"",
+            "  append_proot_bind_arg \"\$HOME\" \"\$HOME\"",
+            "  append_proot_bind_arg \"\$TMPDIR\" '/dev/shm'",
+            "  exec \"\$BIN/proot\" -0 -r \"\$UBUNTU_PATH\" --link2symlink \$PROOT_BIND_ARGS -w /root /usr/bin/env -i HOME=/root TERM=xterm-256color LANG=en_US.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ANYCLAW_SESSION_READY_MARKER=\"\${ANYCLAW_SESSION_READY_MARKER:-}\" /bin/bash -lc 'echo LOGIN_SUCCESSFUL; echo TERMINAL_READY; mkdir -p /tmp /var/tmp /run/shm >/dev/null 2>&1 || true; chmod 1777 /tmp /var/tmp >/dev/null 2>&1 || true; export TMPDIR=/tmp; if [ -n \"\${ANYCLAW_SESSION_READY_MARKER:-}\" ]; then printf \"%s\\n\" \"\$ANYCLAW_SESSION_READY_MARKER\"; fi; exec /bin/bash --noprofile --norc -s'",
+            "}",
+            "",
             "login_ubuntu(){",
             "  validate_runtime || return $?",
             "  prepare_guest || return $?",
@@ -546,6 +558,13 @@ object OfflineLinuxRuntimeInstaller {
             "  cmd=\"$1\"",
             "  [ -n \"\$cmd\" ] || cmd='/bin/bash -il'",
             "  run_guest \"\$cmd\"",
+            "}",
+            "",
+            "login_ubuntu_session(){",
+            "  validate_runtime || return $?",
+            "  prepare_guest || return $?",
+            "  prepare_fake_sysdata || return $?",
+            "  run_guest_session",
             "}",
             "",
             "ubuntu_status(){",

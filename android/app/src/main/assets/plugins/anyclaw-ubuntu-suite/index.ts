@@ -427,10 +427,15 @@ async function waitForCondition(
 
 async function createSession(runtime: RuntimeConfig, workingDir: string): Promise<UbuntuSession> {
   const id = `ubuntu_${randomUUID()}`;
+  const readyMarker = `__ANYCLAW_UBUNTU_READY__:${id}`;
+  const env = {
+    ...runtimeEnv(runtime),
+    ANYCLAW_SESSION_READY_MARKER: readyMarker
+  };
   const process = spawn(runtime.runtimeShellPath, ["--session-shell"], {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: runtime.runtimeRoot,
-    env: runtimeEnv(runtime)
+    env
   });
 
   const session: UbuntuSession = {
@@ -456,8 +461,6 @@ async function createSession(runtime: RuntimeConfig, workingDir: string): Promis
     throw new Error("Ubuntu session stdin unavailable");
   }
 
-  const readyMarker = `__ANYCLAW_UBUNTU_READY__:${id}`;
-  process.stdin.write(`printf '%s\\n' '${readyMarker}'\n`);
   const ready = await waitForCondition(session, runtime, () => session.buffer.includes(readyMarker), runtime.timeoutMs);
   if (!ready) {
     try {
@@ -466,6 +469,10 @@ async function createSession(runtime: RuntimeConfig, workingDir: string): Promis
       // ignore
     }
     throw new Error(`Ubuntu session bootstrap failed: ${session.buffer.slice(-1200) || "no output"}`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  if (session.closed) {
+    throw new Error(`Ubuntu session exited during bootstrap: ${session.buffer.slice(-1200) || "no output"}`);
   }
   sessions.set(id, session);
   return session;
