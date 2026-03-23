@@ -6,6 +6,7 @@ import android.util.Log
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.file.Files
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 import org.json.JSONObject
@@ -13,7 +14,7 @@ import org.json.JSONObject
 object OfflineLinuxRuntimeInstaller {
 
     private const val TAG = "OfflineLinuxRuntime"
-    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r5"
+    private const val RUNTIME_VERSION = "ubuntu-noble-aarch64-operit-engine-r6"
 
     private const val ASSET_UBUNTU_ROOTFS = "runtime/ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
     private const val ASSET_FAKE_SYSDATA = "runtime/setup_fake_sysdata.sh"
@@ -147,11 +148,12 @@ object OfflineLinuxRuntimeInstaller {
         if (!paths.ubuntuRoot.exists()) return false
         if (!File(paths.ubuntuRoot, "bin/bash").exists()) return false
         if (!paths.commonScript.exists()) return false
-        if (!paths.prootBinary.exists()) return false
-        if (!paths.prootStaticBinary.exists()) return false
-        if (!paths.loaderBinary.exists()) return false
-        if (!paths.bashBinary.exists()) return false
-        if (!paths.busyboxBinary.exists()) return false
+        if (!isUsableRuntimeEntry(paths.prootBinary, executable = true)) return false
+        if (!isUsableRuntimeEntry(paths.prootStaticBinary, executable = true)) return false
+        if (!isUsableRuntimeEntry(paths.loaderBinary, executable = true)) return false
+        if (!isUsableRuntimeEntry(paths.bashBinary, executable = true)) return false
+        if (!isUsableRuntimeEntry(paths.busyboxBinary, executable = true)) return false
+        if (!isUsableRuntimeEntry(File(paths.binDir, "libtalloc.so.2"), executable = false)) return false
         if (!paths.shellScript.exists()) return false
         if (!paths.tmpDir.exists()) return false
         if (!paths.fakeSysdataScript.exists()) return false
@@ -162,6 +164,25 @@ object OfflineLinuxRuntimeInstaller {
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun isUsableRuntimeEntry(
+        file: File,
+        executable: Boolean,
+    ): Boolean {
+        val path = file.toPath()
+        if (Files.isSymbolicLink(path)) {
+            return try {
+                val target = Files.readSymbolicLink(path)
+                val resolved = if (target.isAbsolute) target else path.parent.resolve(target).normalize()
+                Files.exists(resolved) && (!executable || Files.isExecutable(resolved))
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        if (!file.exists()) return false
+        return !executable || file.canExecute()
     }
 
     private fun extractUbuntuRootfs(
@@ -245,12 +266,12 @@ object OfflineLinuxRuntimeInstaller {
         binDir: File,
     ) {
         val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
-        linkNativeBinary(nativeLibDir, binDir, "libproot.so", "proot", executable = true)
-        linkNativeBinary(nativeLibDir, binDir, "libproot.so", "proot-static", executable = true)
-        linkNativeBinary(nativeLibDir, binDir, "libloader.so", "loader", executable = true)
-        linkNativeBinary(nativeLibDir, binDir, "libbash.so", "bash", executable = true)
-        linkNativeBinary(nativeLibDir, binDir, "libbusybox.so", "busybox", executable = true)
-        linkNativeBinary(nativeLibDir, binDir, "liblibtalloc.so.2.so", "libtalloc.so.2", executable = false)
+        installNativeBinary(nativeLibDir, binDir, "libproot.so", "proot", executable = true)
+        installNativeBinary(nativeLibDir, binDir, "libproot.so", "proot-static", executable = true)
+        installNativeBinary(nativeLibDir, binDir, "libloader.so", "loader", executable = true)
+        installNativeBinary(nativeLibDir, binDir, "libbash.so", "bash", executable = true)
+        installNativeBinary(nativeLibDir, binDir, "libbusybox.so", "busybox", executable = true)
+        installNativeBinary(nativeLibDir, binDir, "liblibtalloc.so.2.so", "libtalloc.so.2", executable = false)
         installBusyboxApplets(binDir)
     }
 
@@ -326,7 +347,7 @@ object OfflineLinuxRuntimeInstaller {
         }
     }
 
-    private fun linkNativeBinary(
+    private fun installNativeBinary(
         nativeLibDir: File,
         binDir: File,
         sourceName: String,
@@ -343,16 +364,9 @@ object OfflineLinuxRuntimeInstaller {
             target.deleteRecursively()
         }
 
-        try {
-            if (executable) {
-                Os.chmod(source.absolutePath, 0b111_000_000)
-            }
-            Os.symlink(source.absolutePath, target.absolutePath)
-        } catch (_: Exception) {
-            source.copyTo(target, overwrite = true)
-            if (executable) {
-                Os.chmod(target.absolutePath, 0b111_000_000)
-            }
+        source.copyTo(target, overwrite = true)
+        if (executable) {
+            Os.chmod(target.absolutePath, 0b111_000_000)
         }
     }
 

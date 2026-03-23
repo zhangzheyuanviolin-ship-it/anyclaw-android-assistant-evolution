@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 159
-        versionName = "0.4.03-beta-v159-testpkg-attachments-camera-session-speed-p1"
+        versionCode = 160
+        versionName = "0.4.04-beta-v160-testpkg-runtime-native-copy-fix-p1"
     }
 
     signingConfigs {
