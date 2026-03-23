@@ -427,12 +427,12 @@ async function execInSession(
   session.busy = true;
   try {
     const token = randomUUID().replace(/-/g, "");
+    const encodedCommand = Buffer.from(command, "utf8").toString("base64");
     const beginMarker = `__ANYCLAW_BEGIN__:${token}`;
     const endMarker = `__ANYCLAW_END__:${token}:`;
     const cwdMarker = `__ANYCLAW_STATE_CWD__:${token}:`;
     const envBeginMarker = `__ANYCLAW_STATE_ENV_BEGIN__:${token}`;
     const envEndMarker = `__ANYCLAW_STATE_ENV_END__:${token}`;
-    const scriptPath = `\${TMPDIR:-/tmp}/anyclaw_session_${token}.sh`;
 
     const payload = [
       "set +e",
@@ -440,13 +440,11 @@ async function execInSession(
       "if [ -f \"$STATE_FILE\" ]; then . \"$STATE_FILE\"; fi",
       `cd ${shellSingleQuote(workingDir)} 2>/dev/null || cd /`,
       `printf '%s\\n' '${beginMarker}'`,
-      `cat >"${scriptPath}" <<'__ANYCLAW_SCRIPT_${token}__'`,
-      command,
-      `__ANYCLAW_SCRIPT_${token}__`,
-      `/bin/bash --noprofile --norc "${scriptPath}" </dev/null`,
-      `__anyclaw_rc=$?`,
-      `rm -f "${scriptPath}"`,
-      "__anyclaw_cwd=$(pwd)",
+      `__anyclaw_cmd_b64=${shellSingleQuote(encodedCommand)}`,
+      "__anyclaw_cmd=$(printf '%s' \"$__anyclaw_cmd_b64\" | /usr/bin/base64 -d 2>/dev/null || printf '')",
+      "if [ -z \"$__anyclaw_cmd\" ] && [ -n \"$__anyclaw_cmd_b64\" ]; then __anyclaw_cmd=$(printf '%s' \"$__anyclaw_cmd_b64\" | base64 -d 2>/dev/null || printf ''); fi",
+      "if [ -z \"$__anyclaw_cmd\" ] && [ -n \"$__anyclaw_cmd_b64\" ]; then printf '%s\\n' '__ANYCLAW_SESSION_ERROR__:decode-failed'; __anyclaw_rc=127; else eval \"$__anyclaw_cmd\"; __anyclaw_rc=$?; fi",
+      "__anyclaw_cwd=$(pwd -P 2>/dev/null || pwd)",
       `printf '%s%s\\n' '${cwdMarker}' "$__anyclaw_cwd"`,
       `printf '%s\\n' '${envBeginMarker}'`,
       "( export -p ) > \"$STATE_FILE\" 2>/dev/null || true",
