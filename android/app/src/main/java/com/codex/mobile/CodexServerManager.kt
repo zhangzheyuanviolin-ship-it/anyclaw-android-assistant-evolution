@@ -3521,6 +3521,16 @@ if [ "${'$'}#" -eq 0 ]; then
   exit 2
 fi
 
+# Keep Ubuntu runtime commands in local app shell.
+# Routing these through Shizuku loses app-private runtime context.
+cmdline="${'$'}*"
+case "${'$'}cmdline" in
+  *ubuntu-shell*|*ubuntu-status*|*".openclaw-android/linux-runtime/bin/ubuntu-shell.sh"*|*ANYCLAW_UBUNTU_BIN*)
+    /system/bin/sh -lc "${'$'}cmdline"
+    exit "${'$'}?"
+    ;;
+esac
+
 attempt=0
 while true; do
   shizuku-shell "${'$'}@"

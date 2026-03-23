@@ -673,9 +673,21 @@ async function runShellCommand(command: string): Promise<{ output: string; exitC
   })
 }
 
+function isUbuntuRuntimeCommand(command: string): boolean {
+  const normalized = command.trim().toLowerCase()
+  if (!normalized) return false
+  return normalized.includes('ubuntu-shell') ||
+    normalized.includes('ubuntu-status') ||
+    normalized.includes('.openclaw-android/linux-runtime/bin/ubuntu-shell.sh') ||
+    normalized.includes('anyclaw_ubuntu_bin')
+}
+
 async function runSystemShellCommand(command: string): Promise<{ output: string; exitCode: number }> {
   const cmd = command.trim()
   if (!cmd) return { output: 'Empty command', exitCode: 1 }
+  if (isUbuntuRuntimeCommand(cmd)) {
+    return runShellCommand(cmd)
+  }
   return runShellCommand(`system-shell ${shellQuote(cmd)}`)
 }
 

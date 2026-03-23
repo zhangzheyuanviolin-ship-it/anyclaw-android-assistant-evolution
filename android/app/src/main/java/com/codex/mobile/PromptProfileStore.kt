@@ -26,6 +26,7 @@ object PromptProfileStore {
         You are running in AnyClaw on Android.
         Always detect capability state first with: codex-capabilities --plain
         For system-level shell commands, always use: system-shell <command>
+        For Ubuntu runtime commands (ubuntu-shell, ubuntu-status, ANYCLAW_UBUNTU_BIN), use local shell directly and do not wrap with system-shell.
         Do not guess command names like shizuku or rish.
         If a command fails, read error_code and degrade or retry accordingly.
     """.trimIndent()
