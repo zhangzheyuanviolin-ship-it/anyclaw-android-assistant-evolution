@@ -2760,6 +2760,22 @@ WEOF
             mkdir -p /sdcard/Download/下载管理/AnyClaw 2>/dev/null || true
             mkdir -p /sdcard/下载管理/AnyClaw 2>/dev/null || true
             ln -sfn /sdcard/Download/AnyClaw "${'$'}HOME/storage/anyclaw" 2>/dev/null || true
+
+            # Expose Ubuntu runtime launcher to Codex/CLI without requiring absolute paths.
+            RUNTIME_BIN="${'$'}HOME/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh"
+            if [ -f "${'$'}RUNTIME_BIN" ]; then
+              cat > "${paths.prefixDir}/bin/ubuntu-shell" <<'EOF'
+#!/system/bin/sh
+exec "${'$'}HOME/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh" "${'$'}@"
+EOF
+              chmod 700 "${paths.prefixDir}/bin/ubuntu-shell" 2>/dev/null || true
+
+              cat > "${paths.prefixDir}/bin/ubuntu-status" <<'EOF'
+#!/system/bin/sh
+exec "${'$'}HOME/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh" --status
+EOF
+              chmod 700 "${paths.prefixDir}/bin/ubuntu-status" 2>/dev/null || true
+            fi
         """.trimIndent()
 
         val code = runInPrefix(script)
@@ -3855,12 +3871,13 @@ EOF
         paths: BootstrapInstaller.Paths,
     ): Map<String, String> {
         val bionicCompat = "${paths.homeDir}/.openclaw-android/patches/bionic-compat.js"
+        val runtimeBinDir = "${paths.homeDir}/.openclaw-android/linux-runtime/bin"
         val bionicCompatOpt = if (File(bionicCompat).exists()) " -r $bionicCompat" else ""
 
         val env = mutableMapOf(
             "PREFIX" to paths.prefixDir,
             "HOME" to paths.homeDir,
-            "PATH" to "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin",
+            "PATH" to "$runtimeBinDir:${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin",
             "LD_LIBRARY_PATH" to "${paths.prefixDir}/lib",
             "LD_PRELOAD" to "${paths.prefixDir}/lib/libtermux-exec.so",
             "TERMUX_PREFIX" to paths.prefixDir,
@@ -3871,6 +3888,7 @@ EOF
             "TEMP" to paths.tmpDir,
             "PROOT_TMP_DIR" to paths.tmpDir,
             "TERM" to "xterm-256color",
+            "ANYCLAW_UBUNTU_BIN" to "$runtimeBinDir/ubuntu-shell.sh",
             "ANDROID_DATA" to "/data",
             "ANDROID_ROOT" to "/system",
             "ANDROID_STORAGE" to "/sdcard",
