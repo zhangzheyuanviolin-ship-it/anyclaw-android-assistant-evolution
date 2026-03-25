@@ -1009,10 +1009,10 @@ H3
             vector.remove("extensionPath")
         }
 
-        ensureAnyClawSearchPlugin(paths.homeDir)
-        ensureAnyClawGithubPlugin(paths.homeDir)
-        ensureAnyClawDevicePlugin(paths.homeDir)
-        ensureAnyClawRuntimePlugin(paths.homeDir)
+        ensurePocketLobsterSearchPlugin(paths.homeDir)
+        ensurePocketLobsterGithubPlugin(paths.homeDir)
+        ensurePocketLobsterDevicePlugin(paths.homeDir)
+        ensurePocketLobsterRuntimePlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
@@ -1025,8 +1025,8 @@ H3
         if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
-        if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
-            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.4")
+        if (configuredUa.isEmpty() || configuredUa.contains("SearchSuite/1.")) {
+            searchSuiteConfig.put("userAgent", "PocketLobsterSearchSuite/1.4")
         }
 
         val githubSuiteEntry = ensureObject(entries, ANYCLAW_GITHUB_PLUGIN_ID)
@@ -1038,16 +1038,16 @@ H3
         if (!githubSuiteConfig.has("terminalTimeoutMs")) githubSuiteConfig.put("terminalTimeoutMs", 30000)
         if (!githubSuiteConfig.has("workspaceRoot")) githubSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
         val githubUa = githubSuiteConfig.optString("userAgent", "").trim()
-        if (githubUa.isEmpty() || githubUa.startsWith("AnyClawGithubSuite/0.")) {
-            githubSuiteConfig.put("userAgent", "AnyClawGithubSuite/1.0")
+        if (githubUa.isEmpty() || githubUa.contains("GithubSuite/")) {
+            githubSuiteConfig.put("userAgent", "PocketLobsterGithubSuite/1.0")
         }
 
         val deviceSuiteEntry = ensureObject(entries, ANYCLAW_DEVICE_PLUGIN_ID)
         deviceSuiteEntry.put("enabled", true)
         val deviceSuiteConfig = ensureObject(deviceSuiteEntry, "config")
         if (!deviceSuiteConfig.has("timeoutSeconds")) deviceSuiteConfig.put("timeoutSeconds", 20)
-        if (!deviceSuiteConfig.has("screenshotDir")) deviceSuiteConfig.put("screenshotDir", "/sdcard/Download/AnyClawShots")
-        if (!deviceSuiteConfig.has("uiDumpPath")) deviceSuiteConfig.put("uiDumpPath", "/sdcard/Download/AnyClawShots/ui_dump.xml")
+        if (!deviceSuiteConfig.has("screenshotDir")) deviceSuiteConfig.put("screenshotDir", "/sdcard/Download/PocketLobsterShots")
+        if (!deviceSuiteConfig.has("uiDumpPath")) deviceSuiteConfig.put("uiDumpPath", "/sdcard/Download/PocketLobsterShots/ui_dump.xml")
         if (!deviceSuiteConfig.has("maxUiNodes")) deviceSuiteConfig.put("maxUiNodes", 180)
         if (!deviceSuiteConfig.has("inputVerifyReadback")) deviceSuiteConfig.put("inputVerifyReadback", false)
         if (!deviceSuiteConfig.has("inputImePriority")) {
@@ -1641,7 +1641,7 @@ H3
             if [ ! -f "${'$'}HB_FILE" ] || [ -z "${'$'}(grep -Ev '^[[:space:]]*(#|$)' "${'$'}HB_FILE" 2>/dev/null)" ]; then
               cat > "${'$'}HB_FILE" <<'EOF'
 # HEARTBEAT.md
-# AnyClaw auto-bootstrap tasks (safe defaults)
+# Pocket Lobster auto-bootstrap tasks (safe defaults)
 1) Check whether gateway and core tools are healthy.
 2) If there is no pending task, reply HEARTBEAT_OK.
 3) If a blocking failure appears, summarize root cause in one short paragraph.
@@ -2319,10 +2319,10 @@ WEOF
             ln -sfn /storage/emulated/0 "${'$'}HOME/storage/shared" 2>/dev/null || true
             ln -sfn /sdcard/Download "${'$'}HOME/storage/downloads" 2>/dev/null || true
 
-            mkdir -p /sdcard/Download/AnyClaw 2>/dev/null || true
-            mkdir -p /sdcard/Download/下载管理/AnyClaw 2>/dev/null || true
-            mkdir -p /sdcard/下载管理/AnyClaw 2>/dev/null || true
-            ln -sfn /sdcard/Download/AnyClaw "${'$'}HOME/storage/anyclaw" 2>/dev/null || true
+            mkdir -p /sdcard/Download/PocketLobster 2>/dev/null || true
+            mkdir -p /sdcard/Download/下载管理/PocketLobster 2>/dev/null || true
+            mkdir -p /sdcard/下载管理/PocketLobster 2>/dev/null || true
+            ln -sfn /sdcard/Download/PocketLobster "${'$'}HOME/storage/pocket-lobster" 2>/dev/null || true
         """.trimIndent()
 
         val code = runInPrefix(script)
@@ -3311,7 +3311,7 @@ EOF
         return false
     }
 
-    private fun ensureAnyClawSearchPlugin(homeDir: String) {
+    private fun ensurePocketLobsterSearchPlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_SEARCH_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3328,7 +3328,7 @@ EOF
         }
     }
 
-    private fun ensureAnyClawGithubPlugin(homeDir: String) {
+    private fun ensurePocketLobsterGithubPlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_GITHUB_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3345,7 +3345,7 @@ EOF
         }
     }
 
-    private fun ensureAnyClawDevicePlugin(homeDir: String) {
+    private fun ensurePocketLobsterDevicePlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_DEVICE_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3362,7 +3362,7 @@ EOF
         }
     }
 
-    private fun ensureAnyClawRuntimePlugin(homeDir: String) {
+    private fun ensurePocketLobsterRuntimePlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_RUNTIME_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3422,7 +3422,7 @@ EOF
             "ANDROID_ROOT" to "/system",
             "ANDROID_STORAGE" to "/sdcard",
             "EXTERNAL_STORAGE" to "/sdcard",
-            "ANYCLAW_EXPORT_DIR" to "/sdcard/Download/AnyClaw",
+            "ANYCLAW_EXPORT_DIR" to "/sdcard/Download/PocketLobster",
             "APT_CONFIG" to "${paths.prefixDir}/etc/apt/apt.conf",
             "DPKG_ADMINDIR" to "${paths.prefixDir}/var/lib/dpkg",
             "SSL_CERT_FILE" to "${paths.prefixDir}/etc/tls/cert.pem",

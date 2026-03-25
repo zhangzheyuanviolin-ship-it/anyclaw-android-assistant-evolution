@@ -72,9 +72,9 @@ object LocalBridgeClients {
         return try {
             val raw = File("/proc/self/cmdline").readBytes().toString(Charsets.UTF_8)
             val trimmed = raw.trim { it == '\u0000' || it.isWhitespace() }
-            if (trimmed.isBlank()) "com.codex.mobile.beta" else trimmed
+            if (trimmed.isBlank()) "com.codex.mobile.pocketlobster" else trimmed
         } catch (_: Exception) {
-            "com.codex.mobile.beta"
+            "com.codex.mobile.pocketlobster"
         }
     }
 

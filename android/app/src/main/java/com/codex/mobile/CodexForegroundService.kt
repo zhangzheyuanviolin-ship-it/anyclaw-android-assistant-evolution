@@ -32,7 +32,7 @@ class CodexForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "AnyClaw Running",
+                "口袋大龙虾后台服务",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 description = "Keeps Codex server running in the background"
@@ -60,8 +60,8 @@ class CodexForegroundService : Service() {
         }
 
         return builder
-            .setContentTitle("AnyClaw is running")
-            .setContentText("Server active in background")
+            .setContentTitle("口袋大龙虾正在运行")
+            .setContentText("后台服务正在运行")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)

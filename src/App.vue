@@ -165,8 +165,8 @@ import type { ReasoningEffort, ThreadScrollState } from './types/codex'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const { localePreference, setLocalePreference, t } = useUiI18n()
-const OPENCLAW_GATEWAY_PORT_STORAGE_KEY = 'anyclaw.openclaw.gateway.port.v1'
-const OPENCLAW_CONTROL_UI_PORT_STORAGE_KEY = 'anyclaw.openclaw.controlui.port.v1'
+const OPENCLAW_GATEWAY_PORT_STORAGE_KEY = 'pocketlobster.openclaw.gateway.port.v1'
+const OPENCLAW_CONTROL_UI_PORT_STORAGE_KEY = 'pocketlobster.openclaw.controlui.port.v1'
 const DEFAULT_OPENCLAW_GATEWAY_PORT = '18789'
 const DEFAULT_OPENCLAW_CONTROL_UI_PORT = '19001'
 

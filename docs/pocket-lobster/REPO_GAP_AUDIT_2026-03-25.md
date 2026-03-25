@@ -1,20 +1,30 @@
-# 口袋大龙虾 仓库现状差距审计 待审核
+# 口袋大龙虾 仓库正式化审计结果
 生成日期：2026-03-25
 
-基于稳定分支 work/v162-sidecar-verify-20260325 的源码归档包审计结果，当前仓库正式化之前至少存在以下差距。
+## 中文版本
 
-第一，仓库首页 README 仍然沿用 AnyClaw 口径，标题仍是 AnyClaw，下载链接仍指向 friuns2.github.io/openclaw-android-assistant，整体产品定位尚未切换为口袋大龙虾正式名称与正式发布口径。
+截至 2026-03-25，本轮正式化整理已经关闭此前最主要的仓库缺口。
 
-第二，README 中的功能说明、架构图和快速开始仍以早期上游安卓实现为中心，尚未纳入口袋大龙虾当前已经验证的三条执行链路、双智能体稳定性验证、资产恢复能力、视障自然语言驱动协作能力和三通道包名治理方案。
+仓库名称、主页 README、项目正式介绍、首版发布文案和核心治理文档均已切换到口袋大龙虾品牌，并补齐面向普通访问者所需的中英双语信息。
 
-第三，docs/HANDOVER_AND_LINEAGE_2026-02-28.md 仍把 friuns2/openclaw-android-assistant 视作最早来源仓库，没有继续追溯到 openclaw/openclaw 这一官方源头，因此项目血缘说明目前仍然不完整。
+主分支默认发布配置已经对齐正式发布包名 `com.codex.mobile.pocketlobster`，主屏幕显示名称固定为 `口袋大龙虾`，工作流 release 与产物文件名也已去除 旧产品标签。
 
-第四，现有 docs/ASSET_BACKUP_POLICY_2026-02-28.md 只描述了敏感资产边界和公开仓库原则，还没有纳入当前已经形成的本地归档目录、云端草案备份 release、版本谱系、源码快照和恢复索引的正式机制。
+应用内对外可见的导出目录、截图目录、前台通知、登录页标题、网页标题与插件显示名称已经统一切换到 Pocket Lobster 口径。真正必要的上游引用仅保留在血缘说明和 OpenClaw 运行时相关位置。
 
-第五，CHANGELOG_ANYCLAW_MIGRATION.md 停留在 2026-02-28 的迁移交接阶段，没有覆盖 2026-03-23 到 2026-03-25 这段最关键的稳定版本恢复、v157-v160 版本梳理、v161 验证失败、v162 sidecar 修复成功以及稳定版本确认过程。
+恢复 release、恢复分支、本地归档目录和版本谱系索引已经建立，项目具备正式发布前所需的基础资产恢复能力。
 
-第六，当前源码 strings.xml 中的 app_name 是口袋大龙虾162验证，这说明当前稳定分支本身仍是 sidecar 验证通道，而不是未来正式发布仓库应长期保持的主产品命名状态。
+当前仍然保留的上游名称只用于项目血缘说明、OpenClaw 运行时命令、本地兼容目录和必要的内部兼容标识，不再作为本项目品牌对外展示。
 
-第七，仓库中的 docs、documentation、历史迁移文档和临时修复记录目前仍然分散，缺少统一的正式目录结构与面向发布的入口索引，这会直接影响后续 release 介绍、项目主页说明和长期维护可读性。
+## English Version
 
-结论：当前稳定分支已经足够作为正式化整理的技术基线，但距离真正的正式发布仓库还差一轮系统性的文档重写、历史血缘校正、资产归档索引固化、版本沿革补写和包名通道治理落库。
+As of 2026-03-25, the main formalization gaps previously identified for the repository have been closed.
+
+The repository name, homepage README, project overview, first-release copy, and core governance documents now use the Pocket Lobster brand and provide the bilingual information required for ordinary visitors.
+
+The main branch now targets the official release package `com.codex.mobile.pocketlobster`, the launcher label is fixed to `口袋大龙虾`, and the release workflow plus APK artifact naming have been cleaned up to remove the old legacy product label.
+
+User-visible export paths, screenshot paths, foreground notifications, login-page titles, web titles, and plugin display names have been switched to Pocket Lobster wording. Upstream references are retained only where they are genuinely required for lineage documentation or OpenClaw runtime behavior.
+
+A recovery release, recovery branch, local archive, and version-lineage index are all in place, giving the project the recovery baseline it needs before formal public release.
+
+Any remaining upstream naming is now limited to lineage notes, OpenClaw runtime commands, local compatibility locations, and other compatibility-critical internal identifiers, not public Pocket Lobster branding.

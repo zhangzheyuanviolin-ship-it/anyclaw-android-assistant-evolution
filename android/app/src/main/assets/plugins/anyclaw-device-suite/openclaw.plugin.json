@@ -1,6 +1,6 @@
 {
   "id": "anyclaw-device-suite",
-  "name": "AnyClaw Device Suite",
+  "name": "Pocket Lobster Device Suite",
   "description": "Shizuku-first Android device automation tools: screenshot, UI coordinates, tap/swipe/text/keyevent, and app navigation.",
   "version": "1.1.0",
   "configSchema": {

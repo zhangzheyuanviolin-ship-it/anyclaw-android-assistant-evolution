@@ -23,7 +23,7 @@ object PromptProfileStore {
     private const val MAX_CONTENT_PREVIEW = 120
 
     private val capabilityBootstrapInstructions = """
-        You are running in AnyClaw on Android.
+        You are running in Pocket Lobster on Android.
         Always detect capability state first with: codex-capabilities --plain
         For system-level shell commands, always use: system-shell <command>
         Do not guess command names like shizuku or rish.

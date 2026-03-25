@@ -1,7 +1,7 @@
 {
   "id": "anyclaw-runtime-suite",
-  "name": "AnyClaw Runtime Suite",
-  "description": "Runtime health, prefix repair, and Codex MCP diagnostics for AnyClaw/OpenClaw.",
+  "name": "Pocket Lobster Runtime Suite",
+  "description": "Runtime health, prefix repair, and Codex MCP diagnostics for Pocket Lobster and OpenClaw.",
   "version": "1.0.0",
   "configSchema": {
     "type": "object",

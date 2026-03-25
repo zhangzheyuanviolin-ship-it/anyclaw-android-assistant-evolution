@@ -43,7 +43,7 @@
     <string name="conversation_action_delete">删除</string>
     <string name="conversation_action_copy">复制</string>
     <string name="conversation_action_export">导出</string>
-    <string name="conversation_exported_toast">已导出到 Download/AnyClaw/exports。</string>
+    <string name="conversation_exported_toast">已导出到 Download/PocketLobster/exports。</string>
     <string name="conversation_copied_toast">会话内容已复制到剪贴板。</string>
     <string name="conversation_renamed_toast">标题已更新。</string>
     <string name="conversation_deleted_toast">会话已删除。</string>
@@ -167,7 +167,7 @@
     <string name="codex_auth_success">Codex 授权成功。</string>
     <string name="codex_auth_failed">Codex 授权失败或已取消。</string>
     <string name="codex_not_installed">未检测到 Codex 组件，请先完成初始化安装。</string>
-    <string name="shizuku_revoke_hint">如需彻底撤销授权：点击“打开 Shizuku 应用”，在其中关闭对 AnyClaw 的授权。</string>
+    <string name="shizuku_revoke_hint">如需彻底撤销授权：点击“打开 Shizuku 应用”，在其中关闭对口袋大龙虾的授权。</string>
     <string name="shizuku_not_installed">未检测到 Shizuku 应用，系统命令通道不可用。</string>
     <string name="shizuku_service_not_running">检测到 Shizuku 已安装，但服务未运行。请先在 Shizuku 内启动服务。</string>
     <string name="shizuku_permission_requesting">正在请求 Shizuku 授权…</string>

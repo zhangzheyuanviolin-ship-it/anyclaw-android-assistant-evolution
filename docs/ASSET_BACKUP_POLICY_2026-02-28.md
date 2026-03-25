@@ -1,3 +1,7 @@
+2026-03-25 更新：本文件现作为历史备份策略记录保留。当前正式资产备份方案请以 docs/pocket-lobster/CLOUD_BACKUP_POLICY_2026-03-25.md 为准。
+
+2026-03-25 Update: This file is preserved as historical backup-policy context. The current authoritative backup policy is docs/pocket-lobster/CLOUD_BACKUP_POLICY_2026-03-25.md.
+
 # 重要资产备份与公开仓库边界（2026-02-28）
 
 ## 1. 公开仓库定位

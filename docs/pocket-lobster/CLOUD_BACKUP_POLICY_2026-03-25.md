@@ -1,12 +1,22 @@
-# 口袋大龙虾 云端资产备份方案 待审核
+# 口袋大龙虾 云端资产备份方案
 生成日期：2026-03-25
 
-本项目后续采用手机本地与 GitHub 云端双重备份体系，目标是避免手机本地误删后再次出现关键安装包、源码快照和工作流资产不可恢复的问题。
+## 中文版本
 
-本地第一现场归档目录固定为 /sdcard/Download/口袋大龙虾本地仓库。这个目录当前已经保存了最近稳定阶段最关键的安装包、工作流 artifact、源码快照、运行时资产、版本映射和校验文件。
+本项目采用手机本地与 GitHub 云端双重备份体系，目标是在手机本地误删后仍然能够恢复关键安装包、源码快照、工作流产物和版本索引。
 
-云端第二现场备份建议使用同一 GitHub 仓库中的正式备份 release 体系。大体积二进制资产不直接提交进主分支历史，而是放到专用备份 release 的 assets 中。可读的版本索引、SHA256 校验、版本谱系、来源说明和恢复文档则放进仓库文本文件中持续维护。
+本地第一现场归档目录固定为 `/sdcard/Download/口袋大龙虾本地仓库`。这个目录保存稳定基线安装包、工作流 artifact、源码快照、运行时资产、版本映射、校验文件和审核文案。
 
-现阶段最需要优先云端备份的资产有三类。第一类是远端不存在精确副本但价值最高的稳定资产，例如当前设备上精确恢复出的 internal v162 安装包。第二类是按提交号恢复出的源码快照，用于未来即使标签被移动、分支被整理后仍能按提交恢复指定时期源码。第三类是版本谱系、工作流 run 元数据、release 元数据和校验清单，这些是未来避免混淆的关键索引。
+云端第二现场备份使用同一 GitHub 仓库中的恢复 release 与恢复分支。大体积二进制资产放入 GitHub Releases 的 assets，中小型索引文件、SHA256 清单、版本谱系、恢复说明和治理文档放入仓库文本文件持续维护。
 
-执行上建议先建立一版草案备份 release，以 draft 形式保存，不对外宣传，只承担灾备职能。待版本映射和文档再核对一轮后，再决定是否转成长期可见的正式备份条目。
+备份原则是每个重要版本都必须同时具备 APK、源码提交号、SHA256 校验、来源说明和恢复路径，避免出现版本号相近但真实内容不同的混淆。
+
+## English Version
+
+Pocket Lobster uses a dual backup strategy across local device storage and GitHub cloud storage so that critical APKs, source snapshots, workflow artifacts, and version indexes remain recoverable even after accidental local deletion.
+
+The primary on-device archive is fixed at `/sdcard/Download/口袋大龙虾本地仓库`. It stores stable baseline APKs, workflow artifacts, source snapshots, runtime assets, version mappings, checksum manifests, and reviewed release documents.
+
+The secondary cloud backup uses a recovery release and a recovery branch inside the same GitHub repository. Large binaries are stored as GitHub Release assets, while smaller manifests, SHA256 indexes, version lineage files, recovery notes, and governance documents are maintained directly in the repository.
+
+The governing rule is that every important version must be traceable through an APK, an exact source commit, checksum records, provenance notes, and a clear recovery path, so similar version numbers can never become ambiguous again.

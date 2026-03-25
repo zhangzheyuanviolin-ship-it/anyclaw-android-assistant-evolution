@@ -1,4 +1,8 @@
-# AnyClaw 项目交接与谱系说明（2026-02-28）
+2026-03-25 更新：本文件现作为历史交接记录保留。当前正式项目名称为口袋大龙虾 Pocket Lobster，正式上游血缘与现行发布口径请以 docs/pocket-lobster/UPSTREAM_AND_LICENSE_2026-03-25.md 与 README.md 为准。
+
+2026-03-25 Update: This file is preserved as historical handover context. The current formal project name is Pocket Lobster. For the authoritative upstream lineage and release wording, see docs/pocket-lobster/UPSTREAM_AND_LICENSE_2026-03-25.md and README.md.
+
+# 口袋大龙虾 历史交接与谱系记录（2026-02-28）
 
 本文件用于说明当前仓库的来源、交接背景、双令牌规则、固定签名策略和后续维护方式，便于长期持续迭代。
 
@@ -7,7 +11,7 @@
 - 最早来源仓库（上游）：https://github.com/friuns2/openclaw-android-assistant
 - 迁移交接阶段使用过的账户仓库：
   https://github.com/zhangzheyuanviolin-ship-it/openclaw-android-assistant
-- 当前仓库定位：面向 AnyClaw 安卓形态的持续演进主仓库，承接后续全部迭代与发布记录。
+- 当前仓库定位：面向口袋大龙虾安卓形态的持续演进主仓库，承接后续全部迭代与发布记录。
 
 ## 2. 当前交接基线
 

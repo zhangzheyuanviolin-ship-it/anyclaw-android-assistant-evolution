@@ -76,13 +76,13 @@ jobs:
         run: ./gradlew assembleDebug
 
       - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/debug/anyclaw.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/debug/pocket-lobster.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: anyclaw
-          path: android/app/build/outputs/apk/debug/anyclaw.apk
+          name: pocket-lobster
+          path: android/app/build/outputs/apk/debug/pocket-lobster.apk
 
       - name: Generate changelog
         if: github.ref_type == 'branch'
@@ -105,9 +105,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
-          name: "AnyClaw v${{ github.run_number }} (${{ github.ref_name }})"
+          name: "Pocket Lobster v${{ github.run_number }} (${{ github.ref_name }})"
           body: |
-            🦞 **AnyClaw** — OpenClaw + Codex on Android
+            🦞 **Pocket Lobster** — Codex + OpenClaw on Android
 
             📱 Install the APK on any ARM64 Android 7.0+ device. No root required.
 
@@ -117,6 +117,6 @@ jobs:
             ---
             Branch: ${{ github.ref_name }}
             Built from commit ${{ github.sha }}
-          files: android/app/build/outputs/apk/debug/anyclaw.apk
+          files: android/app/build/outputs/apk/debug/pocket-lobster.apk
           draft: false
           prerelease: false

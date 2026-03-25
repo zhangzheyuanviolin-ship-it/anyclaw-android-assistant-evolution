@@ -292,7 +292,7 @@ async function callDoctor(runtime: RuntimeConfig, doctorArgs: string[]): Promise
 
 function createRuntimeHealthTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Runtime Health",
+    label: "Pocket Lobster Runtime Health",
     name: "anyclaw_runtime_health",
     description: "Inspect package/runtime health and Codex MCP method surface.",
     parameters: {
@@ -348,7 +348,7 @@ function createRuntimeHealthTool(runtime: RuntimeConfig) {
 
 function createRuntimePrefixRepairTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Runtime Prefix Repair",
+    label: "Pocket Lobster Runtime Prefix Repair",
     name: "anyclaw_runtime_prefix_repair",
     description: "Repair legacy Termux prefix remnants and shebang drift with safe skip-on-busy behavior.",
     parameters: {
@@ -378,7 +378,7 @@ function createRuntimePrefixRepairTool(runtime: RuntimeConfig) {
 
 function createCodexMethodsTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Codex Methods",
+    label: "Pocket Lobster Codex Methods",
     name: "anyclaw_codex_methods",
     description: "List available codex app-server RPC methods from local bridge.",
     parameters: {
@@ -401,7 +401,7 @@ function createCodexMethodsTool(runtime: RuntimeConfig) {
 
 function createCodexMcpStatusTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Codex MCP Status",
+    label: "Pocket Lobster Codex MCP Status",
     name: "anyclaw_codex_mcp_status",
     description: "Query MCP server status via supported codex RPC methods with fallback.",
     parameters: {
@@ -439,7 +439,7 @@ function createCodexMcpStatusTool(runtime: RuntimeConfig) {
 
 function createCodexMcpReloadTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Codex MCP Reload",
+    label: "Pocket Lobster Codex MCP Reload",
     name: "anyclaw_codex_mcp_reload",
     description: "Reload MCP server config via supported codex RPC methods with fallback.",
     parameters: {
@@ -475,7 +475,7 @@ function createCodexMcpReloadTool(runtime: RuntimeConfig) {
 
 function createCodexRpcTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Codex RPC",
+    label: "Pocket Lobster Codex RPC",
     name: "anyclaw_codex_rpc",
     description: "Call any codex app-server RPC method through local bridge.",
     parameters: {
@@ -517,7 +517,7 @@ function createCodexRpcTool(runtime: RuntimeConfig) {
 
 export default {
   id: "anyclaw-runtime-suite",
-  name: "AnyClaw Runtime Suite",
+  name: "Pocket Lobster Runtime Suite",
   register(api: any) {
     const runtime = resolveRuntimeConfig(api.pluginConfig);
 

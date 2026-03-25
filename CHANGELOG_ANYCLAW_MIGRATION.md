@@ -1,8 +1,12 @@
-# CHANGELOG (AnyClaw Migration Track)
+2026-03-25 Update: This changelog is preserved as historical migration context from the earlier legacy-branded stage. The current formal project name is Pocket Lobster, and current release-facing materials now live under docs/pocket-lobster/.
+
+2026-03-25 更新：本文件作为早期旧命名阶段的历史迁移记录保留。当前正式项目名称为口袋大龙虾，面向当前版本的正式文档已统一收口到 docs/pocket-lobster/ 目录。
+
+# CHANGELOG (Historical Migration Track)
 
 ## 2026-02-28
 
-- Completed full migration handover in Android AnyClaw test environment.
+- Completed full migration handover in the earlier Android test environment.
 - Verified and stabilized capability baseline:
   - Global shared storage access
   - Shizuku system-shell execution

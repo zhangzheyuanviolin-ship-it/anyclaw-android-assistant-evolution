@@ -1,4 +1,8 @@
-# AnyClaw 版本迭代历史摘要（截至 2026-02-28）
+2026-03-25 更新：本文件现作为历史迭代记录保留。2026-03-23 至 2026-03-25 的稳定版本恢复、验证与正式化整理，请同时参考 docs/pocket-lobster/VERSION_LINEAGE_2026-03-25.md 与 docs/pocket-lobster/REPO_GAP_AUDIT_2026-03-25.md。
+
+2026-03-25 Update: This file is preserved as historical iteration context. For the 2026-03-23 to 2026-03-25 recovery, validation, and formalization work, also refer to docs/pocket-lobster/VERSION_LINEAGE_2026-03-25.md and docs/pocket-lobster/REPO_GAP_AUDIT_2026-03-25.md.
+
+# 口袋大龙虾 历史版本迭代摘要（截至 2026-02-28）
 
 本文件汇总从交接文档中提取的关键历史节点，便于后续版本管理与回溯。
 

@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 export type LocalePreference = 'system' | 'zh-CN' | 'en'
 type UiLocale = 'zh-CN' | 'en'
 
-const STORAGE_KEY = 'anyclaw.ui.localePref'
+const STORAGE_KEY = 'pocketlobster.ui.localePref'
 
 const messages: Record<UiLocale, Record<string, string>> = {
   'zh-CN': {

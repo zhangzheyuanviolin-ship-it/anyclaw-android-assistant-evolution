@@ -1,21 +1,26 @@
-# 口袋大龙虾 仓库整合与三通道包名方案 待审核
+# 口袋大龙虾 三通道包名与发布治理
 生成日期：2026-03-25
 
-一，三通道包名策略
-当前稳定联络通道固定保留现有包名 com.codex.mobile.pocketlobster.test。这个通道的职责是保证张老师与 Codex 始终有一套稳定可用、环境已验证、不可轻易破坏的联络与运维工作环境。后续任何高风险新功能都不直接在这条通道上试验。
+## 中文版本
 
-内部测试通道建议固定为 com.codex.mobile.pocketlobster.beta。这个通道专门用于新功能迭代、灰度验证、覆盖更新验证和重新安装验证。后续所有新能力优先在这一通道出包测试，确认稳定以后再考虑提升到正式发布通道。
+当前项目固定采用三通道包名策略，用来同时保证正式发布、内部测试和稳定联络三条线互不影响。
 
-正式发布通道建议固定为 com.codex.mobile.pocketlobster。这个通道只承载已经通过内部测试通道完整验证的版本，面向正式用户和公开 release 发布。
+稳定联络通道固定保留当前已经安装并经过长期验证的包名 `com.codex.mobile.pocketlobster.test`。这条通道只承担张老师与 Codex 的稳定联络、环境维护和项目推进，不承担高风险新功能试错。
 
-二，仓库命名与定位建议
-仓库展示名称建议统一为 口袋大龙虾 Pocket Lobster。GitHub 仓库英文标识建议调整为 pocket-lobster-android。当前 anyclaw-android-assistant-evolution 作为迁移阶段名称保留在历史文档中说明，不再作为长期正式产品名称。
+内部测试通道固定为 `com.codex.mobile.pocketlobster.beta`。后续所有新功能、灰度修复、实验性能力和覆盖更新验证都优先在这条通道完成。
 
-三，仓库内容收敛原则
-第一层是正式产品文档，包括 README、功能说明、安装说明、版本沿革、发布说明和无障碍说明。
-第二层是项目血缘文档，明确官方源头、安卓实现上游、当前项目演进关系与许可证说明。
-第三层是资产归档文档，明确 APK、源码快照、工作流产物、运行时资产、校验信息与恢复路径。
-第四层是发布治理文档，明确三通道包名、签名、版本号策略、发布流程与回滚策略。
+正式发布通道固定为 `com.codex.mobile.pocketlobster`。主分支当前默认发布配置已经对齐这条正式通道，后续公开 release 使用该包名和正式图标名称 `口袋大龙虾`。
 
-四，执行原则
-以后正式发布通道和内部测试通道都可以持续更新，但当前稳定联络通道不承担试错职能，除非已经完成充分验证且存在必须迁移的理由，否则不主动覆盖。
+执行原则是先在内部测试通道完成覆盖更新与重装验证，再考虑提升到正式发布通道；稳定联络通道默认冻结，除非存在必须迁移且已经充分验证的理由。
+
+## English Version
+
+Pocket Lobster uses a three-channel package strategy so that public releases, internal testing, and the stable operator contact environment never overwrite each other by accident.
+
+The stable operator channel remains permanently pinned to `com.codex.mobile.pocketlobster.test`. This channel exists to preserve the working Codex environment that Zhang Laoshi relies on for coordination, maintenance, and ongoing development.
+
+The internal testing channel is fixed as `com.codex.mobile.pocketlobster.beta`. All new features, experimental capabilities, repair builds, and upgrade-validation work should be delivered here first.
+
+The official release channel is fixed as `com.codex.mobile.pocketlobster`. The main branch now aligns its default release configuration with this public channel and uses the normal launcher label `口袋大龙虾`.
+
+The governing rule is simple: validate in the internal testing channel first, promote to the public release channel only after upgrade and reinstall checks pass, and keep the stable operator channel frozen unless a migration is absolutely necessary and fully verified.

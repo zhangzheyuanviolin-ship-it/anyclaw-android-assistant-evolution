@@ -18,7 +18,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AnyClaw"
+        android:theme="@style/Theme.PocketLobster"
         android:usesCleartextTraffic="true"
         android:requestLegacyExternalStorage="true">
 

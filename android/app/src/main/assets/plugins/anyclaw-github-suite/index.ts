@@ -16,7 +16,7 @@ type RuntimeConfig = {
 const DEFAULT_TIMEOUT_MS = 35000;
 const DEFAULT_TERMINAL_TIMEOUT_MS = 30000;
 const DEFAULT_GITHUB_API = "https://api.github.com";
-const DEFAULT_USER_AGENT = "AnyClawGithubSuite/1.0";
+const DEFAULT_USER_AGENT = "PocketLobsterGithubSuite/1.0";
 const DEFAULT_WORKSPACE_ROOT = "/tmp";
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -159,7 +159,7 @@ function resolveSafePath(targetPath: string, runtime: RuntimeConfig): string {
 
 function createApplyFileTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Apply File",
+    label: "Pocket Lobster Apply File",
     name: "anyclaw_apply_file",
     description: "Apply local file changes by replace/append/prepend/find_replace within workspace root.",
     parameters: {
@@ -232,7 +232,7 @@ function createApplyFileTool(runtime: RuntimeConfig) {
 
 function createTerminalTool(runtime: RuntimeConfig) {
   return {
-    label: "AnyClaw Terminal",
+    label: "Pocket Lobster Terminal",
     name: "anyclaw_terminal",
     description: "Execute local shell command with timeout and bounded output.",
     parameters: {
@@ -762,7 +762,7 @@ function createGithubRestCallTool(runtime: RuntimeConfig) {
 
 export default {
   id: "anyclaw-github-suite",
-  name: "AnyClaw GitHub Suite",
+  name: "Pocket Lobster GitHub Suite",
   register(api: any) {
     const runtime = resolveRuntimeConfig(api.pluginConfig);
     if (api.logger && api.logger.info) {

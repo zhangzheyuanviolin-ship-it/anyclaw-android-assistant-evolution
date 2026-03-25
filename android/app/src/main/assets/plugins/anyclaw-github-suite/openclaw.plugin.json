@@ -1,7 +1,7 @@
 {
   "id": "anyclaw-github-suite",
-  "name": "AnyClaw GitHub Suite",
-  "description": "GitHub REST tools with local apply_file and terminal helpers for AnyClaw.",
+  "name": "Pocket Lobster GitHub Suite",
+  "description": "GitHub REST tools with local apply_file and terminal helpers for Pocket Lobster.",
   "version": "1.0.0",
   "configSchema": {
     "type": "object",

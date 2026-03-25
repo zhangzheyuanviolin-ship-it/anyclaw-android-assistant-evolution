@@ -35,7 +35,7 @@
 - 验证结果：进行中（等待云端构建与用户安装验证）。
 - 结论：待验证。
 - 可复用：是（作为紧急回退策略）。
-- 构建产物：AnyClaw_v55_0.3.6-beta-search-suite-p0-tavily-snapshot-rollback.apk
+- 构建产物：v55_0.3.6-beta-search-suite-p0-tavily-snapshot-rollback.apk（早期旧命名阶段产物）
 - 工作流：run 22631066096（success）
 - 备注：该包基于 v16 快照源码，仅提升 versionCode 以支持覆盖安装。
 
