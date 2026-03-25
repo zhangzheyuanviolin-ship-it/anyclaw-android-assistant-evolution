@@ -1,5 +1,7 @@
-# 口袋大龙虾 Pocket Lobster 首版正式发布文案 定稿
-生成日期：2026-03-25
+# 口袋大龙虾 Pocket Lobster 首版正式发布文案 First Release Copy
+生成日期 Generated on: 2026-03-25
+
+## 中文版本
 
 口袋大龙虾正式进入首个稳定发布阶段。
 
@@ -22,3 +24,27 @@
 口袋大龙虾首个稳定版本真正证明了一件事情：只要 AI 拥有足够真实的工具环境、足够广泛的权限边界和足够完整的交付链路，那么一台小小的安卓手机，也可以成为真正的生产终端、开发终端、创作终端和个人 AI 工作平台。
 
 这不是桌面体验的缩水版，而是移动端 AI 基础设施的一次真正突破。口袋大龙虾，把顶级编码智能体和顶级全能智能体一起带到了安卓手机上，并让它们第一次真正开始为现实任务交付成果。
+
+## English Version
+
+Pocket Lobster has officially entered its first stable release stage.
+
+This is not an ordinary mobile chat app, and it is not a simple Android port of a desktop AI shell. What Pocket Lobster has actually achieved is something much more substantial: it compresses two top-tier agent systems, which traditionally lived on desktop operating systems, terminal environments, or cloud machines, into a non-root Android phone and lets them share a real execution environment that can do work, deliver output, and keep evolving over time.
+
+Inside one application, two agent systems run side by side. The first is Codex, OpenAI's coding agent and one of the strongest software and code agents available today. It excels at understanding repositories, editing projects, debugging issues, running commands, and advancing complex technical work. The second is OpenClaw, a representative 2026-era personal AI agent architecture that moves AI beyond the traditional chat interface and into the role of a general-purpose assistant that can call tools, execute complex tasks, organize workflows, and deliver final results. Historically, these two kinds of agents lived on desktop computers, command-line terminals, or cloud infrastructure. Pocket Lobster brings them onto the phone in a real and usable form.
+
+More importantly, Pocket Lobster does not merely let them chat. It equips them with three fully usable execution paths: an Android-native terminal environment, a full Ubuntu Linux runtime, and a Shizuku-enabled system shell path. Both agents can switch among these environments according to the task. They can use the Android-native terminal for local work, enter a full Ubuntu Linux runtime for development, scripting, compilation, and complex command execution, and use system shell to reach system-level commands, inspect device state, and support UI automation. Those three paths together are what allow AI, for the first time on a non-root Android phone, to operate with something close to full workstation-level execution power.
+
+Pocket Lobster also has a decisive advantage in global file access. In many similar Android projects, the agent ends up trapped inside the app sandbox, with files circling inside private storage and results difficult to deliver back to the user. Pocket Lobster breaks through that limitation with Manage External Storage, giving both agents direct access to documents, code, images, audio, video, APKs, and other files in shared storage, then allowing them to return the final result directly to a location the user can continue to use. That is the difference between AI merely running on the phone and AI actually doing work on the phone and delivering the result.
+
+That also means Pocket Lobster goes far beyond software development. With dual agents, dual terminals, system access, shared file handling, and network tooling, it can handle document workflows, spreadsheet and PDF processing, bulk text operations, multimedia transcoding, audio and video processing, research retrieval, web scraping, workflow automation, engineering development, and device maintenance. It is not a tool for a single narrow scenario. It is a genuine general-purpose AI workstation that fits in a pocket.
+
+To make those capabilities genuinely usable on a phone, Pocket Lobster also redesigns the interaction layer around Android usage. The new Lobster chat page simplifies the dense configuration model of the classic desktop OpenClaw frontend and adds entry points that are better suited to phone use and accessibility, including a permission management center, prompt profile management, conversation management, model management, and attachment upload. Users can manually manage models, inspect permission state, and map prompt profiles, or simply hand those requests to either agent and let AI do the configuration. For non-technical users, this matters because it compresses tasks that normally require terminal commands into interfaces that can be used directly on the phone.
+
+At the same time, Pocket Lobster does not confine the agents to the local environment. The current build already includes multi-source search, web access, and web automation capability, supporting Baidu, Quark, Bing, Google, DuckDuckGo, Tavily, and more. It is also compatible with the OpenClaw skills ecosystem and MCP expansion. In other words, the two agents do not merely consume local phone resources. They can actively retrieve information from the internet, download files, capture web content, extend their own tooling, and turn the phone into an AI platform that works continuously against real-world tasks.
+
+The most distinctive feature of Pocket Lobster is that it has already demonstrated self-evolution. If either agent is given a GitHub token or an Android development environment, it can directly modify its own source code, trigger cloud workflows, build a new APK, download the result, install the new version, and continue testing, fixing, and iterating with the user. The current stable version itself is the result of long-term collaboration on a real phone between the agents and a visually impaired user who does not write code, through continuous verification, repair, rebuilding, and iteration.
+
+The first stable release of Pocket Lobster proves something important: once AI has sufficiently real tooling, sufficiently broad permission boundaries, and a complete delivery chain, even a small Android phone can become a real production terminal, development terminal, creative terminal, and personal AI workstation.
+
+This is not a reduced version of a desktop experience. It is a real breakthrough in mobile AI infrastructure. Pocket Lobster brings a top-tier coding agent and a top-tier general-purpose agent onto Android together, and for the first time lets them start delivering results for real-world tasks.
