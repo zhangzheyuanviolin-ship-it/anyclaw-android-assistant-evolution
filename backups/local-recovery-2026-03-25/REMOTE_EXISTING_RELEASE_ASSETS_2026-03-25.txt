@@ -1,0 +1,15 @@
+Pocket Lobster Existing Remote Asset Index 2026-03-25
+Repo: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android
+Main README: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/blob/main/README.md
+Project Overview: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/blob/main/docs/pocket-lobster/PROJECT_OVERVIEW_2026-03-25.md
+First Release Copy: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/blob/main/docs/pocket-lobster/FIRST_RELEASE_COPY_2026-03-25.md
+Recovery Archive Release: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/tag/recovery-archive-2026-03-25-r1
+Runtime Assets Release: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/tag/runtime-assets-2026-03-19-r1
+Runtime Asset URL openclaw_installed_2026_3_2.tar.gz: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/runtime-assets-2026-03-19-r1/openclaw_installed_2026_3_2.tar.gz
+Runtime Asset URL davey.android-arm64.node: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/runtime-assets-2026-03-19-r1/davey.android-arm64.node
+Release v157 APK: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/v157/anyclaw.apk
+Release v158 APK: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/v158/anyclaw.apk
+Release v159 APK: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/v159/anyclaw.apk
+Release v160 APK: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/v160/anyclaw.apk
+Release v161 Sidecar APK: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/v161/anyclaw.apk
+Release v162 Sidecar Fix APK: https://github.com/zhangzheyuanviolin-ship-it/pocket-lobster-android/releases/download/v162/anyclaw.apk

@@ -1,0 +1,24 @@
+Directory purpose:
+apk = recovered installable packages and convenient aliases
+artifacts = GitHub Actions artifact zip archives for runs 157-160
+runtime_assets = runtime release assets used by recent builds
+source_snapshots = exact git archive snapshots recovered by commit SHA
+metadata = release json, workflow run json, hashes, mappings, inventory notes
+source_metadata = commit show output, build.gradle snapshots, branch lineage notes
+
+Version mapping:
+GitHub release v157 -> internal app v161 -> commit b068425e0f629bc9244451f2565179eae2f382a8
+GitHub release v158 -> internal app v161 -> commit b068425e0f629bc9244451f2565179eae2f382a8
+GitHub release v159 -> internal app v162 -> commit 4f6077af4a840476b98d42c36e69df9ce04b3bd5
+GitHub release v160 -> internal app v163 -> commit 7a038e6a6273a556d9ac79420502a0cf88bf0b11
+Current installed package on device -> internal app v162 -> exact binary match with release v159 APK
+There is no separate remote release named v163; the recoverable APK for internal v163 is release_v160_internal_v163_anyclaw.apk
+
+Recovered exact source snapshots:
+source_v157_v158_internal_v161_commit_b068425.zip
+source_v159_internal_v162_commit_4f6077a.zip
+source_v160_internal_v163_commit_7a038e6.zip
+source_v163_exact_commit_7a038e6.zip
+
+Recommended development baseline:
+Use internal v162 commit 4f6077af4a840476b98d42c36e69df9ce04b3bd5 as the first stable-release candidate baseline because it exactly matches the currently installed app that the user considers stable.

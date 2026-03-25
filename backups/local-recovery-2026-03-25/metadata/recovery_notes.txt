@@ -1,0 +1,7 @@
+release_v157_internal_v161_anyclaw.apk = GitHub release v157, internal app version v161, commit b068425e0f629bc9244451f2565179eae2f382a8
+release_v158_internal_v161_anyclaw.apk = GitHub release v158, internal app version v161, commit b068425e0f629bc9244451f2565179eae2f382a8
+release_v159_internal_v162_anyclaw.apk = GitHub release v159, internal app version v162, commit 4f6077af4a840476b98d42c36e69df9ce04b3bd5
+release_v160_internal_v163_anyclaw.apk = GitHub release v160, internal app version v163, commit 7a038e6a6273a556d9ac79420502a0cf88bf0b11
+recovered_internal_v162_exact_installed_anyclaw.apk = copied from currently installed package com.codex.mobile.pocketlobster.test versionCode 162 versionName 0.4.06-beta-v162-testpkg-codex-ubuntu-cmdroute-p1
+Binary comparison result: release_v159_internal_v162_anyclaw.apk exactly matches recovered_internal_v162_exact_installed_anyclaw.apk
+There is no separate remote GitHub release named v163; the recoverable APK whose internal version is v163 is release_v160_internal_v163_anyclaw.apk

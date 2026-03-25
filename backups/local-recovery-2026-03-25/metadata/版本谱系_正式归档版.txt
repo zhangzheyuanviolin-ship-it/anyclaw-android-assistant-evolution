@@ -1,0 +1,19 @@
+口袋大龙虾 正式归档版版本谱系
+生成日期：2026-03-25
+
+稳定联络通道包名：com.codex.mobile.pocketlobster.test
+建议内部测试通道包名：com.codex.mobile.pocketlobster.beta
+建议正式发布通道包名：com.codex.mobile.pocketlobster
+
+release v157 -> internal v161 -> commit b068425e0f629bc9244451f2565179eae2f382a8 -> apk/release_v157_internal_v161_anyclaw.apk
+release v158 -> internal v161 -> commit b068425e0f629bc9244451f2565179eae2f382a8 -> apk/release_v158_internal_v161_anyclaw.apk
+release v159 -> internal v162 -> commit 4f6077af4a840476b98d42c36e69df9ce04b3bd5 -> apk/release_v159_internal_v162_anyclaw.apk
+release v160 -> internal v163 -> commit 7a038e6a6273a556d9ac79420502a0cf88bf0b11 -> apk/release_v160_internal_v163_anyclaw.apk
+recovered installed package -> internal v162 exact -> apk/recovered_internal_v162_exact_installed_anyclaw.apk
+release v161 sidecar verify -> internal sidecar verify baseline -> apk/cloud_run161_sidecar_v162_verify.apk
+release v162 sidecar fix -> stable verified sidecar baseline -> commit 84f3bbdcf1735e6eb8def5d38c069b44f48dbe9d -> apk/cloud_run162_sidecar_v163_codex_ubuntu_fix.apk
+
+源码快照目录：source_snapshots
+运行时资产目录：runtime_assets
+工作流产物目录：artifacts
+元数据目录：metadata
