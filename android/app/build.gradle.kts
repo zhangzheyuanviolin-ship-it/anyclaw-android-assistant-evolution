@@ -39,7 +39,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.codex.mobile.pocketlobster.test"
+        applicationId = "com.codex.mobile.pocketlobster.v162verify"
         minSdk = 24
         // targetSdk 28 allows executing binaries from app data directory.
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
