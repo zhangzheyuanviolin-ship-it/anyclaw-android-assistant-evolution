@@ -3638,11 +3638,65 @@ EOF
         if (configFile.exists()) {
             val current = configFile.readText()
             if (current.contains("approval_policy") && current.contains("danger-full-access")) {
+                ensureShellInitFiles(paths)
                 return
             }
         }
         configFile.writeText(desired)
+        ensureShellInitFiles(paths)
         Log.i(TAG, "Wrote full-access config to $configFile")
+    }
+
+    private fun ensureShellInitFiles(paths: BootstrapInstaller.Paths) {
+        val runtimeBinDir = "${paths.homeDir}/.openclaw-android/linux-runtime/bin"
+        val shellBlock = """
+            export HOME="${paths.homeDir}"
+            export PREFIX="${paths.prefixDir}"
+            export TERMUX_PREFIX="${paths.prefixDir}"
+            export TERMUX__PREFIX="${paths.prefixDir}"
+            export TMPDIR="${paths.tmpDir}"
+            export TMP="${paths.tmpDir}"
+            export TEMP="${paths.tmpDir}"
+            export PROOT_TMP_DIR="${paths.tmpDir}"
+            export ANYCLAW_UBUNTU_BIN="$runtimeBinDir/ubuntu-shell.sh"
+            case ":${'$'}PATH:" in
+              *":$runtimeBinDir:"*) ;;
+              *) export PATH="$runtimeBinDir:${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin${'$'}{PATH:+:${'$'}PATH}" ;;
+            esac
+            [ -f "${'$'}HOME/.config/codex/secrets/github_token.env" ] && . "${'$'}HOME/.config/codex/secrets/github_token.env"
+        """.trimIndent()
+
+        upsertManagedShellBlock(File(paths.homeDir, ".profile"), shellBlock)
+        upsertManagedShellBlock(File(paths.homeDir, ".bashrc"), shellBlock)
+        upsertManagedShellBlock(
+            File(paths.homeDir, ".bash_profile"),
+            "[ -f \"${'$'}HOME/.profile\" ] && . \"${'$'}HOME/.profile\"",
+        )
+    }
+
+    private fun upsertManagedShellBlock(file: File, body: String) {
+        val startMarker = "# >>> anyclaw-managed-shell >>>"
+        val endMarker = "# <<< anyclaw-managed-shell <<<"
+        val block = "$startMarker\n${body.trim()}\n$endMarker\n"
+        val existing = if (file.exists()) file.readText() else ""
+
+        val updated = if (existing.contains(startMarker) && existing.contains(endMarker)) {
+            val startIndex = existing.indexOf(startMarker)
+            val endIndex = existing.indexOf(endMarker, startIndex)
+            if (startIndex >= 0 && endIndex >= startIndex) {
+                val suffixStart = endIndex + endMarker.length
+                existing.substring(0, startIndex) + block + existing.substring(suffixStart).trimStart('\n')
+            } else {
+                existing.trimEnd() + if (existing.isBlank()) "" else "\n" + block
+            }
+        } else {
+            existing.trimEnd() + if (existing.isBlank()) "" else "\n" + block
+        }
+
+        if (updated != existing) {
+            file.parentFile?.mkdirs()
+            file.writeText(updated.trimEnd() + "\n")
+        }
     }
 
     private fun ensureObject(parent: JSONObject, key: String): JSONObject {

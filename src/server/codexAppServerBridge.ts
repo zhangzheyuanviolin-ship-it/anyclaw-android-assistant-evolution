@@ -11,6 +11,10 @@ const shellPath = prefixBin ? join(prefixBin, 'sh') : '/bin/sh'
 const homeDir = process.env.HOME ?? ''
 const promptInjectionPath = homeDir ? join(homeDir, '.openclaw-android', 'state', 'prompt-injection.json') : ''
 const shizukuStatusPath = homeDir ? join(homeDir, '.openclaw-android', 'capabilities', 'shizuku.json') : ''
+const offlineLinuxRuntimePath = homeDir
+  ? join(homeDir, '.openclaw-android', 'state', 'offline-linux-runtime.json')
+  : ''
+const runtimeHealthPath = homeDir ? join(homeDir, '.openclaw-android', 'state', 'runtime-health.json') : ''
 const OPENCLAW_UPLOAD_DIR = homeDir
   ? join(homeDir, '.openclaw', 'workspace', 'uploads')
   : join(process.cwd(), '.openclaw', 'workspace', 'uploads')
@@ -1427,6 +1431,35 @@ function buildCapabilitySummary(statusRecord: Record<string, unknown> | null): s
   return `Current capability snapshot: installed=${installed} running=${running} granted=${granted} enabled=${enabled} executor=${executor} last_error_code=${errorCode} checked_at=${checkedAt}`
 }
 
+function buildRuntimeSummary(
+  runtimeRecord: Record<string, unknown> | null,
+  healthRecord: Record<string, unknown> | null,
+): string {
+  const runtimeVersion = normalizeText(runtimeRecord?.version) || 'missing'
+  const runtimeInstalled = runtimeRecord ? '1' : '0'
+  const runtimeCheckedAt = normalizeText(healthRecord?.checked_at)
+  const runtimeHealthOk = healthRecord?.ok === true ? '1' : '0'
+  const prefixDir = normalizeText(process.env.PREFIX)
+  const runtimeBinDir = homeDir ? join(homeDir, '.openclaw-android', 'linux-runtime', 'bin') : ''
+  const ubuntuBin =
+    normalizeText(process.env.ANYCLAW_UBUNTU_BIN) ||
+    (runtimeBinDir ? join(runtimeBinDir, 'ubuntu-shell.sh') : '')
+  const pathValue = normalizeText(process.env.PATH)
+
+  const lines = [
+    `Current runtime snapshot: offline_linux_installed=${runtimeInstalled} version=${runtimeVersion} runtime_health_ok=${runtimeHealthOk}${runtimeCheckedAt ? ` checked_at=${runtimeCheckedAt}` : ''}`,
+    homeDir ? `Current app home: ${homeDir}` : '',
+    prefixDir ? `Current app prefix: ${prefixDir}` : '',
+    runtimeBinDir ? `Current runtime bin: ${runtimeBinDir}` : '',
+    ubuntuBin ? `Current Ubuntu bridge: ${ubuntuBin}` : '',
+    pathValue ? `Current PATH: ${pathValue}` : '',
+    'Execution chains available in this app: local app shell, Ubuntu runtime shell via ubuntu-shell or ANYCLAW_UBUNTU_BIN, and system-level shell via system-shell.',
+    'If the runtime snapshot above is installed and healthy, do not conclude Ubuntu is missing before verifying it with ubuntu-status, echo $ANYCLAW_UBUNTU_BIN, and ls "$HOME/.openclaw-android/linux-runtime/bin" in the local app shell.',
+  ].filter((line) => line.length > 0)
+
+  return lines.join('\n')
+}
+
 function shouldInjectDeveloperInstructions(method: string): boolean {
   return method === 'thread/start' || method === 'thread/resume'
 }
@@ -1443,6 +1476,8 @@ function mergeDeveloperInstructions(existing: unknown, injected: string): string
 async function buildInjectedDeveloperInstructions(): Promise<string> {
   const promptRecord = await readJsonFile(promptInjectionPath)
   const statusRecord = await readJsonFile(shizukuStatusPath)
+  const runtimeRecord = await readJsonFile(offlineLinuxRuntimePath)
+  const healthRecord = await readJsonFile(runtimeHealthPath)
 
   const chunks: string[] = []
   const promptInstructions = normalizeText(promptRecord?.developer_instructions)
@@ -1458,6 +1493,11 @@ async function buildInjectedDeveloperInstructions(): Promise<string> {
   const capabilitySummary = buildCapabilitySummary(statusRecord)
   if (capabilitySummary) {
     chunks.push(capabilitySummary)
+  }
+
+  const runtimeSummary = buildRuntimeSummary(runtimeRecord, healthRecord)
+  if (runtimeSummary) {
+    chunks.push(runtimeSummary)
   }
 
   return chunks.join('\n\n').trim()
