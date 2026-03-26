@@ -1,0 +1,47 @@
+{
+  "id": "anyclaw-ubuntu-suite",
+  "name": "AnyClaw Ubuntu Suite",
+  "description": "Bundled Ubuntu/proot terminal runtime with diagnostics and persistent session tools for OpenClaw on Android.",
+  "version": "0.3.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "timeoutSeconds": {
+        "type": "number",
+        "minimum": 10,
+        "maximum": 300
+      },
+      "installTimeoutSeconds": {
+        "type": "number",
+        "minimum": 60,
+        "maximum": 3600
+      },
+      "runtimeRoot": {
+        "type": "string"
+      },
+      "runtimeShellPath": {
+        "type": "string"
+      },
+      "runtimeTmpDir": {
+        "type": "string"
+      },
+      "fakeSysdataPath": {
+        "type": "string"
+      },
+      "workspaceRoot": {
+        "type": "string"
+      },
+      "sessionTimeoutSeconds": {
+        "type": "number",
+        "minimum": 30,
+        "maximum": 3600
+      },
+      "maxSessionOutputBytes": {
+        "type": "number",
+        "minimum": 65536,
+        "maximum": 2097152
+      }
+    }
+  }
+}

@@ -106,13 +106,15 @@ class ModelManagerActivity : AppCompatActivity() {
 
         Thread {
             try {
-                val configPayload = callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
+                val configPayload = runCatching {
+                    callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
+                }.getOrNull() ?: JSONObject()
                 configRaw = configPayload.optString("raw", "{}")
                 configBaseHash = configPayload.optString("hash", "")
                 val writableRoot = readWritableConfigRoot(configPayload)
                 val writableRaw = writableRoot.toString()
 
-                val defaultProvider = loadDefaultModelProvider()
+                val defaultProvider = runCatching { loadDefaultModelProvider() }.getOrDefault("")
                 val configuredPrimary = readPrimaryModelId(writableRoot)
                 currentModelId = normalizeCurrentModelId(
                     configuredPrimary.ifEmpty { extractCurrentModel(configPayload) },
@@ -1361,10 +1363,26 @@ class ModelManagerActivity : AppCompatActivity() {
     }
 
     private fun readLatestConfigRoot(): JSONObject {
-        val payload = callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
-        configRaw = payload.optString("raw", configRaw.ifBlank { "{}" })
-        configBaseHash = payload.optString("hash", configBaseHash)
-        return readWritableConfigRoot(payload)
+        val payload = runCatching {
+            callGatewayWithRetry("config.get", JSONObject(), attempts = 8, baseDelayMs = 250)
+        }.getOrNull()
+        if (payload != null) {
+            configRaw = payload.optString("raw", configRaw.ifBlank { "{}" })
+            configBaseHash = payload.optString("hash", configBaseHash)
+            return readWritableConfigRoot(payload)
+        }
+
+        val fallback = File(BootstrapInstaller.getPaths(this).homeDir, ".openclaw/openclaw.json")
+        if (fallback.exists()) {
+            val parsed = runCatching { JSONObject(fallback.readText()) }.getOrNull()
+            if (parsed != null) {
+                configRaw = parsed.toString(2)
+                configBaseHash = ""
+                return parsed
+            }
+        }
+        val created = JSONObject(configRaw.ifBlank { "{}" })
+        return created
     }
 
     private fun readWritableConfigRoot(payload: JSONObject): JSONObject {
@@ -1410,9 +1428,20 @@ class ModelManagerActivity : AppCompatActivity() {
         if (configBaseHash.isNotEmpty()) {
             params.put("baseHash", configBaseHash)
         }
-        val applyResult = callGatewayWithRetry("config.apply", params, attempts = 4, baseDelayMs = 200)
+        val applyResult = runCatching {
+            callGatewayWithRetry("config.apply", params, attempts = 4, baseDelayMs = 200)
+        }.getOrNull()
+        if (applyResult != null) {
+            configRaw = root.toString(2)
+            configBaseHash = applyResult.optString("hash", configBaseHash)
+            return
+        }
+
+        val fallback = File(BootstrapInstaller.getPaths(this).homeDir, ".openclaw/openclaw.json")
+        fallback.parentFile?.mkdirs()
+        fallback.writeText(root.toString(2))
         configRaw = root.toString(2)
-        configBaseHash = applyResult.optString("hash", configBaseHash)
+        configBaseHash = ""
     }
 
     private fun callGatewayWithRetry(

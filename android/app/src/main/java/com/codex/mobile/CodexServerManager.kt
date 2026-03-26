@@ -5,6 +5,7 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.SecureRandom
@@ -23,54 +24,37 @@ class CodexServerManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CodexServerManager"
-        private const val BASE_SERVER_PORT = 18923
-        private const val BASE_PROXY_PORT = 18924
+        const val SERVER_PORT = 18923
+        private const val PROXY_PORT = 18924
         private const val CODEX_VERSION = "0.104.0"
-        private const val BASE_OPENCLAW_GATEWAY_PORT = 18789
-        private const val BASE_OPENCLAW_CONTROL_UI_PORT = 19001
-        private const val ISOLATED_PORT_OFFSET = 10000
-        private const val TEST_PACKAGE_SUFFIX = ".pocketlobster.test"
+        const val OPENCLAW_GATEWAY_PORT = 18789
+        const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
         private const val ANYCLAW_GITHUB_PLUGIN_ID = "anyclaw-github-suite"
         private const val ANYCLAW_DEVICE_PLUGIN_ID = "anyclaw-device-suite"
         private const val ANYCLAW_RUNTIME_PLUGIN_ID = "anyclaw-runtime-suite"
+        private const val ANYCLAW_UBUNTU_PLUGIN_ID = "anyclaw-ubuntu-suite"
         private const val OPENCLAW_TARGET_VERSION = "2026.3.2"
+        private const val OPENCLAW_DAVEY_VERSION = "0.1.10"
+        private const val NPM_REGISTRY_PRIMARY = "https://registry.npmjs.org"
+        private const val NPM_REGISTRY_MIRROR = "https://registry.npmmirror.com"
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT = 60
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_STEP = 40
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MAX = 400
         private const val OPENCLAW_CHAT_HISTORY_MAX_BYTES = 1 * 1024 * 1024
-        private const val OPENCLAW_CONTROL_UI_BOOTSTRAP_MARKER = "anyclaw-mobile-bootstrap-v3"
-
-        @JvmStatic
-        fun useIsolatedPortsForPackage(packageName: String): Boolean =
-            packageName.endsWith(TEST_PACKAGE_SUFFIX)
-
-        @JvmStatic
-        fun serverPortForPackage(packageName: String): Int =
-            if (useIsolatedPortsForPackage(packageName)) BASE_SERVER_PORT + ISOLATED_PORT_OFFSET else BASE_SERVER_PORT
-
-        @JvmStatic
-        fun proxyPortForPackage(packageName: String): Int =
-            if (useIsolatedPortsForPackage(packageName)) BASE_PROXY_PORT + ISOLATED_PORT_OFFSET else BASE_PROXY_PORT
-
-        @JvmStatic
-        fun openClawGatewayPortForPackage(packageName: String): Int =
-            if (useIsolatedPortsForPackage(packageName)) BASE_OPENCLAW_GATEWAY_PORT + ISOLATED_PORT_OFFSET else BASE_OPENCLAW_GATEWAY_PORT
-
-        @JvmStatic
-        fun openClawControlUiPortForPackage(packageName: String): Int =
-            if (useIsolatedPortsForPackage(packageName)) BASE_OPENCLAW_CONTROL_UI_PORT + ISOLATED_PORT_OFFSET else BASE_OPENCLAW_CONTROL_UI_PORT
     }
 
     private var serverProcess: Process? = null
     private var proxyProcess: Process? = null
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
-    val serverPort: Int = serverPortForPackage(context.packageName)
-    val proxyPort: Int = proxyPortForPackage(context.packageName)
-    val openClawGatewayPort: Int = openClawGatewayPortForPackage(context.packageName)
-    val openClawControlUiPort: Int = openClawControlUiPortForPackage(context.packageName)
+
+    /**
+     * Use Android system shell for process bootstrap.
+     * This avoids first-run crashes observed with bootstrap-provided dash.
+     */
+    private fun runtimeShell(): String = "/system/bin/sh"
 
     val isRunning: Boolean
         get() {
@@ -96,7 +80,7 @@ class CodexServerManager(private val context: Context) {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths)
 
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val pb = ProcessBuilder(shell, "-c", command)
         pb.environment().clear()
         pb.environment().putAll(env)
@@ -112,6 +96,40 @@ class CodexServerManager(private val context: Context) {
             line = reader.readLine()
         }
         return proc.waitFor()
+    }
+
+    private fun startProcessLogThread(proc: Process, label: String) {
+        Thread {
+            try {
+                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                    while (true) {
+                        val line =
+                            try {
+                                reader.readLine()
+                            } catch (_: InterruptedIOException) {
+                                Log.i(TAG, "$label reader interrupted during shutdown")
+                                break
+                            } catch (error: Exception) {
+                                Log.w(TAG, "$label reader stopped: ${error.message}")
+                                break
+                            }
+                        if (line == null) break
+                        Log.d(TAG, "[$label] $line")
+                    }
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "$label log thread failed: ${error.message}")
+            } finally {
+                try {
+                    Log.i(TAG, "$label exited with code: ${proc.waitFor()}")
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    Log.i(TAG, "$label wait interrupted")
+                } catch (error: Exception) {
+                    Log.w(TAG, "$label wait failed: ${error.message}")
+                }
+            }
+        }.start()
     }
 
     /**
@@ -350,7 +368,8 @@ WEOF
     fun isOpenClawInstalled(): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val npmRoot = "${paths.prefixDir}/lib/node_modules"
-        return File(npmRoot, "openclaw/package.json").exists()
+        return File(npmRoot, "openclaw/package.json").exists() &&
+            File(npmRoot, "openclaw/openclaw.mjs").exists()
     }
 
     /**
@@ -450,6 +469,12 @@ WEOF
 
         onProgress("Creating header stubs…")
         createHeaderStubs(prefix)
+
+        onProgress("Final toolchain verification…")
+        val finalPreflight = runOpenClawToolchainPreflight(onProgress)
+        if (!finalPreflight) {
+            Log.w(TAG, "OpenClaw dependency toolchain final preflight failed (non-fatal)")
+        }
 
         return true
     }
@@ -701,12 +726,14 @@ H3
         runInPrefix("node $npmCli cache clean --force 2>&1") { Log.d(TAG, "[npm-cache] $it") }
 
         onProgress("Installing OpenClaw (npm)…")
-        val installCode = runInPrefix(
-            "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            onOutput = { onProgress(it) },
-        )
-        if (installCode != 0) {
-            Log.e(TAG, "npm install openclaw failed with code $installCode")
+        if (!installOpenClawPackage(prefix, npmCli, onProgress)) {
+            Log.e(TAG, "npm install openclaw failed after all install channels")
+            return false
+        }
+
+        onProgress("Verifying OpenClaw command wrapper…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            Log.e(TAG, "OpenClaw command wrapper verification failed after install")
             return false
         }
 
@@ -725,6 +752,45 @@ H3
         // and allow device-auth bypass
         onProgress("Patching gateway for Android…")
         patchGatewayForAndroid()
+        onProgress("Repairing OpenClaw native bindings…")
+        if (!ensureOpenClawNativeBinding(onProgress)) {
+            Log.e(TAG, "OpenClaw native binding repair failed during install")
+            return false
+        }
+
+        return isOpenClawInstalled()
+    }
+
+    fun prepareOfflineOpenClawRuntime(onProgress: (String) -> Unit): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+
+        runInPrefix("mkdir -p $prefix/tmp/openclaw ${paths.homeDir}/.openclaw-android/patches ${paths.homeDir}/.openclaw")
+
+        val systemctlStub = File(prefix, "bin/systemctl")
+        if (!systemctlStub.exists()) {
+            systemctlStub.writeText(
+                "#!/system/bin/sh\n" +
+                    "exit 0\n"
+            )
+            systemctlStub.setExecutable(true)
+        }
+
+        onProgress("Verifying OpenClaw command wrapper…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            return false
+        }
+
+        onProgress("Patching OpenClaw paths…")
+        patchOpenClawPaths()
+
+        onProgress("Patching gateway for Android…")
+        patchGatewayForAndroid()
+
+        onProgress("Repairing OpenClaw native bindings…")
+        if (!ensureOpenClawNativeBinding(onProgress)) {
+            return false
+        }
 
         return isOpenClawInstalled()
     }
@@ -743,12 +809,8 @@ H3
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
 
         onProgress("Aligning OpenClaw to stable version $OPENCLAW_TARGET_VERSION…")
-        val code = runInPrefix(
-            "node $npmCli install -g --ignore-scripts openclaw@$OPENCLAW_TARGET_VERSION 2>&1",
-            onOutput = { onProgress(it) },
-        )
-        if (code != 0) {
-            Log.e(TAG, "OpenClaw version alignment failed with code $code")
+        if (!installOpenClawPackage(prefix, npmCli, onProgress)) {
+            Log.e(TAG, "OpenClaw version alignment failed: all install channels exhausted")
             return false
         }
 
@@ -758,10 +820,275 @@ H3
             Log.w(TAG, "koffi rebuild failed after OpenClaw alignment")
         }
 
+        onProgress("Verifying OpenClaw command wrapper…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            Log.e(TAG, "OpenClaw command wrapper verification failed after version alignment")
+            return false
+        }
+
         onProgress("Re-applying OpenClaw Android patches…")
         patchOpenClawPaths()
         patchGatewayForAndroid()
+        onProgress("Repairing OpenClaw native bindings…")
+        if (!ensureOpenClawNativeBinding(onProgress)) {
+            Log.e(TAG, "OpenClaw native binding repair failed during version alignment")
+            return false
+        }
         return isOpenClawInstalled()
+    }
+
+    private fun ensureOpenClawCommandWrapper(onProgress: (String) -> Unit): Boolean {
+        val prefix = BootstrapInstaller.getPaths(context).prefixDir
+        val cmd = """
+            set -eu
+            OPENCLAW_DIR="$prefix/lib/node_modules/openclaw"
+            OPENCLAW_MJS="${'$'}OPENCLAW_DIR/openclaw.mjs"
+            [ -f "${'$'}OPENCLAW_MJS" ] || { echo "openclaw-mjs-missing"; exit 21; }
+
+            cat > "$prefix/bin/openclaw" <<'EOF'
+#!/system/bin/sh
+exec $prefix/bin/node $prefix/lib/node_modules/openclaw/openclaw.mjs "${'$'}@"
+EOF
+            chmod 700 "$prefix/bin/openclaw"
+
+            command -v openclaw >/dev/null 2>&1 || exit 22
+            openclaw --version >/dev/null 2>&1 || exit 23
+            echo "openclaw-wrapper-ready"
+        """.trimIndent()
+        val code = runInPrefix(cmd, onOutput = { onProgress(it) })
+        return code == 0
+    }
+
+    fun ensureOpenClawRuntimeReady(onProgress: (String) -> Unit): Boolean {
+        val prefix = BootstrapInstaller.getPaths(context).prefixDir
+        if (!isOpenClawInstalled()) {
+            onProgress("OpenClaw package not found")
+            return false
+        }
+
+        onProgress("Validating OpenClaw CLI runtime…")
+        if (!ensureOpenClawCommandWrapper(onProgress)) {
+            return false
+        }
+
+        val checkCode = runInPrefix(
+            "openclaw --version >/dev/null 2>&1 && test -f \"$prefix/lib/node_modules/openclaw/openclaw.mjs\"",
+            onOutput = { onProgress(it) },
+        )
+        if (checkCode != 0) {
+            onProgress("OpenClaw CLI runtime check failed")
+            return false
+        }
+        onProgress("OpenClaw CLI runtime ready")
+        return true
+    }
+
+    private fun ensureOpenClawNpmPrerequisites(
+        prefix: String,
+        npmCli: String,
+        onProgress: (String) -> Unit,
+        onLine: ((String) -> Unit)? = null,
+    ): Boolean {
+        onProgress("Preparing npm prerequisites…")
+        val cmd = """
+            set +e
+            export DEBIAN_FRONTEND=noninteractive
+            for t in node npm; do
+              command -v "${'$'}t" >/dev/null 2>&1 || { echo "missing-required:${'$'}t"; exit 31; }
+            done
+
+            missing_extra=""
+            for t in git tar xz; do
+              command -v "${'$'}t" >/dev/null 2>&1 || missing_extra="${'$'}missing_extra ${'$'}t"
+            done
+            if [ -n "${'$'}missing_extra" ]; then
+              echo "missing-extra:${'$'}missing_extra"
+              echo "installing-extra:${'$'}missing_extra"
+              apt-get update --allow-insecure-repositories 2>&1 || true
+              apt-get install -y --allow-unauthenticated git tar xz-utils 2>&1 || true
+              pkg install -y git tar xz-utils 2>&1 || true
+
+              mkdir -p "$prefix/tmp/_npm_prereq_stage"
+              cd "$prefix/tmp" || true
+              rm -f git*.deb tar*.deb xz-utils*.deb 2>/dev/null || true
+              apt-get download --allow-unauthenticated git 2>&1 || true
+              apt-get download --allow-unauthenticated tar 2>&1 || true
+              apt-get download --allow-unauthenticated xz-utils 2>&1 || true
+              for deb in git*.deb tar*.deb xz-utils*.deb; do
+                [ -f "${'$'}deb" ] && dpkg-deb -x "${'$'}deb" _npm_prereq_stage/ 2>&1 || true
+              done
+              if [ -d "_npm_prereq_stage/data/data/com.termux/files/usr" ]; then
+                cp -a _npm_prereq_stage/data/data/com.termux/files/usr/* "$prefix/" 2>&1 || true
+              elif [ -d "_npm_prereq_stage/usr" ]; then
+                cp -a _npm_prereq_stage/usr/* "$prefix/" 2>&1 || true
+              fi
+              rm -rf _npm_prereq_stage git*.deb tar*.deb xz-utils*.deb 2>/dev/null || true
+            fi
+
+            command -v git >/dev/null 2>&1 && echo "extra-ready:git" || echo "extra-missing:git"
+            command -v tar >/dev/null 2>&1 && echo "extra-ready:tar" || echo "extra-missing:tar"
+            command -v xz >/dev/null 2>&1 && echo "extra-ready:xz" || echo "extra-missing:xz"
+
+            node "$npmCli" config set registry "$NPM_REGISTRY_PRIMARY" 2>&1 || true
+            node "$npmCli" cache clean --force 2>&1 || true
+            echo "npm-prerequisites-ready"
+        """.trimIndent()
+        val code = runInPrefix(cmd, onOutput = {
+            onProgress(it)
+            onLine?.invoke(it)
+        })
+        if (code == 0) {
+            patchNpmGitCloneRetryBug(prefix, onProgress, onLine)
+        }
+        return code == 0
+    }
+
+    private fun patchNpmGitCloneRetryBug(
+        prefix: String,
+        onProgress: (String) -> Unit,
+        onLine: ((String) -> Unit)? = null,
+    ): Boolean {
+        val cmd = """
+            set +e
+            SPAWN_JS="$prefix/lib/node_modules/npm/node_modules/@npmcli/git/lib/spawn.js"
+            [ -f "${'$'}SPAWN_JS" ] || { echo "npm-git-spawn-missing"; exit 0; }
+            SPAWN_JS="${'$'}SPAWN_JS" node <<'NODE'
+            const fs = require('fs')
+            const p = process.env.SPAWN_JS
+            let src = fs.readFileSync(p, 'utf8')
+            if (src.includes('anyclaw-git-clone-cleanup')) {
+              console.log('npm-git-spawn-patch:already')
+              process.exit(0)
+            }
+            const needle = "    return spawn(gitPath, args, makeOpts(opts))\\n"
+            if (!src.includes(needle)) {
+              console.log('npm-git-spawn-patch:needle-missing')
+              process.exit(2)
+            }
+            const injected = [
+              "    // anyclaw-git-clone-cleanup",
+              "    try {",
+              "      const cloneIdx = args.indexOf('clone')",
+              "      if (cloneIdx >= 0 && args[cloneIdx + 2]) {",
+              "        require('fs').rmSync(args[cloneIdx + 2], { recursive: true, force: true })",
+              "      }",
+              "    } catch {}",
+              needle.trimEnd(),
+              "",
+            ].join("\\n")
+            src = src.replace(needle, injected)
+            fs.writeFileSync(p, src)
+            console.log('npm-git-spawn-patch:ok')
+            NODE
+        """.trimIndent()
+        val code = runInPrefix(cmd, onOutput = {
+            onProgress(it)
+            onLine?.invoke(it)
+        })
+        return code == 0
+    }
+
+    private fun installOpenClawPackage(
+        prefix: String,
+        npmCli: String,
+        onProgress: (String) -> Unit,
+    ): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val logFile = File(paths.homeDir, ".openclaw-android/state/openclaw-install-last.log")
+        logFile.parentFile?.mkdirs()
+        val diagnostics = StringBuilder()
+        diagnostics.appendLine("===== openclaw-install-start =====")
+        diagnostics.appendLine("targetVersion=$OPENCLAW_TARGET_VERSION")
+
+        if (!ensureOpenClawNpmPrerequisites(
+                prefix = prefix,
+                npmCli = npmCli,
+                onProgress = onProgress,
+                onLine = { diagnostics.appendLine(it) },
+            )
+        ) {
+            diagnostics.appendLine("===== prerequisites-failed =====")
+            logFile.writeText(diagnostics.toString())
+            onProgress("OpenClaw install log saved: ${logFile.absolutePath}")
+            return false
+        }
+
+        val commonInstallPrefix = """
+            export GIT_TERMINAL_PROMPT=0
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf
+            export GIT_CONFIG_VALUE_0=ssh://git@github.com/
+            export GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf
+            export GIT_CONFIG_VALUE_1=git@github.com:
+            export npm_config_fetch_retries=0
+            export npm_config_fetch_retry_mintimeout=1000
+            export npm_config_fetch_retry_maxtimeout=5000
+            rm -rf "${'$'}HOME/.npm/_cacache/tmp/git-clone"* "${'$'}HOME/.npm/_cacache/tmp/tmp"* 2>/dev/null || true
+        """.trimIndent().replace("\n", " && ")
+
+        val attempts = listOf(
+            "default-registry" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-default"
+                rm -rf "${'$'}CACHE_DIR" && mkdir -p "${'$'}CACHE_DIR"
+                $commonInstallPrefix
+                node $npmCli install -g --ignore-scripts --cache "${'$'}CACHE_DIR" openclaw@$OPENCLAW_TARGET_VERSION 2>&1
+            """.trimIndent().replace("\n", " && "),
+            "default-force" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-force"
+                rm -rf "${'$'}CACHE_DIR" && mkdir -p "${'$'}CACHE_DIR"
+                $commonInstallPrefix
+                node $npmCli cache clean --force 2>&1 || true
+                node $npmCli install -g --ignore-scripts --force --cache "${'$'}CACHE_DIR" openclaw@$OPENCLAW_TARGET_VERSION 2>&1
+            """.trimIndent().replace("\n", " && "),
+            "npmmirror-force" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-mirror"
+                rm -rf "${'$'}CACHE_DIR" && mkdir -p "${'$'}CACHE_DIR"
+                $commonInstallPrefix
+                node $npmCli config set registry $NPM_REGISTRY_MIRROR 2>&1 || true
+                node $npmCli cache clean --force 2>&1 || true
+                node $npmCli install -g --ignore-scripts --force --cache "${'$'}CACHE_DIR" openclaw@$OPENCLAW_TARGET_VERSION 2>&1
+            """.trimIndent().replace("\n", " && "),
+            "pack-then-local-install" to """
+                CACHE_DIR="$prefix/tmp/npm-cache-openclaw-pack"
+                rm -rf "${'$'}CACHE_DIR" "$prefix/tmp/openclaw-pack" && mkdir -p "${'$'}CACHE_DIR" "$prefix/tmp/openclaw-pack"
+                $commonInstallPrefix
+                node $npmCli config set registry $NPM_REGISTRY_MIRROR 2>&1 || true
+                node $npmCli pack openclaw@$OPENCLAW_TARGET_VERSION --pack-destination "$prefix/tmp/openclaw-pack" 2>&1
+                PACK_FILE="${'$'}(ls "$prefix/tmp/openclaw-pack"/openclaw-*.tgz 2>/dev/null | head -n 1)"
+                [ -n "${'$'}PACK_FILE" ] || exit 71
+                node $npmCli install -g --ignore-scripts --force --cache "${'$'}CACHE_DIR" "${'$'}PACK_FILE" 2>&1
+            """.trimIndent().replace("\n", " && "),
+        )
+
+        var ok = false
+        for ((index, attempt) in attempts.withIndex()) {
+            val name = attempt.first
+            val cmd = attempt.second
+            onProgress("Installing OpenClaw via $name (${index + 1}/${attempts.size})…")
+            val buffer = StringBuilder()
+            val code = runInPrefix(cmd, onOutput = {
+                onProgress(it)
+                buffer.appendLine(it)
+            })
+            diagnostics.appendLine("===== attempt:$name code:$code =====")
+            diagnostics.append(buffer.toString())
+            if (code == 0 && isOpenClawInstalled()) {
+                ok = true
+                break
+            }
+        }
+
+        // Always restore primary registry so other npm flows stay deterministic.
+        runInPrefix("node $npmCli config set registry $NPM_REGISTRY_PRIMARY 2>&1") {
+            Log.d(TAG, "[npm-registry-reset] $it")
+        }
+
+        if (!ok) {
+            logFile.writeText(diagnostics.toString())
+            onProgress("OpenClaw install log saved: ${logFile.absolutePath}")
+            return false
+        }
+        return true
     }
 
     /**
@@ -779,6 +1106,125 @@ H3
         if (!existing.contains("insteadOf = ssh://git@github.com")) {
             gitconfigFile.appendText("\n$desired\n")
         }
+    }
+
+    /**
+     * OpenClaw 2026.3.x bundles @snazzah/davey, but npm optional dependency
+     * resolution is unreliable in this Android/Termux environment:
+     * process.platform resolves to linux and libc resolves to null, so neither
+     * the Android nor Linux platform package can be installed normally.
+     *
+     * We work around this by:
+     * 1. Patching davey's env-var loader branch so it actually returns the
+     *    explicitly requested .node file instead of discarding it.
+     * 2. Fetching the Android native package tarball with npm pack.
+     * 3. Extracting davey.android-arm64.node into a stable app-private path.
+     */
+    private fun ensureOpenClawNativeBinding(onProgress: (String) -> Unit): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        val openclawDir = "$prefix/lib/node_modules/openclaw"
+        val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+        val nativeDir = "${paths.homeDir}/.openclaw-android/native/davey"
+        val nativeNode = "$nativeDir/davey.android-arm64.node"
+        val cmd = """
+            OPENCLAW_DIR="$openclawDir"
+            NPM_CLI="$npmCli"
+            NATIVE_DIR="$nativeDir"
+            NATIVE_NODE="$nativeNode"
+            DAVEY_JS="${'$'}OPENCLAW_DIR/node_modules/@snazzah/davey/index.js"
+            TMP_PACK_DIR="${paths.homeDir}/.openclaw-android/native/.davey-pack"
+            if [ ! -d "${'$'}OPENCLAW_DIR" ]; then
+              echo "openclaw-dir-missing"
+              exit 0
+            fi
+
+            if [ ! -f "${'$'}DAVEY_JS" ]; then
+              echo "davey-wrapper-missing"
+              exit 1
+            fi
+
+            mkdir -p "${'$'}NATIVE_DIR" "${'$'}TMP_PACK_DIR"
+
+            DAVEY_JS="${'$'}DAVEY_JS" node <<'NODE'
+            const fs = require('fs')
+            const path = process.env.DAVEY_JS
+            let src = fs.readFileSync(path, 'utf8')
+            const before = '      nativeBinding = require(process.env.NAPI_RS_NATIVE_LIBRARY_PATH);'
+            const after = '      return require(process.env.NAPI_RS_NATIVE_LIBRARY_PATH)'
+            if (src.includes(after)) {
+              console.log('davey-loader-patched:already')
+              process.exit(0)
+            }
+            if (!src.includes(before)) {
+              console.log('davey-loader-patched:pattern-missing')
+              process.exit(2)
+            }
+            src = src.replace(before, after)
+            fs.writeFileSync(path, src)
+            console.log('davey-loader-patched:ok')
+            NODE
+            patch_code="${'$'}?"
+            if [ "${'$'}patch_code" -ne 0 ] && [ "${'$'}patch_code" -ne 2 ]; then
+              exit "${'$'}patch_code"
+            fi
+            if [ "${'$'}patch_code" -eq 2 ]; then
+              echo "davey-loader-patched:pattern-missing"
+              exit 1
+            fi
+
+            if [ -f "${'$'}NATIVE_NODE" ]; then
+              echo "davey-native-ready:cached"
+              exit 0
+            fi
+
+            rm -rf "${'$'}TMP_PACK_DIR/package" "${'$'}TMP_PACK_DIR"/snazzah-davey-android-arm64-*.tgz 2>/dev/null
+            echo "davey-pack-fetch:@snazzah/davey-android-arm64@$OPENCLAW_DAVEY_VERSION"
+            node "${'$'}NPM_CLI" pack "@snazzah/davey-android-arm64@$OPENCLAW_DAVEY_VERSION" --pack-destination "${'$'}TMP_PACK_DIR" 2>&1 || true
+
+            PACK_FILE="${'$'}(ls "${'$'}TMP_PACK_DIR"/snazzah-davey-android-arm64-*.tgz 2>/dev/null | head -n 1)"
+            if [ -z "${'$'}PACK_FILE" ]; then
+              echo "davey-pack-missing"
+              exit 1
+            fi
+
+            python3 - <<'PY'
+            import os
+            import sys
+            import tarfile
+            pack_file = os.environ.get('PACK_FILE', '')
+            out_dir = os.environ.get('TMP_PACK_DIR', '')
+            if not pack_file or not out_dir:
+                print('davey-python-extract-env-missing')
+                sys.exit(1)
+            try:
+                with tarfile.open(pack_file, 'r:gz') as tf:
+                    tf.extractall(out_dir)
+                print('davey-python-extract:ok')
+            except Exception as error:
+                print(f'davey-python-extract:error:{error}')
+                sys.exit(1)
+            PY
+            if [ ! -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" ]; then
+              echo "davey-node-missing"
+              exit 1
+            fi
+
+            cp -f "${'$'}TMP_PACK_DIR/package/davey.android-arm64.node" "${'$'}NATIVE_NODE"
+            chmod 700 "${'$'}NATIVE_NODE" 2>/dev/null || true
+            echo "davey-native-ready:installed"
+            exit 0
+        """.trimIndent()
+
+        val code = runInPrefix(cmd) {
+            Log.d(TAG, "[openclaw-davey] $it")
+            onProgress(it)
+        }
+        if (code != 0) {
+            Log.w(TAG, "OpenClaw native binding repair failed with code=$code")
+            return false
+        }
+        return true
     }
 
     /**
@@ -953,8 +1399,8 @@ H3
         controlUi.put(
             "allowedOrigins",
             JSONArray()
-                .put("http://127.0.0.1:$openClawControlUiPort")
-                .put("http://localhost:$openClawControlUiPort"),
+                .put("http://127.0.0.1:$OPENCLAW_CONTROL_UI_PORT")
+                .put("http://localhost:$OPENCLAW_CONTROL_UI_PORT"),
         )
         controlUi.put("allowInsecureAuth", true)
         controlUi.put("dangerouslyDisableDeviceAuth", false)
@@ -1009,10 +1455,11 @@ H3
             vector.remove("extensionPath")
         }
 
-        ensurePocketLobsterSearchPlugin(paths.homeDir)
-        ensurePocketLobsterGithubPlugin(paths.homeDir)
-        ensurePocketLobsterDevicePlugin(paths.homeDir)
-        ensurePocketLobsterRuntimePlugin(paths.homeDir)
+        ensureAnyClawSearchPlugin(paths.homeDir)
+        ensureAnyClawGithubPlugin(paths.homeDir)
+        ensureAnyClawDevicePlugin(paths.homeDir)
+        ensureAnyClawRuntimePlugin(paths.homeDir)
+        ensureAnyClawUbuntuPlugin(paths.homeDir)
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
@@ -1025,8 +1472,8 @@ H3
         if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
-        if (configuredUa.isEmpty() || configuredUa.contains("SearchSuite/1.")) {
-            searchSuiteConfig.put("userAgent", "PocketLobsterSearchSuite/1.4")
+        if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
+            searchSuiteConfig.put("userAgent", "AnyClawSearchSuite/1.4")
         }
 
         val githubSuiteEntry = ensureObject(entries, ANYCLAW_GITHUB_PLUGIN_ID)
@@ -1038,16 +1485,16 @@ H3
         if (!githubSuiteConfig.has("terminalTimeoutMs")) githubSuiteConfig.put("terminalTimeoutMs", 30000)
         if (!githubSuiteConfig.has("workspaceRoot")) githubSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
         val githubUa = githubSuiteConfig.optString("userAgent", "").trim()
-        if (githubUa.isEmpty() || githubUa.contains("GithubSuite/")) {
-            githubSuiteConfig.put("userAgent", "PocketLobsterGithubSuite/1.0")
+        if (githubUa.isEmpty() || githubUa.startsWith("AnyClawGithubSuite/0.")) {
+            githubSuiteConfig.put("userAgent", "AnyClawGithubSuite/1.0")
         }
 
         val deviceSuiteEntry = ensureObject(entries, ANYCLAW_DEVICE_PLUGIN_ID)
         deviceSuiteEntry.put("enabled", true)
         val deviceSuiteConfig = ensureObject(deviceSuiteEntry, "config")
         if (!deviceSuiteConfig.has("timeoutSeconds")) deviceSuiteConfig.put("timeoutSeconds", 20)
-        if (!deviceSuiteConfig.has("screenshotDir")) deviceSuiteConfig.put("screenshotDir", "/sdcard/Download/PocketLobsterShots")
-        if (!deviceSuiteConfig.has("uiDumpPath")) deviceSuiteConfig.put("uiDumpPath", "/sdcard/Download/PocketLobsterShots/ui_dump.xml")
+        if (!deviceSuiteConfig.has("screenshotDir")) deviceSuiteConfig.put("screenshotDir", "/sdcard/Download/AnyClawShots")
+        if (!deviceSuiteConfig.has("uiDumpPath")) deviceSuiteConfig.put("uiDumpPath", "/sdcard/Download/AnyClawShots/ui_dump.xml")
         if (!deviceSuiteConfig.has("maxUiNodes")) deviceSuiteConfig.put("maxUiNodes", 180)
         if (!deviceSuiteConfig.has("inputVerifyReadback")) deviceSuiteConfig.put("inputVerifyReadback", false)
         if (!deviceSuiteConfig.has("inputImePriority")) {
@@ -1063,13 +1510,35 @@ H3
         runtimeSuiteEntry.put("enabled", true)
         val runtimeSuiteConfig = ensureObject(runtimeSuiteEntry, "config")
         if (!runtimeSuiteConfig.has("timeoutSeconds")) runtimeSuiteConfig.put("timeoutSeconds", 30)
-        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$serverPort")
+        if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
         if (!runtimeSuiteConfig.has("runtimeDoctorPath")) {
             runtimeSuiteConfig.put(
                 "runtimeDoctorPath",
                 "${paths.homeDir}/.openclaw/workspace/scripts/runtime-env-doctor.sh",
             )
         }
+
+        val ubuntuSuiteEntry = ensureObject(entries, ANYCLAW_UBUNTU_PLUGIN_ID)
+        ubuntuSuiteEntry.put("enabled", true)
+        val ubuntuSuiteConfig = ensureObject(ubuntuSuiteEntry, "config")
+        if (!ubuntuSuiteConfig.has("timeoutSeconds")) ubuntuSuiteConfig.put("timeoutSeconds", 45)
+        if (!ubuntuSuiteConfig.has("installTimeoutSeconds")) ubuntuSuiteConfig.put("installTimeoutSeconds", 1800)
+        val linuxRuntimePaths = OfflineLinuxRuntimeInstaller.getRuntimePaths(context)
+        if (!ubuntuSuiteConfig.has("runtimeRoot")) {
+            ubuntuSuiteConfig.put("runtimeRoot", linuxRuntimePaths.runtimeRoot.absolutePath)
+        }
+        if (!ubuntuSuiteConfig.has("runtimeShellPath")) {
+            ubuntuSuiteConfig.put("runtimeShellPath", linuxRuntimePaths.shellScript.absolutePath)
+        }
+        if (!ubuntuSuiteConfig.has("runtimeTmpDir")) {
+            ubuntuSuiteConfig.put("runtimeTmpDir", linuxRuntimePaths.tmpDir.absolutePath)
+        }
+        if (!ubuntuSuiteConfig.has("fakeSysdataPath")) {
+            ubuntuSuiteConfig.put("fakeSysdataPath", linuxRuntimePaths.fakeSysdataScript.absolutePath)
+        }
+        if (!ubuntuSuiteConfig.has("workspaceRoot")) ubuntuSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
+        if (!ubuntuSuiteConfig.has("sessionTimeoutSeconds")) ubuntuSuiteConfig.put("sessionTimeoutSeconds", 600)
+        if (!ubuntuSuiteConfig.has("maxSessionOutputBytes")) ubuntuSuiteConfig.put("maxSessionOutputBytes", 524288)
 
         val allow = plugins.optJSONArray("allow")
         if (allow != null && allow.length() > 0) {
@@ -1084,6 +1553,9 @@ H3
             }
             if (!jsonArrayContains(allow, ANYCLAW_RUNTIME_PLUGIN_ID)) {
                 allow.put(ANYCLAW_RUNTIME_PLUGIN_ID)
+            }
+            if (!jsonArrayContains(allow, ANYCLAW_UBUNTU_PLUGIN_ID)) {
+                allow.put(ANYCLAW_UBUNTU_PLUGIN_ID)
             }
         }
 
@@ -1235,14 +1707,26 @@ H3
                 openClawGatewayProcess!!.exitValue()
                 openClawGatewayProcess = null
             } catch (_: IllegalThreadStateException) {
-                Log.i(TAG, "OpenClaw gateway already running")
-                return true
+                if (isOpenClawGatewayResponsive()) {
+                    Log.i(TAG, "OpenClaw gateway already running and responsive")
+                    return true
+                }
+                Log.w(TAG, "Gateway process is alive but not responsive; restarting")
+                try {
+                    openClawGatewayProcess?.destroyForcibly()
+                } catch (_: Exception) {
+                }
+                openClawGatewayProcess = null
+                Thread.sleep(320)
             }
         }
 
         val paths = BootstrapInstaller.getPaths(context)
         sanitizeHeartbeatConfigOnDisk(paths.homeDir)
         ensureOpenClawGatewayHistoryByteCap()
+        if (!ensureOpenClawNativeBinding { Log.d(TAG, "[openclaw-davey] $it") }) {
+            Log.w(TAG, "OpenClaw native binding repair failed before gateway startup; continuing because gateway can still run without the preflight cache")
+        }
 
         // Kill any orphaned gateway processes and reset all device tokens.
         runInPrefix("""
@@ -1255,7 +1739,7 @@ H3
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 if echo "${'$'}cmdline" | grep -q "openclaw gateway run"; then
                     kill -9 ${'$'}pid 2>/dev/null
-                elif echo "${'$'}cmdline" | grep -q "${openClawGatewayPort}"; then
+                elif echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}"; then
                     kill -9 ${'$'}pid 2>/dev/null
                 fi
             done
@@ -1269,9 +1753,15 @@ H3
             echo "Gateway state cleaned"
         """.trimIndent()) { Log.d(TAG, "[openclaw-gw] $it") }
 
-        val env = buildEnvironment(paths)
-        val shell = "${paths.prefixDir}/bin/sh"
-        val cmd = "exec openclaw gateway run --force --port $openClawGatewayPort 2>&1"
+        val env = buildEnvironment(paths).toMutableMap()
+        // Keep OpenClaw isolated from Termux preloads so Ubuntu runtime tools
+        // don't inherit a broken applet/linker context.
+        env.remove("LD_PRELOAD")
+        env.remove("TERMUX_PREFIX")
+        env.remove("TERMUX__PREFIX")
+        env["OPENCLAW_UBUNTU_ISOLATED"] = "1"
+        val shell = runtimeShell()
+        val cmd = "exec openclaw gateway run --force --port $OPENCLAW_GATEWAY_PORT 2>&1"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
         pb.environment().clear()
@@ -1281,103 +1771,44 @@ H3
 
         val proc = pb.start()
         openClawGatewayProcess = proc
-
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[openclaw-gw] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "OpenClaw gateway exited with code: ${proc.waitFor()}")
-        }.start()
+        startProcessLogThread(proc, "openclaw-gw")
 
         // Heartbeat bootstrap must not depend on a short fixed gateway warmup window.
         // Run it asynchronously with retries so slow startups still get cron/task registration.
         ensureHeartbeatBootstrapAsync(paths.homeDir)
 
-        Thread.sleep(1200)
-        if (isOpenClawGatewayResponsive()) {
-            Log.i(TAG, "OpenClaw gateway started on port $openClawGatewayPort")
+        if (waitForOpenClawGatewayReady(proc, timeoutMs = 22_000L, pollMs = 520L)) {
+            Log.i(TAG, "OpenClaw gateway started on port $OPENCLAW_GATEWAY_PORT")
             return true
         }
 
         Log.w(TAG, "OpenClaw gateway process launched but not responsive yet")
-        return false
-    }
-
-    private fun stopTrackedOpenClawControlUiProcess() {
-        val proc = openClawControlUiProcess ?: return
-        openClawControlUiProcess = null
-        try {
-            proc.destroy()
-            proc.waitFor(400, TimeUnit.MILLISECONDS)
-            if (proc.isAlive) proc.destroyForcibly()
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun killOrphanOpenClawControlUiProcesses(paths: BootstrapInstaller.Paths) {
-        runInPrefix(
-            """
-            for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
-                [ "${'$'}pid" = "${'$'}${'$'}" ] && continue
-                [ "${'$'}pid" = "${'$'}PPID" ] && continue
-                cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
-                echo "${'$'}cmdline" | grep -q "openclaw/dist/control-ui" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "Control UI on port ${openClawControlUiPort}" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${openClawControlUiPort}" && echo "${'$'}cmdline" | grep -q "node -e" && kill -9 ${'$'}pid 2>/dev/null
-            done
-            rm -f ${paths.prefixDir}/tmp/openclaw*/control-ui.pid ${paths.prefixDir}/tmp/openclaw/control-ui.pid 2>/dev/null
-            """.trimIndent(),
-        ) { Log.d(TAG, "[openclaw-ui-clean] $it") }
-    }
-
-    private fun waitForOpenClawControlUiReady(timeoutMs: Long = 12_000): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        val url =
-            URL(
-                "http://127.0.0.1:$openClawControlUiPort/chat?" +
-                    "gatewayUrl=ws://127.0.0.1:$openClawGatewayPort&simple=1&probe=1",
-            )
-        while (System.currentTimeMillis() < deadline) {
-            val proc = openClawControlUiProcess
-            if (proc != null && !proc.isAlive) return false
-            try {
-                val conn = (url.openConnection() as HttpURLConnection)
-                conn.connectTimeout = 1500
-                conn.readTimeout = 2000
-                conn.requestMethod = "GET"
-                conn.instanceFollowRedirects = true
-                val code = conn.responseCode
-                val stream = try {
-                    conn.inputStream
-                } catch (_: Exception) {
-                    conn.errorStream
-                }
-                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                conn.disconnect()
-                if (code in 200..399 && body.contains(OPENCLAW_CONTROL_UI_BOOTSTRAP_MARKER)) {
-                    return true
-                }
-            } catch (_: Exception) {
-                // Retry until timeout.
-            }
-            Thread.sleep(350)
-        }
+        logOpenClawGatewayDiagnostics("start-not-responsive")
         return false
     }
 
     /**
      * Start a lightweight Node.js static file server to serve the OpenClaw
-     * Control UI on [openClawControlUiPort]. The UI assets live inside
+     * Control UI on [OPENCLAW_CONTROL_UI_PORT]. The UI assets live inside
      * the installed openclaw npm package at dist/control-ui/.
      */
     fun startOpenClawControlUiServer(): Boolean {
-        stopTrackedOpenClawControlUiProcess()
+        if (openClawControlUiProcess != null) {
+            try {
+                openClawControlUiProcess!!.exitValue()
+                openClawControlUiProcess = null
+            } catch (_: IllegalThreadStateException) {
+                Log.i(TAG, "OpenClaw Control UI server already running")
+                return true
+            }
+        }
 
         val paths = BootstrapInstaller.getPaths(context)
-        val env = buildEnvironment(paths)
+        val env = buildEnvironment(paths).toMutableMap()
+        env.remove("LD_PRELOAD")
+        env.remove("TERMUX_PREFIX")
+        env.remove("TERMUX__PREFIX")
+        env["OPENCLAW_UBUNTU_ISOLATED"] = "1"
         val prefix = paths.prefixDir
         val controlUiRoot = "$prefix/lib/node_modules/openclaw/dist/control-ui"
 
@@ -1386,9 +1817,8 @@ H3
             return false
         }
         ensureOpenClawControlUiHistoryPatch(controlUiRoot)
-        killOrphanOpenClawControlUiProcesses(paths)
 
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val serverScript = """
             node -e "
               const http = require('http');
@@ -1411,11 +1841,10 @@ H3
                 '.ico':'image/x-icon',
                 '.woff2':'font/woff2','.woff':'font/woff',
               };
-              const localGatewayUrl = 'ws://127.0.0.1:$openClawGatewayPort';
+              const localGatewayUrl = 'ws://127.0.0.1:$OPENCLAW_GATEWAY_PORT';
               function injectBootstrap(html) {
                 const snippet = '<script>(function(){try{' +
                   'var params=new URLSearchParams(location.search);' +
-                  'window.__anyclawBootstrapRev=\"$OPENCLAW_CONTROL_UI_BOOTSTRAP_MARKER\";' +
                   'var pref=params.get(\"localePref\")||localStorage.getItem(\"anyclaw.ui.localePref\")||\"system\";' +
                   'localStorage.setItem(\"anyclaw.ui.localePref\",pref);' +
                   'var nav=(navigator.language||\"\").toLowerCase();' +
@@ -1429,18 +1858,9 @@ H3
                   'if(typeof settings.chatFocusMode!==\"boolean\"){settings.chatFocusMode=true;}' +
                   'if(typeof settings.navCollapsed!==\"boolean\"){settings.navCollapsed=true;}' +
                   'var sessionFromUrl=params.get(\"session\");' +
-                  'var simpleFromUrl=params.get(\"simple\");' +
                   'if(sessionFromUrl&&sessionFromUrl.trim()){settings.sessionKey=sessionFromUrl.trim();settings.lastActiveSessionKey=sessionFromUrl.trim();}' +
                   'settings.locale=locale;' +
                   'settings.theme=settings.theme||\"system\";' +
-                  'if(typeof settings.chatShowThinking!==\"boolean\"){settings.chatShowThinking=false;}' +
-                  'if(simpleFromUrl===\"0\"||simpleFromUrl===\"1\"){settings.chatShowThinking=(simpleFromUrl===\"0\");}' +
-                  'var tokenFromUrl=params.get(\"token\");' +
-                  'var targetGateway=\"ws://127.0.0.1:$openClawGatewayPort\";' +
-                  'var isLoopback=function(v){return /^wss?:\\/\\/(127\\.0\\.0\\.1|localhost)(:\\d+)?(\\/|$)/i.test(String(v||\"\").trim());};' +
-                  'var currentGateway=String(settings.gatewayUrl||\"\").trim();' +
-                  'if(!currentGateway||isLoopback(currentGateway)){settings.gatewayUrl=targetGateway;}' +
-                  'if(tokenFromUrl&&tokenFromUrl.trim()){settings.token=tokenFromUrl.trim();}' +
                   'localStorage.setItem(settingsKey,JSON.stringify(settings));' +
                   'var isZh=locale===\"zh-CN\";' +
                   'var HISTORY_DEFAULT=${OPENCLAW_CHAT_HISTORY_LIMIT_DEFAULT},HISTORY_STEP=${OPENCLAW_CHAT_HISTORY_LIMIT_STEP},HISTORY_MIN=${OPENCLAW_CHAT_HISTORY_LIMIT_MIN},HISTORY_MAX=${OPENCLAW_CHAT_HISTORY_LIMIT_MAX};' +
@@ -1452,17 +1872,15 @@ H3
                   'function replaceFirstTextNode(el,next){if(!el){return;}for(var i=0;i<el.childNodes.length;i++){var n=el.childNodes[i];if(n&&n.nodeType===3){n.nodeValue=\" \"+next+\" \";return;}}if(!el.children||el.children.length===0){el.textContent=next;}}' +
                   'function normalizeSpace(text){var s=(text||\"\");return s.replace(/\\s+/g,\" \").trim();}' +
                   'function installHistoryControls(){var wrap=document.getElementById(\"anyclaw-history-controls\");if(!wrap){wrap=document.createElement(\"div\");wrap.id=\"anyclaw-history-controls\";wrap.style.position=\"fixed\";wrap.style.left=\"12px\";wrap.style.top=\"56px\";wrap.style.zIndex=\"2147482999\";wrap.style.display=\"flex\";wrap.style.gap=\"8px\";wrap.style.alignItems=\"center\";wrap.style.flexWrap=\"wrap\";wrap.style.maxWidth=\"92vw\";document.body.appendChild(wrap);}wrap.innerHTML=\"\";var current=getHistoryLimit();var more=document.createElement(\"button\");more.type=\"button\";more.textContent=isZh?(\"加载更早历史 +\"+HISTORY_STEP):(\"Load older +\"+HISTORY_STEP);more.style.padding=\"6px 10px\";more.style.borderRadius=\"8px\";more.style.border=\"1px solid rgba(255,255,255,0.25)\";more.style.background=\"rgba(17,24,39,0.88)\";more.style.color=\"#fff\";more.addEventListener(\"click\",function(){var next=setHistoryLimit(current+HISTORY_STEP);var u=new URL(location.href);u.searchParams.set(\"historyLimit\",String(next));location.assign(u.toString());});var reset=document.createElement(\"button\");reset.type=\"button\";reset.textContent=isZh?\"恢复轻量\":\"Reset lite\";reset.style.padding=\"6px 10px\";reset.style.borderRadius=\"8px\";reset.style.border=\"1px solid rgba(255,255,255,0.25)\";reset.style.background=\"rgba(17,24,39,0.88)\";reset.style.color=\"#fff\";reset.addEventListener(\"click\",function(){var next=setHistoryLimit(HISTORY_DEFAULT);var u=new URL(location.href);u.searchParams.set(\"historyLimit\",String(next));location.assign(u.toString());});var tip=document.createElement(\"span\");tip.textContent=isZh?(\"历史窗口 \"+current):(\"History window \"+current);tip.style.fontSize=\"12px\";tip.style.padding=\"6px 8px\";tip.style.borderRadius=\"8px\";tip.style.background=\"rgba(17,24,39,0.82)\";tip.style.color=\"#fff\";wrap.appendChild(more);wrap.appendChild(reset);wrap.appendChild(tip);}' +
-                  'function localizeStatic(){if(!isZh){return;}var map={\"New session\":\"新建会话\",\"Send\":\"发送\",\"Queue\":\"排队发送\",\"Stop\":\"停止\",\"Connect\":\"连接\",\"Refresh\":\"刷新\",\"Exit focus mode\":\"退出专注模式\"};document.querySelectorAll(\"button\").forEach(function(btn){var raw=normalizeSpace(btn.textContent||\"\");if(map[raw]){replaceFirstTextNode(btn,map[raw]);}var aria=normalizeSpace(btn.getAttribute(\"aria-label\")||\"\");if(map[aria]){btn.setAttribute(\"aria-label\",map[aria]);}if(aria===\"Remove queued message\"){btn.setAttribute(\"aria-label\",\"移除排队消息\");}var title=normalizeSpace(btn.getAttribute(\"title\")||\"\");if(map[title]){btn.setAttribute(\"title\",map[title]);}});document.querySelectorAll(\"textarea\").forEach(function(el){var p=normalizeSpace(el.getAttribute(\"placeholder\")||\"\");if(p.indexOf(\"Message\")===0||p.indexOf(\"Type a message\")===0){el.setAttribute(\"placeholder\",\"输入消息（回车发送，Shift+回车换行，可粘贴图片）\");}});document.querySelectorAll(\".muted\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t===\"Loading chat…\"){el.textContent=\"正在加载聊天…\";}});document.querySelectorAll(\".chat-queue__title\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Queued (\")===0&&t.endsWith(\")\")){el.textContent=\"排队（\"+t.slice(8,t.length-1)+\"）\";}});document.querySelectorAll(\".chat-new-messages\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"New messages\")===0){el.textContent=\"新消息\";}});document.querySelectorAll(\".exec-approval-title\").forEach(function(el){if(normalizeSpace(el.textContent||\"\")===\"Change Gateway URL\"){el.textContent=\"切换网关地址\";}});document.querySelectorAll(\".exec-approval-sub\").forEach(function(el){if(normalizeSpace(el.textContent||\"\")===\"This will reconnect to a different gateway server\"){el.textContent=\"这会重新连接到新的网关服务\";}});document.querySelectorAll(\".exec-approval-card .callout.danger\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Only confirm if you trust this URL\")===0){el.textContent=\"仅在信任该地址时确认。恶意地址可能导致系统风险。\";}});document.querySelectorAll(\".exec-approval-actions button\").forEach(function(btn){var t=normalizeSpace(btn.textContent||\"\");if(t===\"Confirm\"){replaceFirstTextNode(btn,\"确认\");btn.setAttribute(\"aria-label\",\"确认\");}else if(t===\"Cancel\"){replaceFirstTextNode(btn,\"取消\");btn.setAttribute(\"aria-label\",\"取消\");}});}' +
+                  'function localizeStatic(){if(!isZh){return;}var map={\"New session\":\"新建会话\",\"Send\":\"发送\",\"Queue\":\"排队发送\",\"Stop\":\"停止\",\"Connect\":\"连接\",\"Refresh\":\"刷新\",\"Exit focus mode\":\"退出专注模式\"};document.querySelectorAll(\"button\").forEach(function(btn){var raw=normalizeSpace(btn.textContent||\"\");if(map[raw]){replaceFirstTextNode(btn,map[raw]);}var aria=normalizeSpace(btn.getAttribute(\"aria-label\")||\"\");if(map[aria]){btn.setAttribute(\"aria-label\",map[aria]);}if(aria===\"Remove queued message\"){btn.setAttribute(\"aria-label\",\"移除排队消息\");}var title=normalizeSpace(btn.getAttribute(\"title\")||\"\");if(map[title]){btn.setAttribute(\"title\",map[title]);}});document.querySelectorAll(\"textarea\").forEach(function(el){var p=normalizeSpace(el.getAttribute(\"placeholder\")||\"\");if(p.indexOf(\"Message\")===0){el.setAttribute(\"placeholder\",\"输入消息（回车发送，Shift+回车换行，可粘贴图片）\");}});document.querySelectorAll(\".muted\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t===\"Loading chat…\"){el.textContent=\"正在加载聊天…\";}});document.querySelectorAll(\".chat-queue__title\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"Queued (\")===0&&t.endsWith(\")\")){el.textContent=\"排队（\"+t.slice(8,t.length-1)+\"）\";}});document.querySelectorAll(\".chat-new-messages\").forEach(function(el){var t=normalizeSpace(el.textContent||\"\");if(t.indexOf(\"New messages\")===0){el.textContent=\"新消息\";}});}' +
                   'function makeSessionKey(current){var now=Date.now().toString(36);var key=(current||\"main\").trim();if(key.indexOf(\"agent:\")===0){var parts=key.split(\":\");var agent=(parts.length>1&&parts[1])?parts[1]:\"main\";return \"agent:\"+agent+\":mobile-\"+now;}return \"mobile-\"+now;}' +
                   'function patchChatHistoryRequest(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||typeof app.client.request!==\"function\"){return;}if(app.client.__anyclawReqPatched===\"1\"){return;}var orig=app.client.request.bind(app.client);app.client.request=function(method,params){try{if(method===\"chat.history\"&&params&&typeof params===\"object\"){var capped=getHistoryLimit();var wanted=Number(params.limit);if(!Number.isFinite(wanted)){wanted=capped;}if(wanted>capped){wanted=capped;}params=Object.assign({},params,{limit:wanted});}}catch(_){}return orig(method,params);};app.client.__anyclawReqPatched=\"1\";}' +
                   'function openNewSessionDirect(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.client||!app.connected){return;}var nextKey=makeSessionKey(app.sessionKey);app.client.request(\"sessions.patch\",{key:nextKey,label:\"新会话 \"+new Date().toLocaleString()}).then(function(){var nextUrl=new URL(location.href);nextUrl.searchParams.set(\"session\",nextKey);location.assign(nextUrl.toString());}).catch(function(){if(typeof app.handleSendChat===\"function\"){app.handleSendChat(\"/new\",{restoreDraft:true});}});}' +
                   'function wireNewSessionButton(){document.querySelectorAll(\"button\").forEach(function(btn){var label=normalizeSpace(btn.textContent||\"\");if(label!==\"New session\"&&label!==\"新建会话\"){return;}if(btn.dataset.anyclawNewBound===\"1\"){return;}btn.dataset.anyclawNewBound=\"1\";btn.addEventListener(\"click\",function(ev){try{ev.preventDefault();ev.stopPropagation();if(ev.stopImmediatePropagation){ev.stopImmediatePropagation();}}catch(_){}openNewSessionDirect();},true);if(isZh){replaceFirstTextNode(btn,\"新建会话\");}});}' +
-                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:${serverPort}/?openclawGatewayPort=${openClawGatewayPort}&openclawControlUiPort=${openClawControlUiPort}\";});document.body.appendChild(btn);}' +
-                  'function installTraceToggle(){var id=\"anyclaw-trace-toggle\";var btn=document.getElementById(id);var u=new URL(location.href);var isSimple=u.searchParams.get(\"simple\")!==\"0\";if(!btn){btn=document.createElement(\"button\");btn.id=id;btn.type=\"button\";btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"96px\";btn.style.zIndex=\"2147482998\";btn.style.padding=\"6px 10px\";btn.style.borderRadius=\"8px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.88)\";btn.style.color=\"#fff\";btn.style.fontSize=\"12px\";document.body.appendChild(btn);}btn.textContent=isZh?(isSimple?\"过程显示：关\":\"过程显示：开\"):(isSimple?\"Process view: off\":\"Process view: on\");btn.setAttribute(\"aria-label\",btn.textContent);btn.onclick=function(){var nextSimple=isSimple?\"0\":\"1\";settings.chatShowThinking=(nextSimple===\"0\");try{localStorage.setItem(settingsKey,JSON.stringify(settings));}catch(_){}var next=new URL(location.href);if(!next.searchParams.get(\"gatewayUrl\")){next.searchParams.set(\"gatewayUrl\",targetGateway);}if(settings.token&&!next.searchParams.get(\"token\")){next.searchParams.set(\"token\",settings.token);}next.searchParams.set(\"simple\",nextSimple);location.assign(next.toString());};}' +
-                  'function autoConfirmGatewayUrl(){var app=document.querySelector(\"openclaw-app\");if(!app||!app.pendingGatewayUrl||typeof app.handleGatewayUrlConfirm!==\"function\"){return;}var pending=String(app.pendingGatewayUrl||\"\").trim();if(isLoopback(pending)){try{app.handleGatewayUrlConfirm();}catch(_){}}}' +
-                  'function safeRun(fn){try{fn();}catch(_){}}' +
-                  'function runPatches(){safeRun(patchChatHistoryRequest);safeRun(localizeStatic);safeRun(wireNewSessionButton);safeRun(installBackButton);safeRun(installTraceToggle);safeRun(installHistoryControls);safeRun(autoConfirmGatewayUrl);}' +
-                  'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();var keepAlive=setInterval(runPatches,1200);setTimeout(function(){try{clearInterval(keepAlive);}catch(_){ }},120000);document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
+                  'function installBackButton(){if(document.getElementById(\"anyclaw-back-codex\")){return;}var btn=document.createElement(\"button\");btn.id=\"anyclaw-back-codex\";btn.type=\"button\";btn.textContent=isZh?\"返回 Codex\":\"Back to Codex\";btn.setAttribute(\"aria-label\",btn.textContent);btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"12px\";btn.style.zIndex=\"2147483000\";btn.style.padding=\"8px 12px\";btn.style.borderRadius=\"10px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.85)\";btn.style.color=\"#fff\";btn.style.fontSize=\"13px\";btn.addEventListener(\"click\",function(){location.href=\"http://127.0.0.1:18923/\";});document.body.appendChild(btn);}' +
+                  'function installTraceToggle(){var id=\"anyclaw-trace-toggle\";var btn=document.getElementById(id);var u=new URL(location.href);var isSimple=u.searchParams.get(\"simple\")!==\"0\";if(!btn){btn=document.createElement(\"button\");btn.id=id;btn.type=\"button\";btn.style.position=\"fixed\";btn.style.left=\"12px\";btn.style.top=\"96px\";btn.style.zIndex=\"2147482998\";btn.style.padding=\"6px 10px\";btn.style.borderRadius=\"8px\";btn.style.border=\"1px solid rgba(255,255,255,0.25)\";btn.style.background=\"rgba(17,24,39,0.88)\";btn.style.color=\"#fff\";btn.style.fontSize=\"12px\";document.body.appendChild(btn);}btn.textContent=isZh?(isSimple?\"过程显示：关\":\"过程显示：开\"):(isSimple?\"Process view: off\":\"Process view: on\");btn.setAttribute(\"aria-label\",btn.textContent);btn.onclick=function(){var next=new URL(location.href);next.searchParams.set(\"simple\",isSimple?\"0\":\"1\");location.assign(next.toString());};}' +
+                  'function runPatches(){patchChatHistoryRequest();localizeStatic();wireNewSessionButton();installBackButton();installTraceToggle();installHistoryControls();}' +
+                  'var patchTimer=null;function schedulePatches(){if(patchTimer!==null){return;}patchTimer=setTimeout(function(){patchTimer=null;runPatches();},220);}runPatches();document.addEventListener(\"DOMContentLoaded\",runPatches,{once:true});window.addEventListener(\"load\",runPatches,{once:true});var moRoot=document.body||document.documentElement;if(moRoot){var observeUntil=Date.now()+20000;var mo=new MutationObserver(function(muts){if(Date.now()>observeUntil){mo.disconnect();return;}for(var i=0;i<muts.length;i++){var m=muts[i];if(m&&m.type===\"childList\"&&m.addedNodes&&m.addedNodes.length){schedulePatches();break;}}});mo.observe(moRoot,{childList:true,subtree:true});}' +
                   'var p=location.pathname||\"/\";' +
                   'if(p===\"/\"||p===\"/index.html\"){location.replace(\"/chat\"+location.search+location.hash);return;}' +
                   '}catch(_){}})();</' + 'script>';
@@ -1544,43 +1962,23 @@ H3
                   }
                   sendStatic(res, fp, data);
                 });
-              }).listen($openClawControlUiPort, '127.0.0.1', () => console.log('Control UI on port $openClawControlUiPort'));
+              }).listen($OPENCLAW_CONTROL_UI_PORT, '127.0.0.1', () => console.log('Control UI on port $OPENCLAW_CONTROL_UI_PORT'));
             " 2>&1
         """.trimIndent()
 
-        for (attempt in 1..2) {
-            val pb = ProcessBuilder(shell, "-c", "exec $serverScript")
-            pb.environment().clear()
-            pb.environment().putAll(env)
-            pb.directory(File(paths.homeDir))
-            pb.redirectErrorStream(true)
+        val pb = ProcessBuilder(shell, "-c", "exec $serverScript")
+        pb.environment().clear()
+        pb.environment().putAll(env)
+        pb.directory(File(paths.homeDir))
+        pb.redirectErrorStream(true)
 
-            val proc = pb.start()
-            openClawControlUiProcess = proc
+        val proc = pb.start()
+        openClawControlUiProcess = proc
+        startProcessLogThread(proc, "openclaw-ui")
 
-            Thread {
-                val reader = BufferedReader(InputStreamReader(proc.inputStream))
-                var line = reader.readLine()
-                while (line != null) {
-                    Log.d(TAG, "[openclaw-ui] $line")
-                    line = reader.readLine()
-                }
-                Log.i(TAG, "OpenClaw Control UI server exited with code: ${proc.waitFor()}")
-            }.start()
-
-            if (waitForOpenClawControlUiReady()) {
-                Log.i(TAG, "OpenClaw Control UI server started on port $openClawControlUiPort")
-                return true
-            }
-
-            Log.w(TAG, "OpenClaw Control UI readiness check failed (attempt=$attempt)")
-            stopTrackedOpenClawControlUiProcess()
-            killOrphanOpenClawControlUiProcesses(paths)
-            Thread.sleep(300)
-        }
-
-        Log.e(TAG, "OpenClaw Control UI failed to become ready on port $openClawControlUiPort")
-        return false
+        Thread.sleep(1000)
+        Log.i(TAG, "OpenClaw Control UI server started on port $OPENCLAW_CONTROL_UI_PORT")
+        return true
     }
 
     fun isOpenClawGatewayResponsive(): Boolean {
@@ -1606,8 +2004,8 @@ H3
             for pid in ${'$'}(ls /proc 2>/dev/null | grep '^[0-9]'); do
                 cmdline=${'$'}(cat /proc/${'$'}pid/cmdline 2>/dev/null | tr '\0' ' ')
                 echo "${'$'}cmdline" | grep -q "openclaw gateway run" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${openClawGatewayPort}" && kill -9 ${'$'}pid 2>/dev/null
-                echo "${'$'}cmdline" | grep -q "${openClawControlUiPort}" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${OPENCLAW_GATEWAY_PORT}" && kill -9 ${'$'}pid 2>/dev/null
+                echo "${'$'}cmdline" | grep -q "${OPENCLAW_CONTROL_UI_PORT}" && kill -9 ${'$'}pid 2>/dev/null
             done
             rm -f ${paths.prefixDir}/tmp/openclaw*/gateway.lock ${paths.prefixDir}/tmp/openclaw*/gateway.pid 2>/dev/null
             rm -f ${paths.prefixDir}/tmp/openclaw/gateway.lock ${paths.prefixDir}/tmp/openclaw/gateway.pid 2>/dev/null
@@ -1620,11 +2018,68 @@ H3
 
     fun reconnectOpenClawGateway(): Boolean {
         configureOpenClawAuth()
-        val gatewayOk = startOpenClawGateway()
-        if (!gatewayOk) return false
+        var gatewayOk = startOpenClawGateway()
+        if (!gatewayOk) {
+            Log.w(TAG, "Gateway first reconnect attempt failed; retrying once")
+            disconnectOpenClawGateway()
+            Thread.sleep(460)
+            configureOpenClawAuth()
+            gatewayOk = startOpenClawGateway()
+        }
+        if (!gatewayOk) {
+            logOpenClawGatewayDiagnostics("reconnect-failed")
+            return false
+        }
         startOpenClawControlUiServer()
-        Thread.sleep(800)
+        return waitForOpenClawGatewayReady(openClawGatewayProcess, timeoutMs = 10_000L, pollMs = 450L)
+    }
+
+    private fun waitForOpenClawGatewayReady(
+        process: Process?,
+        timeoutMs: Long,
+        pollMs: Long,
+    ): Boolean {
+        val startedAt = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startedAt < timeoutMs) {
+            if (isOpenClawGatewayResponsive()) {
+                return true
+            }
+            if (process != null) {
+                try {
+                    val code = process.exitValue()
+                    Log.w(TAG, "OpenClaw gateway exited before ready with code=$code")
+                    return false
+                } catch (_: IllegalThreadStateException) {
+                    // still running
+                }
+            }
+            Thread.sleep(pollMs)
+        }
         return isOpenClawGatewayResponsive()
+    }
+
+    private fun logOpenClawGatewayDiagnostics(reason: String) {
+        val paths = BootstrapInstaller.getPaths(context)
+        val cmd =
+            """
+            echo "[openclaw-gw-diagnose] reason=$reason"
+            echo "[openclaw-gw-diagnose] ts=${'$'}(date +%s)"
+            echo "[openclaw-gw-diagnose] openclaw=$(command -v openclaw || true)"
+            echo "[openclaw-gw-diagnose] node=$(command -v node || true)"
+            if [ -f "${paths.homeDir}/.openclaw/openclaw.json" ]; then
+              echo "[openclaw-gw-diagnose] openclaw.json(bind/auth):"
+              grep -E '"bind"|"auth"|"token"|"mode"' "${paths.homeDir}/.openclaw/openclaw.json" 2>/dev/null || true
+            fi
+            echo "[openclaw-gw-diagnose] port-listen:"
+            ( /system/bin/toybox ss -ltn 2>/dev/null || ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true ) | grep "${OPENCLAW_GATEWAY_PORT}" || true
+            echo "[openclaw-gw-diagnose] process-list:"
+            ps -A 2>/dev/null | grep -E 'openclaw|node' | grep -E 'gateway|${OPENCLAW_GATEWAY_PORT}' || true
+            echo "[openclaw-gw-diagnose] health-call:"
+            openclaw gateway call health --json --params '{}' 2>&1 || true
+            """.trimIndent()
+        runInPrefix(cmd) { line ->
+            Log.w(TAG, line)
+        }
     }
 
     private fun ensureHeartbeatBootstrap() {
@@ -1641,7 +2096,7 @@ H3
             if [ ! -f "${'$'}HB_FILE" ] || [ -z "${'$'}(grep -Ev '^[[:space:]]*(#|$)' "${'$'}HB_FILE" 2>/dev/null)" ]; then
               cat > "${'$'}HB_FILE" <<'EOF'
 # HEARTBEAT.md
-# Pocket Lobster auto-bootstrap tasks (safe defaults)
+# AnyClaw auto-bootstrap tasks (safe defaults)
 1) Check whether gateway and core tools are healthy.
 2) If there is no pending task, reply HEARTBEAT_OK.
 3) If a blocking failure appears, summarize root cause in one short paragraph.
@@ -1990,7 +2445,7 @@ WEOF
         }
 
         val env = buildEnvironment(paths)
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val cmd = "exec node ${proxyScript.absolutePath}"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
@@ -2001,19 +2456,10 @@ WEOF
 
         val proc = pb.start()
         proxyProcess = proc
-
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[proxy] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "Proxy exited with code: ${proc.waitFor()}")
-        }.start()
+        startProcessLogThread(proc, "proxy")
 
         Thread.sleep(800)
-        Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$proxyPort")
+        Log.i(TAG, "CONNECT proxy started on 127.0.0.1:$PROXY_PORT")
         return true
     }
 
@@ -2081,8 +2527,8 @@ WEOF
     ): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
 
         val pb = ProcessBuilder(codexBinPath(), "login")
         pb.environment().clear()
@@ -2129,10 +2575,10 @@ WEOF
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
 
-        val shell = "${paths.prefixDir}/bin/sh"
+        val shell = runtimeShell()
         val cmd = "${codexBinPath()} exec --skip-git-repo-check \"say hi\" 2>&1"
 
         val pb = ProcessBuilder(shell, "-c", cmd)
@@ -2190,8 +2636,8 @@ WEOF
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
-        env["HTTPS_PROXY"] = "http://127.0.0.1:$proxyPort"
-        env["HTTP_PROXY"] = "http://127.0.0.1:$proxyPort"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
+        env["HTTP_PROXY"] = "http://127.0.0.1:$PROXY_PORT"
 
         val serverScript = "${paths.prefixDir}/lib/node_modules/codex-web-local/dist-cli/index.js"
         if (!File(serverScript).exists()) {
@@ -2199,8 +2645,8 @@ WEOF
             return false
         }
 
-        val shell = "${paths.prefixDir}/bin/sh"
-        val command = "exec node $serverScript --port $serverPort --no-password"
+        val shell = runtimeShell()
+        val command = "exec node $serverScript --port $SERVER_PORT --no-password"
 
         Log.i(TAG, "Starting server: $command")
 
@@ -2212,23 +2658,14 @@ WEOF
 
         val proc = pb.start()
         serverProcess = proc
-
-        Thread {
-            val reader = BufferedReader(InputStreamReader(proc.inputStream))
-            var line = reader.readLine()
-            while (line != null) {
-                Log.d(TAG, "[server] $line")
-                line = reader.readLine()
-            }
-            Log.i(TAG, "Server process exited with code: ${proc.waitFor()}")
-        }.start()
+        startProcessLogThread(proc, "server")
 
         return true
     }
 
     fun waitForServer(timeoutMs: Long = 60_000): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
-        val url = URL("http://127.0.0.1:$serverPort/")
+        val url = URL("http://127.0.0.1:$SERVER_PORT/")
 
         while (System.currentTimeMillis() < deadline) {
             try {
@@ -2313,16 +2750,33 @@ WEOF
     }
 
     fun ensureStorageBridge() {
+        val paths = BootstrapInstaller.getPaths(context)
         val script = """
             mkdir -p "${'$'}HOME/storage" 2>/dev/null || true
             ln -sfn /sdcard "${'$'}HOME/sdcard" 2>/dev/null || true
             ln -sfn /storage/emulated/0 "${'$'}HOME/storage/shared" 2>/dev/null || true
             ln -sfn /sdcard/Download "${'$'}HOME/storage/downloads" 2>/dev/null || true
 
-            mkdir -p /sdcard/Download/PocketLobster 2>/dev/null || true
-            mkdir -p /sdcard/Download/下载管理/PocketLobster 2>/dev/null || true
-            mkdir -p /sdcard/下载管理/PocketLobster 2>/dev/null || true
-            ln -sfn /sdcard/Download/PocketLobster "${'$'}HOME/storage/pocket-lobster" 2>/dev/null || true
+            mkdir -p /sdcard/Download/AnyClaw 2>/dev/null || true
+            mkdir -p /sdcard/Download/下载管理/AnyClaw 2>/dev/null || true
+            mkdir -p /sdcard/下载管理/AnyClaw 2>/dev/null || true
+            ln -sfn /sdcard/Download/AnyClaw "${'$'}HOME/storage/anyclaw" 2>/dev/null || true
+
+            # Expose Ubuntu runtime launcher to Codex/CLI without requiring absolute paths.
+            RUNTIME_BIN="${'$'}HOME/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh"
+            if [ -f "${'$'}RUNTIME_BIN" ]; then
+              cat > "${paths.prefixDir}/bin/ubuntu-shell" <<'EOF'
+#!/system/bin/sh
+exec "${'$'}HOME/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh" "${'$'}@"
+EOF
+              chmod 700 "${paths.prefixDir}/bin/ubuntu-shell" 2>/dev/null || true
+
+              cat > "${paths.prefixDir}/bin/ubuntu-status" <<'EOF'
+#!/system/bin/sh
+exec "${'$'}HOME/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh" --status
+EOF
+              chmod 700 "${paths.prefixDir}/bin/ubuntu-status" 2>/dev/null || true
+            fi
         """.trimIndent()
 
         val code = runInPrefix(script)
@@ -2802,13 +3256,13 @@ import os
 from pathlib import Path
 
 OLD = b"/data/data/com.termux"
-NEW = b"__APP_ROOT__"
+NEW = b"/data/user/0/com.codex.mobile.beta"
 
 roots = [
-    Path("__APP_ROOT__/files/usr/bin"),
-    Path("__APP_ROOT__/files/usr/libexec"),
-    Path("__APP_ROOT__/files/home/.openclaw/workspace/scripts"),
-    Path("__APP_ROOT__/files/home/.openclaw/workspace/.git/hooks"),
+    Path("/data/user/0/com.codex.mobile.beta/files/usr/bin"),
+    Path("/data/user/0/com.codex.mobile.beta/files/usr/libexec"),
+    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/scripts"),
+    Path("/data/user/0/com.codex.mobile.beta/files/home/.openclaw/workspace/.git/hooks"),
 ]
 
 patched = 0
@@ -2913,7 +3367,6 @@ EOF
 
             sed -i "s#__PREFIX__#${paths.prefixDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
             sed -i "s#__HOME__#${paths.homeDir}#g" "${'$'}scripts/runtime-env-doctor.sh"
-            sed -i "s#__APP_ROOT__#${context.dataDir.absolutePath}#g" "${'$'}scripts/runtime-env-doctor.sh"
             chmod 700 "${'$'}scripts/runtime-env-doctor.sh" 2>/dev/null || true
             "${'$'}scripts/runtime-env-doctor.sh" --probe --json > "${'$'}state_dir/runtime-health.json" 2>/dev/null || true
             echo "runtime-doctor-ready"
@@ -3068,6 +3521,16 @@ if [ "${'$'}#" -eq 0 ]; then
   exit 2
 fi
 
+# Keep Ubuntu runtime commands in local app shell.
+# Routing these through Shizuku loses app-private runtime context.
+cmdline="${'$'}*"
+case "${'$'}cmdline" in
+  *ubuntu-shell*|*ubuntu-status*|*".openclaw-android/linux-runtime/bin/ubuntu-shell.sh"*|*ANYCLAW_UBUNTU_BIN*)
+    /system/bin/sh -lc "${'$'}cmdline"
+    exit "${'$'}?"
+    ;;
+esac
+
 attempt=0
 while true; do
   shizuku-shell "${'$'}@"
@@ -3175,11 +3638,65 @@ EOF
         if (configFile.exists()) {
             val current = configFile.readText()
             if (current.contains("approval_policy") && current.contains("danger-full-access")) {
+                ensureShellInitFiles(paths)
                 return
             }
         }
         configFile.writeText(desired)
+        ensureShellInitFiles(paths)
         Log.i(TAG, "Wrote full-access config to $configFile")
+    }
+
+    private fun ensureShellInitFiles(paths: BootstrapInstaller.Paths) {
+        val runtimeBinDir = "${paths.homeDir}/.openclaw-android/linux-runtime/bin"
+        val shellBlock = """
+            export HOME="${paths.homeDir}"
+            export PREFIX="${paths.prefixDir}"
+            export TERMUX_PREFIX="${paths.prefixDir}"
+            export TERMUX__PREFIX="${paths.prefixDir}"
+            export TMPDIR="${paths.tmpDir}"
+            export TMP="${paths.tmpDir}"
+            export TEMP="${paths.tmpDir}"
+            export PROOT_TMP_DIR="${paths.tmpDir}"
+            export ANYCLAW_UBUNTU_BIN="$runtimeBinDir/ubuntu-shell.sh"
+            case ":${'$'}PATH:" in
+              *":$runtimeBinDir:"*) ;;
+              *) export PATH="$runtimeBinDir:${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin${'$'}{PATH:+:${'$'}PATH}" ;;
+            esac
+            [ -f "${'$'}HOME/.config/codex/secrets/github_token.env" ] && . "${'$'}HOME/.config/codex/secrets/github_token.env"
+        """.trimIndent()
+
+        upsertManagedShellBlock(File(paths.homeDir, ".profile"), shellBlock)
+        upsertManagedShellBlock(File(paths.homeDir, ".bashrc"), shellBlock)
+        upsertManagedShellBlock(
+            File(paths.homeDir, ".bash_profile"),
+            "[ -f \"${'$'}HOME/.profile\" ] && . \"${'$'}HOME/.profile\"",
+        )
+    }
+
+    private fun upsertManagedShellBlock(file: File, body: String) {
+        val startMarker = "# >>> anyclaw-managed-shell >>>"
+        val endMarker = "# <<< anyclaw-managed-shell <<<"
+        val block = "$startMarker\n${body.trim()}\n$endMarker\n"
+        val existing = if (file.exists()) file.readText() else ""
+
+        val updated = if (existing.contains(startMarker) && existing.contains(endMarker)) {
+            val startIndex = existing.indexOf(startMarker)
+            val endIndex = existing.indexOf(endMarker, startIndex)
+            if (startIndex >= 0 && endIndex >= startIndex) {
+                val suffixStart = endIndex + endMarker.length
+                existing.substring(0, startIndex) + block + existing.substring(suffixStart).trimStart('\n')
+            } else {
+                existing.trimEnd() + if (existing.isBlank()) "" else "\n" + block
+            }
+        } else {
+            existing.trimEnd() + if (existing.isBlank()) "" else "\n" + block
+        }
+
+        if (updated != existing) {
+            file.parentFile?.mkdirs()
+            file.writeText(updated.trimEnd() + "\n")
+        }
     }
 
     private fun ensureObject(parent: JSONObject, key: String): JSONObject {
@@ -3311,7 +3828,7 @@ EOF
         return false
     }
 
-    private fun ensurePocketLobsterSearchPlugin(homeDir: String) {
+    private fun ensureAnyClawSearchPlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_SEARCH_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3328,7 +3845,7 @@ EOF
         }
     }
 
-    private fun ensurePocketLobsterGithubPlugin(homeDir: String) {
+    private fun ensureAnyClawGithubPlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_GITHUB_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3345,7 +3862,7 @@ EOF
         }
     }
 
-    private fun ensurePocketLobsterDevicePlugin(homeDir: String) {
+    private fun ensureAnyClawDevicePlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_DEVICE_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3362,7 +3879,7 @@ EOF
         }
     }
 
-    private fun ensurePocketLobsterRuntimePlugin(homeDir: String) {
+    private fun ensureAnyClawRuntimePlugin(homeDir: String) {
         val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_RUNTIME_PLUGIN_ID")
         if (!pluginRoot.exists()) {
             pluginRoot.mkdirs()
@@ -3376,6 +3893,23 @@ EOF
         val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_RUNTIME_PLUGIN_ID/index.ts", indexFile)
         if (manifestChanged || indexChanged) {
             Log.i(TAG, "Installed/updated plugin $ANYCLAW_RUNTIME_PLUGIN_ID at $pluginRoot")
+        }
+    }
+
+    private fun ensureAnyClawUbuntuPlugin(homeDir: String) {
+        val pluginRoot = File(homeDir, ".openclaw/extensions/$ANYCLAW_UBUNTU_PLUGIN_ID")
+        if (!pluginRoot.exists()) {
+            pluginRoot.mkdirs()
+        }
+        val manifestFile = File(pluginRoot, "openclaw.plugin.json")
+        val indexFile = File(pluginRoot, "index.ts")
+        val manifestChanged = writeAssetIfChanged(
+            "plugins/$ANYCLAW_UBUNTU_PLUGIN_ID/openclaw.plugin.json",
+            manifestFile,
+        )
+        val indexChanged = writeAssetIfChanged("plugins/$ANYCLAW_UBUNTU_PLUGIN_ID/index.ts", indexFile)
+        if (manifestChanged || indexChanged) {
+            Log.i(TAG, "Installed/updated plugin $ANYCLAW_UBUNTU_PLUGIN_ID at $pluginRoot")
         }
     }
 
@@ -3402,12 +3936,13 @@ EOF
         paths: BootstrapInstaller.Paths,
     ): Map<String, String> {
         val bionicCompat = "${paths.homeDir}/.openclaw-android/patches/bionic-compat.js"
+        val runtimeBinDir = "${paths.homeDir}/.openclaw-android/linux-runtime/bin"
         val bionicCompatOpt = if (File(bionicCompat).exists()) " -r $bionicCompat" else ""
 
         val env = mutableMapOf(
             "PREFIX" to paths.prefixDir,
             "HOME" to paths.homeDir,
-            "PATH" to "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin",
+            "PATH" to "$runtimeBinDir:${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin",
             "LD_LIBRARY_PATH" to "${paths.prefixDir}/lib",
             "LD_PRELOAD" to "${paths.prefixDir}/lib/libtermux-exec.so",
             "TERMUX_PREFIX" to paths.prefixDir,
@@ -3418,11 +3953,12 @@ EOF
             "TEMP" to paths.tmpDir,
             "PROOT_TMP_DIR" to paths.tmpDir,
             "TERM" to "xterm-256color",
+            "ANYCLAW_UBUNTU_BIN" to "$runtimeBinDir/ubuntu-shell.sh",
             "ANDROID_DATA" to "/data",
             "ANDROID_ROOT" to "/system",
             "ANDROID_STORAGE" to "/sdcard",
             "EXTERNAL_STORAGE" to "/sdcard",
-            "ANYCLAW_EXPORT_DIR" to "/sdcard/Download/PocketLobster",
+            "ANYCLAW_EXPORT_DIR" to "/sdcard/Download/AnyClaw",
             "APT_CONFIG" to "${paths.prefixDir}/etc/apt/apt.conf",
             "DPKG_ADMINDIR" to "${paths.prefixDir}/var/lib/dpkg",
             "SSL_CERT_FILE" to "${paths.prefixDir}/etc/tls/cert.pem",
@@ -3434,6 +3970,7 @@ EOF
             "GIT_TEMPLATE_DIR" to "${paths.prefixDir}/share/git-core/templates",
             "OPENSSL_CONF" to "${paths.prefixDir}/etc/tls/openssl.cnf",
             "NODE_OPTIONS" to "--openssl-config=${paths.prefixDir}/etc/tls/openssl.cnf --unhandled-rejections=none$bionicCompatOpt",
+            "NAPI_RS_NATIVE_LIBRARY_PATH" to "${paths.homeDir}/.openclaw-android/native/davey/davey.android-arm64.node",
             "CONTAINER" to "1",
         )
 

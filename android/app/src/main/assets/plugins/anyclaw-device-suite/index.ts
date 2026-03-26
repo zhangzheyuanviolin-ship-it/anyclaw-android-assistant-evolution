@@ -22,8 +22,8 @@ type PluginRuntimeMeta = {
 
 const PARSER_VERSION = "v1.0.0";
 const DEFAULT_TIMEOUT_MS = 20_000;
-const DEFAULT_SCREENSHOT_DIR = "/sdcard/Download/PocketLobsterShots";
-const DEFAULT_UI_DUMP_PATH = "/sdcard/Download/PocketLobsterShots/ui_dump.xml";
+const DEFAULT_SCREENSHOT_DIR = "/sdcard/Download/AnyClawShots";
+const DEFAULT_UI_DUMP_PATH = "/sdcard/Download/AnyClawShots/ui_dump.xml";
 const DEFAULT_MAX_UI_NODES = 180;
 const DEFAULT_INPUT_IME_PRIORITY = [
   "com.android.adbkeyboard/.AdbIME",
@@ -910,7 +910,7 @@ function createDeviceOpenUrlTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta
 
 export default {
   id: "anyclaw-device-suite",
-  name: "Pocket Lobster Device Suite",
+  name: "AnyClaw Device Suite",
   register(api: any) {
     const runtime = resolveRuntimeConfig(api.pluginConfig);
     const runtimeMeta = createRuntimeMeta();

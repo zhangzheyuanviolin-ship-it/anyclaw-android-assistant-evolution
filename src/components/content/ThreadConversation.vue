@@ -109,7 +109,7 @@
                 v-if="message.text.length > 0"
                 class="message-card"
                 :data-role="message.role"
-                @contextmenu.prevent="openMessageActionMenu(message.id)"
+                @contextmenu.prevent="onMessageContextMenu(message.id)"
                 @touchstart="onMessageTouchStart(message.id)"
                 @touchend="onMessageTouchEnd"
                 @touchcancel="onMessageTouchEnd"
@@ -132,7 +132,7 @@
                   </template>
                 </p>
                 <div
-                  v-if="message.id.length > 0 && messageActionMenuId === message.id && message.messageType !== 'worked' && (message.role === 'assistant' || message.role === 'user')"
+                  v-if="messageActionsEnabled && message.id.length > 0 && messageActionMenuId === message.id && message.messageType !== 'worked' && (message.role === 'assistant' || message.role === 'user')"
                   class="message-action-menu"
                 >
                   <button
@@ -216,6 +216,7 @@ const props = defineProps<{
   isLoading: boolean
   activeThreadId: string
   scrollState: ThreadScrollState | null
+  messageActionsEnabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -734,6 +735,7 @@ function closeImageModal(): void {
 
 function openMessageActionMenu(messageId: string): void {
   if (!messageId || messageId.length === 0) return
+  if (props.messageActionsEnabled === false) return
   messageActionMenuId.value = messageId
 }
 
@@ -749,12 +751,18 @@ function clearMessageLongPressTimer(): void {
 }
 
 function onMessageTouchStart(messageId: string): void {
+  if (props.messageActionsEnabled === false) return
   if (!messageId || messageId.length === 0) return
   clearMessageLongPressTimer()
   messageLongPressTimer = setTimeout(() => {
     messageLongPressTimer = 0
     openMessageActionMenu(messageId)
   }, MESSAGE_ACTION_LONG_PRESS_MS)
+}
+
+function onMessageContextMenu(messageId: string): void {
+  if (props.messageActionsEnabled === false) return
+  openMessageActionMenu(messageId)
 }
 
 function onMessageTouchEnd(): void {

@@ -11,13 +11,14 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
+import android.webkit.ValueCallback
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -29,17 +30,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import fi.iki.elonen.NanoHTTPD
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "CodexMainActivity"
-        private const val LEGACY_OPENCLAW_CONTROL_UI_PORT = 19001
-        private const val FALLBACK_HISTORY_DEFAULT = 60
-        private const val FALLBACK_HISTORY_STEP = 40
-        private const val FALLBACK_HISTORY_MIN = 20
-        private const val FALLBACK_HISTORY_MAX = 400
         const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
         const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.SESSION_KEY"
@@ -58,9 +56,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modelManagerButton: Button
     private lateinit var gatewayToggleButton: Button
     private lateinit var backToCodexButton: Button
-    private lateinit var traceToggleFallbackButton: Button
-    private lateinit var historyMoreFallbackButton: Button
-    private lateinit var historyResetFallbackButton: Button
+    private lateinit var openClawNewChatButton: Button
     private lateinit var serverManager: CodexServerManager
     private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
@@ -75,12 +71,8 @@ class MainActivity : AppCompatActivity() {
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
-    private val serverPort: Int
-        get() = serverManager.serverPort
-    private val openClawGatewayPort: Int
-        get() = serverManager.openClawGatewayPort
-    private val openClawControlUiPort: Int
-        get() = serverManager.openClawControlUiPort
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingCameraImageUri: Uri? = null
     private val gatewayStatusPollRunnable = object : Runnable {
         override fun run() {
             refreshGatewayStatusAsync(announce = false)
@@ -109,6 +101,25 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val callback = filePathCallback
+            filePathCallback = null
+            if (callback == null) return@registerForActivityResult
+            val cameraUri = pendingCameraImageUri
+            pendingCameraImageUri = null
+            if (cameraUri != null) {
+                if (result.resultCode == RESULT_OK) {
+                    callback.onReceiveValue(arrayOf(cameraUri))
+                } else {
+                    callback.onReceiveValue(null)
+                }
+                return@registerForActivityResult
+            }
+            val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            callback.onReceiveValue(uris)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -124,9 +135,7 @@ class MainActivity : AppCompatActivity() {
         modelManagerButton = findViewById(R.id.btnModelManager)
         gatewayToggleButton = findViewById(R.id.btnGatewayToggle)
         backToCodexButton = findViewById(R.id.btnBackToCodex)
-        traceToggleFallbackButton = findViewById(R.id.btnTraceToggleFallback)
-        historyMoreFallbackButton = findViewById(R.id.btnHistoryMoreFallback)
-        historyResetFallbackButton = findViewById(R.id.btnHistoryResetFallback)
+        openClawNewChatButton = findViewById(R.id.btnOpenClawNewChat)
 
         serverManager = CodexServerManager(this)
 
@@ -146,16 +155,10 @@ class MainActivity : AppCompatActivity() {
             onGatewayTogglePressed()
         }
         backToCodexButton.setOnClickListener {
-            webView.loadUrl(buildCodexRootUrl())
+            webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
         }
-        traceToggleFallbackButton.setOnClickListener {
-            toggleOpenClawProcessViewFallback()
-        }
-        historyMoreFallbackButton.setOnClickListener {
-            increaseOpenClawHistoryWindowFallback()
-        }
-        historyResetFallbackButton.setOnClickListener {
-            resetOpenClawHistoryWindowFallback()
+        openClawNewChatButton.setOnClickListener {
+            webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
         }
 
         requestBatteryOptimizationExemption()
@@ -202,6 +205,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         cancelOpenClawWatchdog()
         stopGatewayStatusMonitor()
+        filePathCallback?.onReceiveValue(null)
+        filePathCallback = null
         shizukuBridgeServer?.stop()
         shizukuBridgeServer = null
         serverManager.stopServer()
@@ -260,25 +265,18 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 url: String,
-            ): Boolean = handleOpenClawDashboardNavigation(url)
-
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest,
-            ): Boolean = handleOpenClawDashboardNavigation(request.url?.toString())
+            ): Boolean = false
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 if (!isOpenClawChatUrl(url)) {
                     openClawRecoveryAttempts = 0
                 }
-                updateOpenClawFallbackButtonsVisibility(url)
                 cancelOpenClawWatchdog()
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                updateOpenClawFallbackButtonsVisibility(url)
                 scheduleOpenClawWatchdog(url)
             }
 
@@ -293,7 +291,7 @@ class MainActivity : AppCompatActivity() {
                         "页面渲染异常，正在自动恢复到可用状态",
                         Toast.LENGTH_LONG,
                     ).show()
-                    pendingLaunchUrl = buildCodexRootUrl()
+                    pendingLaunchUrl = "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
                     recreate()
                 }
                 return true
@@ -305,57 +303,138 @@ class MainActivity : AppCompatActivity() {
                 Log.d(TAG, "[WebView] ${msg.sourceId()}:${msg.lineNumber()} ${msg.message()}")
                 return true
             }
+
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean {
+                if (filePathCallback == null) return false
+
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+                pendingCameraImageUri = null
+
+                if (shouldUseCameraCapture(fileChooserParams)) {
+                    val cameraPair = buildCameraCaptureIntent()
+                    if (cameraPair != null) {
+                        pendingCameraImageUri = cameraPair.second
+                        return try {
+                            fileChooserLauncher.launch(cameraPair.first)
+                            true
+                        } catch (error: Exception) {
+                            Log.w(TAG, "Failed to launch camera chooser: ${error.message}")
+                            pendingCameraImageUri = null
+                            this@MainActivity.filePathCallback?.onReceiveValue(null)
+                            this@MainActivity.filePathCallback = null
+                            Toast.makeText(
+                                this@MainActivity,
+                                "无法启动相机",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            false
+                        }
+                    }
+                }
+
+                val chooserIntent =
+                    try {
+                        fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                        }
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Failed to create file chooser intent: ${error.message}")
+                        null
+                    }
+
+                if (chooserIntent == null) {
+                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                    this@MainActivity.filePathCallback = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "无法打开附件选择器",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    return false
+                }
+
+                return try {
+                    fileChooserLauncher.launch(chooserIntent)
+                    true
+                } catch (error: Exception) {
+                    Log.w(TAG, "Failed to launch file chooser: ${error.message}")
+                    this@MainActivity.filePathCallback?.onReceiveValue(null)
+                    this@MainActivity.filePathCallback = null
+                    Toast.makeText(
+                        this@MainActivity,
+                        "无法启动附件选择器",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    false
+                }
+            }
+        }
+    }
+
+    private fun shouldUseCameraCapture(fileChooserParams: WebChromeClient.FileChooserParams?): Boolean {
+        if (fileChooserParams == null) return false
+        if (!fileChooserParams.isCaptureEnabled) return false
+        val acceptsImage = fileChooserParams.acceptTypes
+            ?.mapNotNull { it?.trim()?.lowercase() }
+            ?.any { value ->
+                value == "image/*" || value.startsWith("image/")
+            } == true
+        return acceptsImage
+    }
+
+    private fun buildCameraCaptureIntent(): Pair<Intent, Uri>? {
+        return try {
+            val attachmentsDir = File(cacheDir, "attachments")
+            if (!attachmentsDir.exists()) {
+                attachmentsDir.mkdirs()
+            }
+            val targetFile = File.createTempFile("openclaw_capture_", ".jpg", attachmentsDir)
+            val authority = "$packageName.fileprovider"
+            val captureUri = FileProvider.getUriForFile(this, authority, targetFile)
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, captureUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+            val activities = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            if (activities.isEmpty()) {
+                null
+            } else {
+                for (resolveInfo in activities) {
+                    grantUriPermission(
+                        resolveInfo.activityInfo.packageName,
+                        captureUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                    )
+                }
+                intent to captureUri
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to prepare camera capture intent: ${error.message}")
+            null
         }
     }
 
     private fun isOpenClawChatUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        val controlPort = ":$openClawControlUiPort"
-        val legacyPort = ":$LEGACY_OPENCLAW_CONTROL_UI_PORT"
-        return (url.contains(controlPort) || url.contains(legacyPort)) &&
-            (url.contains("/chat") || url.contains("/index.html"))
+        val isLegacyControlUi = isLegacyOpenClawControlUiUrl(url)
+        val isNewChatPage =
+            url.contains(":${CodexServerManager.SERVER_PORT}") &&
+                url.contains("/openclaw/chat")
+        return isLegacyControlUi || isNewChatPage
     }
 
-    private fun handleOpenClawDashboardNavigation(rawUrl: String?): Boolean {
-        if (rawUrl.isNullOrBlank()) return false
-        val uri = try {
-            Uri.parse(rawUrl)
-        } catch (_: Exception) {
-            return false
-        }
-        val host = (uri.host ?: "").lowercase()
-        if (host != "127.0.0.1" && host != "localhost") return false
-        val port = if (uri.port > 0) uri.port else -1
-        if (port != openClawControlUiPort && port != LEGACY_OPENCLAW_CONTROL_UI_PORT) return false
-        val path = uri.path ?: "/"
-        if (!path.startsWith("/chat") && path != "/" && path != "/index.html") return false
-        val session = uri.getQueryParameter("session")
-        webView.loadUrl(buildOpenClawChatUrl(session))
-        return true
-    }
-
-    private fun buildCodexRootUrl(): String {
-        val query = Uri.Builder()
-            .appendQueryParameter("openclawGatewayPort", openClawGatewayPort.toString())
-            .appendQueryParameter("openclawControlUiPort", openClawControlUiPort.toString())
-            .build()
-            .encodedQuery
-        return "http://127.0.0.1:$serverPort/?$query"
-    }
-
-    private fun buildOpenClawChatUrl(sessionKey: String?): String {
-        val builder = Uri.Builder()
-            .scheme("http")
-            .encodedAuthority("127.0.0.1:$openClawControlUiPort")
-            .appendPath("chat")
-            .appendQueryParameter("gatewayUrl", "ws://127.0.0.1:$openClawGatewayPort")
-            .appendQueryParameter("simple", "1")
-            .appendQueryParameter("openclawGatewayPort", openClawGatewayPort.toString())
-            .appendQueryParameter("openclawControlUiPort", openClawControlUiPort.toString())
-        if (!sessionKey.isNullOrBlank()) {
-            builder.appendQueryParameter("session", sessionKey.trim())
-        }
-        return builder.build().toString()
+    private fun isLegacyOpenClawControlUiUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        val isLegacyControlUi =
+            url.contains(":${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}") &&
+                (url.contains("/chat") || url.contains("/index.html"))
+        return isLegacyControlUi
     }
 
     private fun cancelOpenClawWatchdog() {
@@ -366,11 +445,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun scheduleOpenClawWatchdog(url: String?) {
         cancelOpenClawWatchdog()
-        if (!isOpenClawChatUrl(url)) return
+        if (!isLegacyOpenClawControlUiUrl(url)) return
         if (openClawRecoveryAttempts >= 2) return
 
         val runnable = Runnable {
-            if (!isOpenClawChatUrl(webView.url)) return@Runnable
+            if (!isLegacyOpenClawControlUiUrl(webView.url)) return@Runnable
             val js =
                 """
                 (function(){
@@ -409,7 +488,7 @@ class MainActivity : AppCompatActivity() {
             null,
         )
 
-        val fallback = "http://127.0.0.1:$openClawControlUiPort/chat"
+        val fallback = "http://127.0.0.1:${CodexServerManager.OPENCLAW_CONTROL_UI_PORT}/chat"
         val parsed = Uri.parse(originalUrl ?: fallback)
         val builder = parsed.buildUpon().clearQuery()
         for (name in parsed.queryParameterNames) {
@@ -421,89 +500,6 @@ class MainActivity : AppCompatActivity() {
         builder.appendQueryParameter("historyLimit", "20")
         builder.appendQueryParameter("recovery", openClawRecoveryAttempts.toString())
         webView.loadUrl(builder.build().toString())
-    }
-
-    private fun updateOpenClawFallbackButtonsVisibility(url: String?) {
-        val visible = webView.visibility == View.VISIBLE && isOpenClawChatUrl(url)
-        val state = if (visible) View.VISIBLE else View.GONE
-        traceToggleFallbackButton.visibility = state
-        historyMoreFallbackButton.visibility = state
-        historyResetFallbackButton.visibility = state
-    }
-
-    private fun toggleOpenClawProcessViewFallback() {
-        if (!isOpenClawChatUrl(webView.url)) return
-        val js =
-            """
-            (function(){
-              try{
-                var settingsKey='openclaw.control.settings.v1';
-                var settings={};
-                try{settings=JSON.parse(localStorage.getItem(settingsKey)||'{}');}catch(_){}
-                if(!settings||typeof settings!=='object'){settings={};}
-                var u=new URL(location.href);
-                var isSimple=u.searchParams.get('simple')!=='0';
-                var nextSimple=isSimple?'0':'1';
-                settings.chatShowThinking=(nextSimple==='0');
-                localStorage.setItem(settingsKey,JSON.stringify(settings));
-                if(!u.searchParams.get('gatewayUrl')){u.searchParams.set('gatewayUrl','ws://127.0.0.1:$openClawGatewayPort');}
-                if(settings.token && !u.searchParams.get('token')){u.searchParams.set('token',settings.token);}
-                u.searchParams.set('simple',nextSimple);
-                location.assign(u.toString());
-                return 'ok';
-              }catch(e){
-                return 'err:' + String(e);
-              }
-            })();
-            """.trimIndent()
-        webView.evaluateJavascript(js, null)
-    }
-
-    private fun increaseOpenClawHistoryWindowFallback() {
-        if (!isOpenClawChatUrl(webView.url)) return
-        val js =
-            """
-            (function(){
-              try{
-                var HDEF=$FALLBACK_HISTORY_DEFAULT,HSTEP=$FALLBACK_HISTORY_STEP,HMIN=$FALLBACK_HISTORY_MIN,HMAX=$FALLBACK_HISTORY_MAX;
-                function clamp(v){var n=Number(v);if(!Number.isFinite(n)){n=HDEF;}n=Math.floor(n);if(n<HMIN)n=HMIN;if(n>HMAX)n=HMAX;return n;}
-                var cur=clamp(localStorage.getItem('anyclaw.chat.history.limit'));
-                var next=clamp(cur+HSTEP);
-                localStorage.setItem('anyclaw.chat.history.limit',String(next));
-                localStorage.setItem('anyclaw.chat.render.limit',String(next));
-                var u=new URL(location.href);
-                u.searchParams.set('historyLimit',String(next));
-                if(!u.searchParams.get('gatewayUrl')){u.searchParams.set('gatewayUrl','ws://127.0.0.1:$openClawGatewayPort');}
-                location.assign(u.toString());
-                return 'ok';
-              }catch(e){
-                return 'err:' + String(e);
-              }
-            })();
-            """.trimIndent()
-        webView.evaluateJavascript(js, null)
-    }
-
-    private fun resetOpenClawHistoryWindowFallback() {
-        if (!isOpenClawChatUrl(webView.url)) return
-        val js =
-            """
-            (function(){
-              try{
-                var HDEF=$FALLBACK_HISTORY_DEFAULT;
-                localStorage.setItem('anyclaw.chat.history.limit',String(HDEF));
-                localStorage.setItem('anyclaw.chat.render.limit',String(HDEF));
-                var u=new URL(location.href);
-                u.searchParams.set('historyLimit',String(HDEF));
-                if(!u.searchParams.get('gatewayUrl')){u.searchParams.set('gatewayUrl','ws://127.0.0.1:$openClawGatewayPort');}
-                location.assign(u.toString());
-                return 'ok';
-              }catch(e){
-                return 'err:' + String(e);
-              }
-            })();
-            """.trimIndent()
-        webView.evaluateJavascript(js, null)
     }
 
     private fun startSetupFlow() {
@@ -525,12 +521,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runSetup() {
+        val hadOpenClawAtStart = serverManager.isOpenClawInstalled()
+
         // Step 1: Extract bootstrap
         if (!BootstrapInstaller.isBootstrapInstalled(this)) {
             updateStatus("Extracting environment…")
             BootstrapInstaller.install(this) { msg -> updateStatus(msg) }
         }
         updateStatus("Environment ready")
+
+        // Step 1a: Ubuntu-first runtime bootstrap (primary terminal baseline).
+        // Keep this early so all later OpenClaw/plugin operations can assume the
+        // bundled Linux runtime exists and avoid late-stage environment drift.
+        updateStatus("Installing Linux runtime…", "Preparing bundled Ubuntu terminal")
+        val linuxRuntimeOk = OfflineLinuxRuntimeInstaller.install(this) { msg -> updateDetail(msg) }
+        if (!linuxRuntimeOk) {
+            throw RuntimeException("Failed to install bundled Linux runtime")
+        }
+        updateStatus("Linux runtime ready")
 
         // Step 1b: Install proot (needed for dpkg/apt-get path remapping)
         if (!serverManager.isProotInstalled()) {
@@ -569,53 +577,60 @@ class MainActivity : AppCompatActivity() {
         // Step 2c: Install bionic-compat.js (Android platform shim for Node.js)
         serverManager.ensureBionicCompat()
 
-        // Step 2d: Install OpenClaw
-        if (!serverManager.isOpenClawInstalled()) {
-            updateStatus("Installing build dependencies…")
-            serverManager.installOpenClawDeps { msg -> updateDetail(msg) }
-
-            updateStatus("Installing OpenClaw…", "This may take several minutes")
-            val openclawOk = serverManager.installOpenClaw { msg -> updateDetail(msg) }
-            if (!openclawOk) {
-                Log.w(TAG, "OpenClaw install failed — continuing without it")
-            } else {
-                updateStatus("OpenClaw installed")
+        // Step 2d: Install OpenClaw from offline runtime assets
+        var openClawAvailable = serverManager.isOpenClawInstalled()
+        if (!openClawAvailable) {
+            updateStatus("Installing OpenClaw (offline runtime)…", "Using bundled runtime assets")
+            val offlineOk = OfflineOpenClawRuntimeInstaller.install(this) { msg -> updateDetail(msg) }
+            if (!offlineOk) {
+                throw RuntimeException("Failed to install bundled OpenClaw runtime")
             }
-        }
 
-        if (serverManager.isOpenClawInstalled()) {
+            updateStatus("Preparing OpenClaw runtime…")
+            val prepared = serverManager.prepareOfflineOpenClawRuntime { msg -> updateDetail(msg) }
+            if (!prepared) {
+                throw RuntimeException("Failed to prepare bundled OpenClaw runtime")
+            }
+            openClawAvailable = serverManager.isOpenClawInstalled()
+        }
+        updateStatus("OpenClaw runtime ready")
+
+        if (openClawAvailable) {
             updateStatus("Checking OpenClaw version…")
             val versionOk = serverManager.ensureOpenClawVersion { msg -> updateDetail(msg) }
             if (!versionOk) {
-                Log.w(TAG, "OpenClaw version alignment failed — continuing with current install")
+                throw RuntimeException("Failed to align bundled OpenClaw runtime")
+            }
+            if (openClawAvailable) {
+                updateStatus("Validating OpenClaw runtime…")
+                val runtimeReady = serverManager.ensureOpenClawRuntimeReady { msg -> updateDetail(msg) }
+                if (!runtimeReady) {
+                    throw RuntimeException("Bundled OpenClaw runtime failed validation")
+                } else {
+                    updateStatus("OpenClaw runtime ready")
+                }
             }
         }
 
-        // Step 3: Install Codex CLI
-        if (!serverManager.isCodexInstalled()) {
-            updateStatus("Installing Codex CLI…", "This may take a few minutes")
-            val codexOk = serverManager.installCodex { msg -> updateDetail(msg) }
-            if (!codexOk) {
-                throw RuntimeException("Failed to install Codex")
-            }
+        // Step 3: Codex is optional on first run. Do not block OpenClaw-only users.
+        val codexCliInstalled = serverManager.isCodexInstalled()
+        if (codexCliInstalled) {
+            serverManager.ensureCodexWrapperScript()
+        } else {
+            updateStatus("Skipping optional Codex CLI install", "You can install it later in Permission Center")
         }
-
-        // Ensure codex wrapper script exists
-        serverManager.ensureCodexWrapperScript()
 
         // Step 3a: Extract web UI from APK assets (every launch)
         updateStatus("Updating web UI…")
         serverManager.installServerBundle { msg -> updateDetail(msg) }
 
-        // Step 3b: Install native platform binary
-        if (!serverManager.isPlatformBinaryInstalled()) {
-            updateStatus("Installing Codex platform binary…")
-            val binOk = serverManager.installPlatformBinary { msg -> updateDetail(msg) }
-            if (!binOk) {
-                throw RuntimeException("Failed to install Codex platform binary")
-            }
+        // Step 3b: Codex platform binary is also optional and can be installed later.
+        val codexBinaryInstalled = serverManager.isPlatformBinaryInstalled()
+        when {
+            codexCliInstalled && codexBinaryInstalled -> updateStatus("Codex ready")
+            codexCliInstalled -> updateStatus("Codex native binary not installed", "You can complete it later in Permission Center")
+            else -> updateStatus("Codex optional install skipped", "OpenClaw mode is ready")
         }
-        updateStatus("Codex ready")
 
         // Step 3c: Write full-access config, create default workspace, and bridge shared storage paths
         serverManager.ensureFullAccessConfig()
@@ -632,18 +647,30 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Step 5: Codex auth is optional. Do not block startup for OpenClaw-only users.
-        updateStatus("Checking Codex authentication…")
-        val codexLoggedIn = serverManager.isLoggedIn()
-        if (!codexLoggedIn) {
-            updateStatus("Codex not logged in", "Continuing in OpenClaw mode")
+        if (codexCliInstalled && codexBinaryInstalled) {
+            updateStatus("Checking Codex authentication…")
+            val codexLoggedIn = serverManager.isLoggedIn()
+            if (!codexLoggedIn) {
+                updateStatus("Codex not logged in", "Continuing in OpenClaw mode")
+            } else {
+                // Keep startup fast and non-blocking even when Codex network is unavailable.
+                updateStatus("Codex authenticated")
+            }
         } else {
-            // Keep startup fast and non-blocking even when Codex network is unavailable.
-            updateStatus("Codex authenticated")
+            updateStatus("Codex not installed", "Continuing in OpenClaw mode")
         }
 
-        // Step 7: Start OpenClaw services in background so Codex chat page remains
-        // available even if gateway/bootstrap has a transient failure.
-        startOpenClawServicesAsync()
+        // Step 7: On a fresh install, complete one full OpenClaw bring-up pass
+        // before showing the UI so users do not need to restart the app to get
+        // a working gateway. Existing installs still use the async fast path.
+        val needsBlockingOpenClawBootstrap = !hadOpenClawAtStart && openClawAvailable
+        if (needsBlockingOpenClawBootstrap) {
+            updateStatus("Finalizing OpenClaw…", "Completing first-run gateway setup")
+            startOpenClawServicesSync()
+        } else {
+            // Existing installs keep Codex page availability as the first priority.
+            startOpenClawServicesAsync()
+        }
 
         // Step 8: Start web server
         updateStatus("Starting server…")
@@ -669,7 +696,7 @@ class MainActivity : AppCompatActivity() {
             modelManagerButton.visibility = View.VISIBLE
             gatewayToggleButton.visibility = View.VISIBLE
             backToCodexButton.visibility = View.VISIBLE
-            updateOpenClawFallbackButtonsVisibility(webView.url)
+            openClawNewChatButton.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
             webView.loadUrl(consumeLaunchUrlOrDefault())
@@ -679,37 +706,46 @@ class MainActivity : AppCompatActivity() {
     private fun startOpenClawServicesAsync() {
         if (!serverManager.isOpenClawInstalled()) return
         Thread {
-            try {
-                updateStatus("Running OpenClaw preflight…")
-                serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
-
-                updateStatus("Configuring OpenClaw…")
-                serverManager.configureOpenClawAuth()
-
-                updateStatus("Starting OpenClaw gateway…")
-                val gatewayOk = serverManager.startOpenClawGateway()
-                if (!gatewayOk) {
-                    Log.w(TAG, "OpenClaw gateway did not become responsive")
-                }
-
-                updateStatus("Starting OpenClaw Control UI…")
-                serverManager.startOpenClawControlUiServer()
-            } catch (error: Exception) {
-                Log.e(TAG, "OpenClaw async startup failed", error)
-            } finally {
-                runOnUiThread {
-                    if (webView.visibility == View.VISIBLE) {
-                        refreshGatewayStatusAsync(announce = true)
-                    }
+            startOpenClawServicesSync()
+            runOnUiThread {
+                if (webView.visibility == View.VISIBLE) {
+                    refreshGatewayStatusAsync(announce = true)
                 }
             }
         }.start()
     }
 
+    private fun startOpenClawServicesSync(): Boolean {
+        if (!serverManager.isOpenClawInstalled()) return false
+        return try {
+            updateStatus("Running OpenClaw preflight…")
+            serverManager.runOpenClawPreflight { msg -> updateDetail(msg) }
+
+            updateStatus("Configuring OpenClaw…")
+            serverManager.configureOpenClawAuth()
+
+            updateStatus("Starting OpenClaw gateway…")
+            var gatewayOk = serverManager.startOpenClawGateway()
+            if (!gatewayOk) {
+                Log.w(TAG, "OpenClaw gateway did not become responsive on first attempt; retrying once")
+                updateDetail("Gateway retrying once…")
+                Thread.sleep(1200)
+                gatewayOk = serverManager.startOpenClawGateway()
+            }
+
+            updateStatus("Starting OpenClaw Control UI…")
+            serverManager.startOpenClawControlUiServer()
+            gatewayOk
+        } catch (error: Exception) {
+            Log.e(TAG, "OpenClaw startup failed", error)
+            false
+        }
+    }
+
     private fun consumeLaunchUrlOrDefault(): String {
         val target = pendingLaunchUrl
         pendingLaunchUrl = null
-        return target ?: buildCodexRootUrl()
+        return target ?: "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
     }
 
     private fun resolveLaunchUrlFromIntent(intent: Intent?): String? {
@@ -719,21 +755,32 @@ class MainActivity : AppCompatActivity() {
             OPEN_TARGET_CODEX_THREAD -> {
                 val threadId = intent?.getStringExtra(EXTRA_THREAD_ID)?.trim().orEmpty()
                 if (threadId.isEmpty()) null
-                else {
-                    val query = Uri.Builder()
-                        .appendQueryParameter("openclawGatewayPort", openClawGatewayPort.toString())
-                        .appendQueryParameter("openclawControlUiPort", openClawControlUiPort.toString())
-                        .build()
-                        .encodedQuery
-                    "http://127.0.0.1:$serverPort/thread/${Uri.encode(threadId)}?$query"
-                }
+                else "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/thread/${Uri.encode(threadId)}"
             }
             OPEN_TARGET_OPENCLAW_SESSION -> {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
-                if (sessionKey.isEmpty()) null else buildOpenClawChatUrl(sessionKey)
+                buildOpenClawChatPageUrl(sessionKey)
             }
             else -> null
         }
+    }
+
+    private fun extractSessionFromCurrentUrl(): String? {
+        val current = webView.url ?: return null
+        return try {
+            Uri.parse(current).getQueryParameter("session")?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun buildOpenClawChatPageUrl(sessionKey: String?): String {
+        val builder = Uri.parse("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/openclaw/chat").buildUpon()
+        val normalized = sessionKey?.trim().orEmpty()
+        if (normalized.isNotEmpty()) {
+            builder.appendQueryParameter("session", normalized)
+        }
+        return builder.build().toString()
     }
 
     /**
@@ -913,9 +960,7 @@ class MainActivity : AppCompatActivity() {
             modelManagerButton.visibility = View.GONE
             gatewayToggleButton.visibility = View.GONE
             backToCodexButton.visibility = View.GONE
-            traceToggleFallbackButton.visibility = View.GONE
-            historyMoreFallbackButton.visibility = View.GONE
-            historyResetFallbackButton.visibility = View.GONE
+            openClawNewChatButton.visibility = View.GONE
         }
     }
 

@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 164
-        versionName = "1.0.0-pocket-lobster-stable-r1"
+        versionCode = 165
+        versionName = "1.0.1-pocket-lobster-stable-r2"
     }
 
     signingConfigs {
@@ -96,11 +96,14 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     // Don't compress bootstrap zip or server bundle in assets
     androidResources {
-        noCompress += listOf("zip", "tar.gz")
+        noCompress += listOf("zip", "tar", "node")
     }
 
 }
@@ -114,4 +117,6 @@ dependencies {
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("org.tukaani:xz:1.10")
 }

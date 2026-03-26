@@ -1,7 +1,7 @@
 {
   "id": "anyclaw-search-suite",
-  "name": "Pocket Lobster Search Suite",
-  "description": "Free multi-source web search, web visit, HTTP, and web automation tools for Pocket Lobster mobile.",
+  "name": "AnyClaw Search Suite",
+  "description": "Free multi-source web search, web visit, HTTP, and web automation tools for AnyClaw mobile.",
   "version": "1.8.0",
   "configSchema": {
     "type": "object",

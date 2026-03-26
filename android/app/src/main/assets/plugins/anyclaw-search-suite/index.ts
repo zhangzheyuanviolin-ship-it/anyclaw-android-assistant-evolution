@@ -68,7 +68,7 @@ const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_RESULTS = 6;
 const DEFAULT_MAX_CHARS = 12000;
 const MAX_RESULTS = 10;
-const DEFAULT_USER_AGENT = "PocketLobsterSearchSuite/1.4";
+const DEFAULT_USER_AGENT = "AnyClawSearchSuite/1.4";
 const DEFAULT_WEB_BRIDGE_URL = "http://127.0.0.1:18926/web/call";
 const DEFAULT_TAVILY_BASE_URL = "https://api.tavily.com/search";
 
@@ -856,7 +856,7 @@ function createSearchTool(engine: SearchEngineKey, label: string, description: s
 
 function createMultiSearchTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   return {
-    label: "Pocket Lobster Multi Search",
+    label: "AnyClaw Multi Search",
     name: "anyclaw_multi_search",
     description: "Search with multiple providers and return intent-aware merged results.",
     parameters: {
@@ -888,7 +888,7 @@ function createMultiSearchTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) 
 
 function createVisitTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   return {
-    label: "Pocket Lobster Web Visit",
+    label: "AnyClaw Web Visit",
     name: "anyclaw_web_visit",
     description: "Fetch a webpage and extract readable text content.",
     parameters: {
@@ -952,7 +952,7 @@ function normalizeMethod(raw: string): string {
 
 function createHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   return {
-    label: "Pocket Lobster HTTP",
+    label: "AnyClaw HTTP",
     name: "anyclaw_http_request",
     description: "Send HTTP requests for diagnostics or data retrieval.",
     parameters: {
@@ -1049,7 +1049,7 @@ function createHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
 
 function createMultipartHttpTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   return {
-    label: "Pocket Lobster Multipart HTTP",
+    label: "AnyClaw Multipart HTTP",
     name: "anyclaw_multipart_request",
     description: "Send multipart/form-data requests with optional file uploads.",
     parameters: {
@@ -1300,7 +1300,7 @@ async function runSystemShell(
 
 function createOpenInSystemBrowserTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   return {
-    label: "Pocket Lobster Open In System Browser",
+    label: "AnyClaw Open In System Browser",
     name: "anyclaw_open_in_system_browser",
     description: "Open a URL in Android system browser via Shizuku-backed system-shell channel.",
     parameters: {
@@ -1566,7 +1566,7 @@ function resolveTavilyApiKey(config: RuntimeConfig): string | null {
 
 function createTavilySearchTool(runtime: RuntimeConfig, meta: PluginRuntimeMeta) {
   return {
-    label: "Pocket Lobster Tavily Search",
+    label: "AnyClaw Tavily Search",
     name: "anyclaw_tavily_search",
     description: "Advanced web search powered by Tavily. Requires Tavily API key.",
     parameters: {
@@ -1813,7 +1813,7 @@ function createRuntimeMeta(userAgent: string): PluginRuntimeMeta {
 
 export default {
   id: "anyclaw-search-suite",
-  name: "Pocket Lobster Search Suite",
+  name: "AnyClaw Search Suite",
   register(api: any) {
     const runtime = resolveRuntimeConfig(api.pluginConfig);
     const runtimeMeta = createRuntimeMeta(runtime.userAgent);

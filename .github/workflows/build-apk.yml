@@ -14,7 +14,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -35,6 +35,25 @@ jobs:
 
       - name: Download Termux bootstrap
         run: bash android/scripts/download-bootstrap.sh
+
+      - name: Download offline OpenClaw runtime assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p android/app/src/main/assets/runtime
+          # Keep bundled runtime files committed in repo (e.g. Ubuntu rootfs/proot).
+          # Only refresh OpenClaw-specific blobs downloaded from release.
+          rm -f android/app/src/main/assets/runtime/openclaw-runtime-2026.3.2.tar
+          rm -f android/app/src/main/assets/runtime/openclaw_installed_2026_3_2.tar.gz
+          rm -f android/app/src/main/assets/runtime/davey.android-arm64.node
+          gh release download runtime-assets-2026-03-19-r1 \
+            --repo "${{ github.repository }}" \
+            --pattern "openclaw_installed_2026_3_2.tar.gz" \
+            --pattern "davey.android-arm64.node" \
+            --dir android/app/src/main/assets/runtime
+          mv android/app/src/main/assets/runtime/openclaw_installed_2026_3_2.tar.gz \
+            android/app/src/main/assets/runtime/openclaw-runtime-2026.3.2.tar
+          ls -lh android/app/src/main/assets/runtime
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -64,12 +83,12 @@ jobs:
             exit 1
           fi
           mkdir -p android/signing
-          echo "${{ secrets.ANYCLAW_SIGNING_STORE_BASE64 }}" | base64 -d > android/signing/anyclaw-release.p12
+          echo "${{ secrets.ANYCLAW_SIGNING_STORE_BASE64 }}" | base64 -d > android/signing/pocket-lobster-release.p12
 
       - name: Build debug APK
         working-directory: android
         env:
-          ANYCLAW_SIGNING_STORE_FILE: ${{ github.workspace }}/android/signing/anyclaw-release.p12
+          ANYCLAW_SIGNING_STORE_FILE: ${{ github.workspace }}/android/signing/pocket-lobster-release.p12
           ANYCLAW_SIGNING_STORE_PASSWORD: ${{ secrets.ANYCLAW_SIGNING_STORE_PASSWORD }}
           ANYCLAW_SIGNING_KEY_ALIAS: ${{ secrets.ANYCLAW_SIGNING_KEY_ALIAS }}
           ANYCLAW_SIGNING_KEY_PASSWORD: ${{ secrets.ANYCLAW_SIGNING_KEY_PASSWORD }}
@@ -107,7 +126,7 @@ jobs:
           tag_name: v${{ github.run_number }}
           name: "Pocket Lobster v${{ github.run_number }} (${{ github.ref_name }})"
           body: |
-            🦞 **Pocket Lobster** — Codex + OpenClaw on Android
+            🦞 **Pocket Lobster** — OpenClaw + Codex on Android
 
             📱 Install the APK on any ARM64 Android 7.0+ device. No root required.
 

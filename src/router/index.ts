@@ -21,6 +21,11 @@ const router = createRouter({
       path: '/new-thread',
       redirect: { name: 'home' },
     },
+    {
+      path: '/openclaw/chat',
+      name: 'openclaw-chat',
+      component: EmptyRouteView,
+    },
     { path: '/:pathMatch(.*)*', redirect: { name: 'home' } },
   ],
 })

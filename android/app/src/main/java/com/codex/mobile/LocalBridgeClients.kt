@@ -2,7 +2,6 @@ package com.codex.mobile
 
 import android.util.Log
 import java.io.OutputStreamWriter
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
@@ -32,9 +31,7 @@ object LocalBridgeClients {
             .put("params", params)
             .toString()
 
-        val serverPort =
-            CodexServerManager.serverPortForPackage(resolveRuntimePackageName())
-        val url = URL("http://127.0.0.1:$serverPort/codex-api/rpc")
+        val url = URL("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/codex-api/rpc")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 10_000
@@ -68,14 +65,44 @@ object LocalBridgeClients {
         return envelope.getJSONObject("result")
     }
 
-    private fun resolveRuntimePackageName(): String {
-        return try {
-            val raw = File("/proc/self/cmdline").readBytes().toString(Charsets.UTF_8)
-            val trimmed = raw.trim { it == '\u0000' || it.isWhitespace() }
-            if (trimmed.isBlank()) "com.codex.mobile.pocketlobster" else trimmed
-        } catch (_: Exception) {
-            "com.codex.mobile.pocketlobster"
+    fun callOpenClawApi(
+        path: String,
+        method: String = "GET",
+        body: JSONObject? = null,
+        connectTimeoutMs: Int = 10_000,
+        readTimeoutMs: Int = 35_000,
+    ): JSONObject {
+        val normalizedPath = if (path.startsWith("/")) path else "/$path"
+        val url = URL("http://127.0.0.1:${CodexServerManager.SERVER_PORT}$normalizedPath")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = method.uppercase()
+            connectTimeout = connectTimeoutMs
+            readTimeout = readTimeoutMs
+            doOutput = body != null
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
         }
+
+        if (body != null) {
+            conn.outputStream.use { stream ->
+                OutputStreamWriter(stream, Charsets.UTF_8).use { writer ->
+                    writer.write(body.toString())
+                }
+            }
+        }
+
+        val responseCode = conn.responseCode
+        val rawResponse = try {
+            val input = if (responseCode in 200..299) conn.inputStream else conn.errorStream
+            input?.bufferedReader(Charsets.UTF_8)?.use { reader -> reader.readText() }.orEmpty()
+        } finally {
+            conn.disconnect()
+        }
+
+        if (responseCode !in 200..299) {
+            throw IllegalStateException("OpenClaw API HTTP $responseCode: $rawResponse")
+        }
+        if (rawResponse.isBlank()) return JSONObject()
+        return JSONObject(rawResponse)
     }
 
     class OpenClawGateway(private val serverManager: CodexServerManager) {

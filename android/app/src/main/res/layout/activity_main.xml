@@ -91,38 +91,14 @@
             android:visibility="gone" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnTraceToggleFallback"
+            android:id="@+id/btnOpenClawNewChat"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:contentDescription="@string/trace_toggle_fallback_desc"
+            android:contentDescription="@string/openclaw_new_chat_button_desc"
             android:importantForAccessibility="yes"
             android:minHeight="48dp"
-            android:text="@string/trace_toggle_fallback_text"
-            android:textAllCaps="false"
-            android:visibility="gone" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnHistoryMoreFallback"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:contentDescription="@string/history_more_fallback_desc"
-            android:importantForAccessibility="yes"
-            android:minHeight="48dp"
-            android:text="@string/history_more_fallback_text"
-            android:textAllCaps="false"
-            android:visibility="gone" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnHistoryResetFallback"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:contentDescription="@string/history_reset_fallback_desc"
-            android:importantForAccessibility="yes"
-            android:minHeight="48dp"
-            android:text="@string/history_reset_fallback_text"
+            android:text="@string/openclaw_new_chat_button_text"
             android:textAllCaps="false"
             android:visibility="gone" />
 
