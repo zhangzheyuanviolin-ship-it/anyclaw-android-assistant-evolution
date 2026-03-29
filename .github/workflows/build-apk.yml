@@ -2,6 +2,15 @@ name: Build APK
 
 on:
   workflow_dispatch:
+    inputs:
+      release_channel:
+        description: "Build channel (beta for internal testing, prod for official release)"
+        required: false
+        default: "beta"
+        type: choice
+        options:
+          - beta
+          - prod
 
 permissions:
   contents: write
@@ -85,23 +94,44 @@ jobs:
           mkdir -p android/signing
           echo "${{ secrets.ANYCLAW_SIGNING_STORE_BASE64 }}" | base64 -d > android/signing/pocket-lobster-release.p12
 
-      - name: Build debug APK
+      - name: Build channel APK
+        id: build_apk
         working-directory: android
         env:
           ANYCLAW_SIGNING_STORE_FILE: ${{ github.workspace }}/android/signing/pocket-lobster-release.p12
           ANYCLAW_SIGNING_STORE_PASSWORD: ${{ secrets.ANYCLAW_SIGNING_STORE_PASSWORD }}
           ANYCLAW_SIGNING_KEY_ALIAS: ${{ secrets.ANYCLAW_SIGNING_KEY_ALIAS }}
           ANYCLAW_SIGNING_KEY_PASSWORD: ${{ secrets.ANYCLAW_SIGNING_KEY_PASSWORD }}
-        run: ./gradlew assembleDebug
-
-      - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/debug/pocket-lobster.apk
+          BUILD_CHANNEL: ${{ github.event.inputs.release_channel || 'beta' }}
+        run: |
+          CHANNEL="${BUILD_CHANNEL:-beta}"
+          if [ "$CHANNEL" = "prod" ]; then
+            ./gradlew assembleProdDebug
+            APK_SOURCE="app/build/outputs/apk/prod/debug/app-prod-debug.apk"
+            APK_NAME="pocket-lobster.apk"
+            PACKAGE_ID="com.codex.mobile.pocketlobster"
+          else
+            ./gradlew assembleBetaDebug
+            APK_SOURCE="app/build/outputs/apk/beta/debug/app-beta-debug.apk"
+            APK_NAME="pocket-lobster-beta.apk"
+            PACKAGE_ID="com.codex.mobile.pocketlobster.beta"
+            CHANNEL="beta"
+          fi
+          if [ ! -f "$APK_SOURCE" ]; then
+            echo "APK not found: $APK_SOURCE"
+            exit 1
+          fi
+          mkdir -p app/build/outputs/apk/debug
+          cp "$APK_SOURCE" "app/build/outputs/apk/debug/$APK_NAME"
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "package_id=$PACKAGE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pocket-lobster
-          path: android/app/build/outputs/apk/debug/pocket-lobster.apk
+          name: pocket-lobster-${{ steps.build_apk.outputs.release_channel }}
+          path: android/app/build/outputs/apk/debug/${{ steps.build_apk.outputs.apk_name }}
 
       - name: Generate changelog
         if: github.ref_type == 'branch'
@@ -123,8 +153,8 @@ jobs:
         if: github.ref_type == 'branch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: "Pocket Lobster v${{ github.run_number }} (${{ github.ref_name }})"
+          tag_name: v${{ github.run_number }}-${{ steps.build_apk.outputs.release_channel }}
+          name: "Pocket Lobster ${{ steps.build_apk.outputs.release_channel }} v${{ github.run_number }} (${{ github.ref_name }})"
           body: |
             🦞 **Pocket Lobster** — OpenClaw + Codex on Android
 
@@ -134,8 +164,10 @@ jobs:
             ${{ steps.changelog.outputs.notes }}
 
             ---
+            Channel: ${{ steps.build_apk.outputs.release_channel }}
+            Package ID: ${{ steps.build_apk.outputs.package_id }}
             Branch: ${{ github.ref_name }}
             Built from commit ${{ github.sha }}
-          files: android/app/build/outputs/apk/debug/pocket-lobster.apk
+          files: android/app/build/outputs/apk/debug/${{ steps.build_apk.outputs.apk_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.build_apk.outputs.release_channel != 'prod' }}

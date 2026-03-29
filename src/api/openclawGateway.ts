@@ -5,6 +5,8 @@ import type {
   OpenClawSendRequest,
   OpenClawSendResponse,
   OpenClawSessionSummary,
+  OpenClawRunWaitRequest,
+  OpenClawRunWaitResponse,
 } from '../types/openclaw'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -222,7 +224,7 @@ export async function readOpenClawHistory(request: OpenClawHistoryRequest): Prom
       }),
     },
     'Failed to load OpenClaw history',
-    30_000,
+    60_000,
   )
 
   const messages = Array.isArray(payload.messages) ? payload.messages : []
@@ -269,6 +271,41 @@ export async function sendOpenClawMessage(request: OpenClawSendRequest): Promise
   return {
     ok: payload?.ok === true,
     runId: readString(payload?.runId),
+  }
+}
+
+export async function waitOpenClawRun(request: OpenClawRunWaitRequest): Promise<OpenClawRunWaitResponse> {
+  const runId = request.runId.trim()
+  if (!runId) {
+    throw new Error('OpenClaw run wait requires runId')
+  }
+
+  const timeoutMs =
+    typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)
+      ? Math.min(120_000, Math.max(2_000, Math.floor(request.timeoutMs)))
+      : 12_000
+
+  const payload = await requestOpenClaw<OpenClawRunWaitResponse>(
+    '/openclaw-api/run/wait',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        runId,
+        timeoutMs,
+      }),
+    },
+    'Failed to wait OpenClaw run',
+    timeoutMs + 20_000,
+  )
+
+  return {
+    ok: payload?.ok === true,
+    runId: readString(payload?.runId).trim() || runId,
+    status: readString(payload?.status).trim() || 'running',
+    completed: payload?.completed === true,
+    result: payload?.result,
+    error: payload?.error,
   }
 }
 

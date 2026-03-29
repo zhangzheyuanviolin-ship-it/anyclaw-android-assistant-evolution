@@ -34,6 +34,11 @@ const LIGHTWEIGHT_COMMAND_TIMEOUT_MS = 180_000
 const LIGHTWEIGHT_OUTPUT_LIMIT = 120_000
 const LIGHTWEIGHT_BOOTSTRAP_TARGET_VERSION = '2026.3.2'
 const LIGHTWEIGHT_DOC_MAX_CHARS = 4_000
+const OPENCLAW_NATIVE_READY_CACHE_MS = 6_000
+const OPENCLAW_GATEWAY_CALL_TIMEOUT_MS = 90_000
+const OPENCLAW_HISTORY_CALL_TIMEOUT_MS = 75_000
+const OPENCLAW_CHAT_SEND_TIMEOUT_MS = 45_000
+const OPENCLAW_RUN_WAIT_TIMEOUT_MS = 12_000
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -111,6 +116,9 @@ type LightweightModelConfig = {
   apiKey: string
 }
 
+let openClawNativeReadyCacheValue: boolean | null = null
+let openClawNativeReadyCacheAtMs = 0
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -176,6 +184,30 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, `'\"'\"'`)}'`
 }
 
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min
+  if (value < min) return min
+  if (value > max) return max
+  return Math.floor(value)
+}
+
+function normalizeTimeoutMs(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return clampInt(fallback, min, max)
+  }
+  return clampInt(value, min, max)
+}
+
+function rememberOpenClawNativeReady(value: boolean): void {
+  openClawNativeReadyCacheValue = value
+  openClawNativeReadyCacheAtMs = Date.now()
+}
+
+function invalidateOpenClawNativeReadyCache(): void {
+  openClawNativeReadyCacheValue = null
+  openClawNativeReadyCacheAtMs = 0
+}
+
 function extractJsonPayload(raw: string): string {
   const trimmed = raw.trim()
   if (!trimmed) {
@@ -203,7 +235,11 @@ function extractJsonPayload(raw: string): string {
   throw new Error('No JSON payload found in gateway response')
 }
 
-async function runOpenClawGatewayCall(method: string, params: unknown): Promise<unknown> {
+async function runOpenClawGatewayCall(
+  method: string,
+  params: unknown,
+  timeoutMs = OPENCLAW_GATEWAY_CALL_TIMEOUT_MS,
+): Promise<unknown> {
   const normalizedMethod = method.trim()
   if (!/^[a-zA-Z0-9._/-]+$/u.test(normalizedMethod)) {
     throw new Error(`Invalid OpenClaw gateway method: ${method}`)
@@ -230,8 +266,19 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
       })
 
       let buffer = ''
+      let settled = false
       child.stdout.setEncoding('utf8')
       child.stderr.setEncoding('utf8')
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // ignore kill errors
+        }
+        reject(new Error(`OpenClaw gateway call timeout: ${normalizedMethod} (${timeoutMs}ms)`))
+      }, timeoutMs)
 
       child.stdout.on('data', (chunk: string) => {
         buffer += chunk
@@ -240,8 +287,16 @@ async function runOpenClawGatewayCall(method: string, params: unknown): Promise<
         buffer += chunk
       })
 
-      child.on('error', reject)
+      child.on('error', (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      })
       child.on('exit', (code) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
         if (code === 0) {
           resolve(buffer)
           return
@@ -281,8 +336,19 @@ async function tryRunOpenClawGatewayCall(method: string, params: unknown): Promi
   }
 }
 
-async function isNativeOpenClawReady(): Promise<boolean> {
-  return (await tryRunOpenClawGatewayCall('health', {})) !== null
+async function isNativeOpenClawReady(forceRefresh = false): Promise<boolean> {
+  const now = Date.now()
+  if (
+    !forceRefresh &&
+    openClawNativeReadyCacheValue !== null &&
+    now - openClawNativeReadyCacheAtMs < OPENCLAW_NATIVE_READY_CACHE_MS
+  ) {
+    return openClawNativeReadyCacheValue
+  }
+
+  const ready = (await tryRunOpenClawGatewayCall('health', {})) !== null
+  rememberOpenClawNativeReady(ready)
+  return ready
 }
 
 function readPositiveInt(value: string | null, fallback: number): number {
@@ -2037,21 +2103,29 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'GET' && url.pathname === '/openclaw-api/sessions') {
         const limit = readPositiveInt(url.searchParams.get('limit'), 200)
         if (await isNativeOpenClawReady()) {
-          const nativeSessions = await runOpenClawGatewayCall('sessions.list', {
-            limit,
-            includeDerivedTitles: true,
-            includeLastMessage: true,
-            includeGlobal: true,
-            includeUnknown: true,
-          })
-          const record = asRecord(nativeSessions)
-          const sessions = Array.isArray(record?.sessions)
-            ? record.sessions
-              .map((row) => toOpenClawSessionSummary(asRecord(row) ?? {}))
-              .filter((row): row is Record<string, unknown> => row !== null)
-            : []
-          setJson(res, 200, { sessions })
-          return
+          try {
+            const nativeSessions = await runOpenClawGatewayCall(
+              'sessions.list',
+              {
+                limit,
+                includeDerivedTitles: true,
+                includeLastMessage: true,
+                includeGlobal: true,
+                includeUnknown: true,
+              },
+              OPENCLAW_HISTORY_CALL_TIMEOUT_MS,
+            )
+            const record = asRecord(nativeSessions)
+            const sessions = Array.isArray(record?.sessions)
+              ? record.sessions
+                .map((row) => toOpenClawSessionSummary(asRecord(row) ?? {}))
+                .filter((row): row is Record<string, unknown> => row !== null)
+              : []
+            setJson(res, 200, { sessions })
+            return
+          } catch {
+            invalidateOpenClawNativeReadyCache()
+          }
         }
 
         const sessions = await listLightweightSessions(limit)
@@ -2068,17 +2142,25 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
         const limit = readPositiveInt(String(payload?.limit ?? ''), 60)
         if (await isNativeOpenClawReady()) {
-          const nativeHistory = await runOpenClawGatewayCall('chat.history', {
-            sessionKey,
-            limit,
-          })
-          const record = asRecord(nativeHistory) ?? {}
-          setJson(res, 200, {
-            sessionKey: normalizeText(record.sessionKey) || sessionKey,
-            messages: Array.isArray(record.messages) ? record.messages : [],
-            thinkingLevel: normalizeText(record.thinkingLevel) || 'medium',
-          })
-          return
+          try {
+            const nativeHistory = await runOpenClawGatewayCall(
+              'chat.history',
+              {
+                sessionKey,
+                limit,
+              },
+              OPENCLAW_HISTORY_CALL_TIMEOUT_MS,
+            )
+            const record = asRecord(nativeHistory) ?? {}
+            setJson(res, 200, {
+              sessionKey: normalizeText(record.sessionKey) || sessionKey,
+              messages: Array.isArray(record.messages) ? record.messages : [],
+              thinkingLevel: normalizeText(record.thinkingLevel) || 'medium',
+            })
+            return
+          } catch {
+            invalidateOpenClawNativeReadyCache()
+          }
         }
 
         const result = await readLightweightHistory(sessionKey, limit)
@@ -2096,21 +2178,33 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
 
+        const sendTimeoutMs = normalizeTimeoutMs(
+          payload?.timeoutMs,
+          OPENCLAW_CHAT_SEND_TIMEOUT_MS,
+          8_000,
+          240_000,
+        )
+
         if (await isNativeOpenClawReady()) {
-          const nativeRun = await runOpenClawGatewayCall('chat.send', {
-            sessionKey,
-            message,
-            deliver: payload?.deliver === true,
-            attachments: attachments.length > 0 ? attachments : undefined,
-            timeoutMs: 12000,
-            idempotencyKey: `mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-          })
+          const nativeRun = await runOpenClawGatewayCall(
+            'chat.send',
+            {
+              sessionKey,
+              message,
+              deliver: payload?.deliver === true,
+              attachments: attachments.length > 0 ? attachments : undefined,
+              timeoutMs: sendTimeoutMs,
+              idempotencyKey: `mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            },
+            sendTimeoutMs + 15_000,
+          )
           const record = asRecord(nativeRun)
           const runId = normalizeText(record?.runId)
           if (!runId) {
             setJson(res, 502, { error: 'chat.send missing runId' })
             return
           }
+          rememberOpenClawNativeReady(true)
           setJson(res, 200, { ok: true, runId })
           return
         }
@@ -2122,6 +2216,76 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           attachments: attachments.length > 0 ? attachments : undefined,
         })
         setJson(res, 200, { ok: true, runId: run.runId })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/run/wait') {
+        const payload = asRecord(await readJsonBody(req))
+        const runId = normalizeText(payload?.runId)
+        if (!runId) {
+          setJson(res, 400, { error: 'Missing runId' })
+          return
+        }
+
+        const waitTimeoutMs = normalizeTimeoutMs(
+          payload?.timeoutMs,
+          OPENCLAW_RUN_WAIT_TIMEOUT_MS,
+          2_000,
+          120_000,
+        )
+
+        if (await isNativeOpenClawReady()) {
+          try {
+            const nativeWait = await runOpenClawGatewayCall(
+              'agent.wait',
+              {
+                runId,
+                timeoutMs: waitTimeoutMs,
+              },
+              waitTimeoutMs + 15_000,
+            )
+            const record = asRecord(nativeWait) ?? {}
+            const status = normalizeText(record.status).toLowerCase()
+            const completedStatuses = new Set([
+              'ok',
+              'completed',
+              'failed',
+              'error',
+              'cancelled',
+              'canceled',
+              'aborted',
+              'timeout',
+            ])
+            rememberOpenClawNativeReady(true)
+            setJson(res, 200, {
+              ok: true,
+              runId,
+              status: status || 'running',
+              completed: completedStatuses.has(status),
+              result: record.result ?? null,
+              error: record.error ?? null,
+            })
+            return
+          } catch (error) {
+            invalidateOpenClawNativeReadyCache()
+            setJson(res, 200, {
+              ok: false,
+              runId,
+              status: 'unknown',
+              completed: false,
+              error: getErrorMessage(error, 'agent.wait failed'),
+            })
+            return
+          }
+        }
+
+        setJson(res, 200, {
+          ok: true,
+          runId,
+          status: 'completed',
+          completed: true,
+          source: 'lightweight',
+        })
         return
       }
 

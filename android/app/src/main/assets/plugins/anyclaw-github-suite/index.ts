@@ -78,8 +78,8 @@ function stripInternalNoise(raw: string): string {
     return true;
   });
   const cleaned = keep.join("\n").trim();
-  if (cleaned.length <= 1200) return cleaned;
-  return cleaned.slice(0, 1200) + "\n...(truncated)";
+  if (cleaned.length <= 4000) return cleaned;
+  return cleaned.slice(0, 4000) + "\n...(truncated)";
 }
 
 function resolveToken(args: Record<string, unknown>, runtime: RuntimeConfig): string | null {

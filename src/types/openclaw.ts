@@ -55,6 +55,20 @@ export type OpenClawSendResponse = {
   runId: string
 }
 
+export type OpenClawRunWaitRequest = {
+  runId: string
+  timeoutMs?: number
+}
+
+export type OpenClawRunWaitResponse = {
+  ok: boolean
+  runId: string
+  status: string
+  completed: boolean
+  result?: unknown
+  error?: unknown
+}
+
 export type OpenClawImageAttachment = {
   type: 'image'
   mimeType: string

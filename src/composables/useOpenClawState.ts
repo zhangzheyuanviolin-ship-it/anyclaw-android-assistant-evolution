@@ -8,6 +8,7 @@ import {
   resetOpenClawSession,
   sendOpenClawMessage,
   uploadOpenClawAttachment,
+  waitOpenClawRun,
 } from '../api/openclawGateway'
 import type { UiLiveOverlay, UiMessage } from '../types/codex'
 import type {
@@ -26,7 +27,9 @@ const HISTORY_DEFAULT = 60
 const HISTORY_MIN = 20
 const HISTORY_MAX = 400
 const HISTORY_STEP = 40
-const POLL_INTERVAL_MS = 2500
+const POLL_INTERVAL_MS = 4200
+const RUN_WAIT_INTERVAL_MS = 5000
+const RUN_WAIT_TIMEOUT_MS = 12000
 const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
@@ -329,9 +332,13 @@ export function useOpenClawState() {
   const historyLimit = ref(readStorageNumber(HISTORY_LIMIT_STORAGE_KEY, HISTORY_DEFAULT))
   const lastError = ref('')
   const pendingRun = ref(false)
+  const pendingRunId = ref('')
+  const pendingRunStatus = ref('')
 
   let pollTimer: number | null = null
   let pollInFlight = false
+  let runWaitInFlight = false
+  let lastRunWaitAtMs = 0
   let lastSendAtMs = 0
   let pollTick = 0
   let bootstrapInFlight: Promise<string> | null = null
@@ -345,10 +352,14 @@ export function useOpenClawState() {
 
   const liveOverlay = computed<UiLiveOverlay | null>(() => {
     if (pendingRun.value) {
+      const status = pendingRunStatus.value.trim()
+      const reasoningText = showProcess.value
+        ? (status.length > 0 ? `正在执行任务，状态 ${status}` : '正在等待模型返回结果…')
+        : ''
       return {
         activityLabel: showProcess.value ? '执行中' : '处理中',
         activityDetails: [],
-        reasoningText: showProcess.value ? '正在等待模型返回结果…' : '',
+        reasoningText,
         errorText: '',
       }
     }
@@ -427,6 +438,8 @@ export function useOpenClawState() {
       messages.value = toUiMessages(payload.messages, showProcess.value)
       if (pendingRun.value && hasAssistantTextAfter(payload.messages, lastSendAtMs)) {
         pendingRun.value = false
+        pendingRunId.value = ''
+        pendingRunStatus.value = ''
       }
       lastError.value = ''
     } catch (error) {
@@ -450,6 +463,8 @@ export function useOpenClawState() {
     selectedSessionKey.value = nextSession
     messages.value = []
     pendingRun.value = false
+    pendingRunId.value = ''
+    pendingRunStatus.value = ''
     await refreshHistory()
   }
 
@@ -558,6 +573,8 @@ export function useOpenClawState() {
 
     isSendingMessage.value = true
     pendingRun.value = true
+    pendingRunId.value = ''
+    pendingRunStatus.value = 'queued'
     lastSendAtMs = Date.now()
 
     try {
@@ -592,17 +609,22 @@ export function useOpenClawState() {
       }
 
       const message = appendUploadedFilePathsToMessage(normalized.text, uploadedPaths)
-      await sendOpenClawMessage({
+      const sendResult = await sendOpenClawMessage({
         sessionKey,
         message,
         deliver: false,
       })
+      pendingRunId.value = sendResult.runId.trim()
+      pendingRunStatus.value = pendingRunId.value ? 'submitted' : 'running'
       await refreshHistory()
       await refreshSessions(sessionKey)
       await refreshHealth()
+      void waitPendingRun({ force: true })
       lastError.value = ''
     } catch (error) {
       pendingRun.value = false
+      pendingRunId.value = ''
+      pendingRunStatus.value = ''
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
@@ -636,6 +658,39 @@ export function useOpenClawState() {
     }
   }
 
+  async function waitPendingRun(options: { force?: boolean } = {}): Promise<void> {
+    if (!pendingRun.value) return
+
+    const runId = pendingRunId.value.trim()
+    if (!runId) return
+    if (runWaitInFlight) return
+
+    const now = Date.now()
+    if (!options.force && now - lastRunWaitAtMs < RUN_WAIT_INTERVAL_MS) return
+
+    runWaitInFlight = true
+    lastRunWaitAtMs = now
+    try {
+      const statusPayload = await waitOpenClawRun({
+        runId,
+        timeoutMs: RUN_WAIT_TIMEOUT_MS,
+      })
+      pendingRunStatus.value = statusPayload.status.trim() || pendingRunStatus.value || 'running'
+      if (statusPayload.completed) {
+        pendingRun.value = false
+        pendingRunId.value = ''
+        pendingRunStatus.value = ''
+        await refreshHistory({ silent: true })
+      }
+    } catch {
+      if (!pendingRunStatus.value) {
+        pendingRunStatus.value = 'running'
+      }
+    } finally {
+      runWaitInFlight = false
+    }
+  }
+
   async function pollOnce(): Promise<void> {
     if (pollInFlight) return
 
@@ -646,11 +701,12 @@ export function useOpenClawState() {
         return
       }
       pollTick += 1
-      if (pollTick % 3 === 0) {
+      if (pollTick % 5 === 0) {
         await refreshSessions(selectedSessionKey.value)
         await refreshHealth()
       }
       await refreshHistory({ silent: true })
+      await waitPendingRun()
     } finally {
       pollInFlight = false
     }
