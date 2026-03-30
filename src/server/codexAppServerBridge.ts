@@ -1428,7 +1428,7 @@ async function writeOpenClawUploadStream(
     }
 
     await new Promise<void>((resolve, reject) => {
-      writer.end((error) => {
+      writer.end((error?: Error | null) => {
         if (error) {
           reject(error)
           return
