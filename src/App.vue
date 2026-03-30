@@ -229,6 +229,24 @@
                 >
                   {{ t('openclaw_reset_lite') }}
                 </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="t('openclaw_trigger_heartbeat')"
+                  :disabled="!openClawSelectedSessionKey || isOpenClawHeartbeatTriggering"
+                  @click="onTriggerOpenClawHeartbeat"
+                >
+                  {{ t('openclaw_trigger_heartbeat') }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="t('openclaw_abort_task')"
+                  :disabled="!openClawSelectedSessionKey || isOpenClawAbortingRun"
+                  @click="onAbortOpenClawRun"
+                >
+                  {{ t('openclaw_abort_task') }}
+                </button>
                 <span class="openclaw-toolbar-tip">
                   {{ t('openclaw_history_window', { count: String(openClawHistoryLimit) }) }}
                 </span>
@@ -402,6 +420,8 @@ const {
   isLoadingSessions: isOpenClawLoadingSessions,
   isLoadingMessages: isOpenClawLoadingMessages,
   isSendingMessage: isOpenClawSendingMessage,
+  heartbeatTriggering: isOpenClawHeartbeatTriggering,
+  abortingRun: isOpenClawAbortingRun,
   liveOverlay: openClawLiveOverlay,
   lastError: openClawLastError,
   initialize: initializeOpenClaw,
@@ -417,6 +437,8 @@ const {
   toggleProcessView: toggleOpenClawProcessView,
   loadOlderHistory: loadOlderOpenClawHistory,
   resetHistoryToLite: resetOpenClawHistoryToLite,
+  triggerHeartbeatNow: triggerOpenClawHeartbeatNow,
+  abortCurrentRunNow: abortOpenClawRunNow,
   startPolling: startOpenClawPolling,
   stopPolling: stopOpenClawPolling,
 } = useOpenClawState()
@@ -727,6 +749,14 @@ function onRefreshOpenClaw(): void {
     await refreshOpenClawSessions(openClawSelectedSessionKey.value)
     await refreshOpenClawHistory()
   })()
+}
+
+function onTriggerOpenClawHeartbeat(): void {
+  void triggerOpenClawHeartbeatNow()
+}
+
+function onAbortOpenClawRun(): void {
+  void abortOpenClawRunNow()
 }
 
 function onCreateOpenClawSession(): void {

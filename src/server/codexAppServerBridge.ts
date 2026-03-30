@@ -44,6 +44,8 @@ const OPENCLAW_GATEWAY_RETRY_BACKOFF_MS = [300, 700, 1200, 1800]
 const OPENCLAW_NATIVE_STRICT_MODE = true
 const OPENCLAW_RUN_CONTEXT_TTL_MS = 6 * 60 * 60_000
 const OPENCLAW_RUN_CONTEXT_MAX = 400
+const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
+const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -509,6 +511,51 @@ function clearOpenClawNativeRun(runId: string): void {
   const normalizedRunId = runId.trim()
   if (!normalizedRunId) return
   openClawNativeRuns.delete(normalizedRunId)
+}
+
+function extractCronJobId(row: Record<string, unknown>): string {
+  const candidates = [
+    row.id,
+    row.jobId,
+    row.key,
+  ]
+  for (const candidate of candidates) {
+    const normalized = normalizeText(candidate)
+    if (normalized) return normalized
+  }
+  return ''
+}
+
+function findHeartbeatCronJob(cronListResult: unknown): {
+  id: string
+  name: string
+} | null {
+  const record = asRecord(cronListResult) ?? {}
+  const rows = Array.isArray(record.jobs) ? record.jobs : []
+  for (const row of rows) {
+    const item = asRecord(row)
+    if (!item) continue
+    const name = normalizeText(item.name)
+    const id = extractCronJobId(item)
+    if (!id) continue
+    if (name === OPENCLAW_HEARTBEAT_JOB_NAME) {
+      return { id, name }
+    }
+  }
+  for (const row of rows) {
+    const item = asRecord(row)
+    if (!item) continue
+    const name = normalizeText(item.name).toLowerCase()
+    const id = extractCronJobId(item)
+    if (!id) continue
+    if (name.includes('heartbeat')) {
+      return {
+        id,
+        name: normalizeText(item.name) || OPENCLAW_HEARTBEAT_JOB_NAME,
+      }
+    }
+  }
+  return null
 }
 
 function isLikelyAssistantResultContent(content: unknown): boolean {
@@ -2626,6 +2673,191 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           status: 'completed',
           completed: true,
           source: 'lightweight',
+        })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/heartbeat/trigger') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
+          setOpenClawNativeUnavailable(
+            res,
+            503,
+            'OpenClaw gateway unavailable',
+            'openclaw_native_unavailable',
+          )
+          return
+        }
+
+        try {
+          if (await isNativeOpenClawReady()) {
+            try {
+              const cronList = await runOpenClawGatewayCall(
+                'cron.list',
+                {
+                  includeDisabled: false,
+                  limit: 200,
+                  offset: 0,
+                },
+                20_000,
+              )
+              const heartbeatJob = findHeartbeatCronJob(cronList)
+              if (heartbeatJob) {
+                const cronRun = await runOpenClawGatewayCall(
+                  'cron.run',
+                  {
+                    id: heartbeatJob.id,
+                    mode: 'force',
+                  },
+                  30_000,
+                )
+                const cronRunRecord = asRecord(cronRun) ?? {}
+                const runId = normalizeText(cronRunRecord.runId)
+                if (runId && sessionKey) {
+                  rememberOpenClawNativeRun(runId, sessionKey)
+                }
+                setJson(res, 200, {
+                  ok: true,
+                  status: 'submitted',
+                  runId,
+                  source: 'cron.run',
+                  message: `Triggered ${heartbeatJob.name}`,
+                })
+                return
+              }
+            } catch {
+              invalidateOpenClawNativeReadyCache()
+            }
+
+            if (!sessionKey) {
+              setJson(res, 400, {
+                ok: false,
+                error: 'Missing sessionKey for heartbeat fallback',
+              })
+              return
+            }
+
+            const fallbackRun = await runOpenClawGatewayCall(
+              'chat.send',
+              {
+                sessionKey,
+                message: OPENCLAW_HEARTBEAT_PROMPT,
+                deliver: false,
+                timeoutMs: OPENCLAW_CHAT_SEND_TIMEOUT_MS,
+                idempotencyKey: `heartbeat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+              },
+              OPENCLAW_CHAT_SEND_TIMEOUT_MS + 20_000,
+            )
+            const record = asRecord(fallbackRun) ?? {}
+            const runId = normalizeText(record.runId)
+            if (runId) {
+              rememberOpenClawNativeRun(runId, sessionKey)
+            }
+            setJson(res, 200, {
+              ok: true,
+              status: runId ? 'submitted' : 'running',
+              runId,
+              source: 'chat.send',
+              message: 'Heartbeat fallback message submitted',
+            })
+            return
+          }
+        } catch {
+          invalidateOpenClawNativeReadyCache()
+          setOpenClawNativeUnavailable(
+            res,
+            502,
+            'OpenClaw heartbeat trigger failed',
+            'openclaw_native_heartbeat_unavailable',
+          )
+          return
+        }
+
+        if (OPENCLAW_NATIVE_STRICT_MODE) {
+          setOpenClawNativeUnavailable(
+            res,
+            503,
+            'OpenClaw gateway unavailable',
+            'openclaw_native_unavailable',
+          )
+          return
+        }
+
+        setJson(res, 503, {
+          ok: false,
+          error: 'OpenClaw heartbeat unavailable',
+        })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/run/abort') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        const runId = normalizeText(payload?.runId)
+        if (!sessionKey && !runId) {
+          setJson(res, 400, { error: 'Missing sessionKey or runId' })
+          return
+        }
+
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
+          setOpenClawNativeUnavailable(
+            res,
+            503,
+            'OpenClaw gateway unavailable',
+            'openclaw_native_unavailable',
+          )
+          return
+        }
+
+        try {
+          if (await isNativeOpenClawReady()) {
+            const params: Record<string, unknown> = {}
+            if (sessionKey) params.sessionKey = sessionKey
+            if (runId) params.runId = runId
+            await runOpenClawGatewayCall(
+              'chat.abort',
+              params,
+              20_000,
+            )
+            if (runId) {
+              clearOpenClawNativeRun(runId)
+            }
+            setJson(res, 200, {
+              ok: true,
+              aborted: true,
+              status: 'aborted',
+              source: 'chat.abort',
+            })
+            return
+          }
+        } catch {
+          invalidateOpenClawNativeReadyCache()
+          setOpenClawNativeUnavailable(
+            res,
+            502,
+            'OpenClaw abort failed',
+            'openclaw_native_abort_unavailable',
+          )
+          return
+        }
+
+        if (OPENCLAW_NATIVE_STRICT_MODE) {
+          setOpenClawNativeUnavailable(
+            res,
+            503,
+            'OpenClaw gateway unavailable',
+            'openclaw_native_unavailable',
+          )
+          return
+        }
+
+        setJson(res, 503, {
+          ok: false,
+          aborted: false,
+          status: 'failed',
+          source: 'unavailable',
         })
         return
       }

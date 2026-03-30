@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import {
+  abortOpenClawRun,
   createOpenClawSession,
   getOpenClawHealth,
   listOpenClawSessions,
@@ -7,6 +8,7 @@ import {
   renameOpenClawSession,
   resetOpenClawSession,
   sendOpenClawMessage,
+  triggerOpenClawHeartbeat,
   uploadOpenClawAttachment,
   waitOpenClawRun,
 } from '../api/openclawGateway'
@@ -34,6 +36,12 @@ const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
 const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
+const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
+
+type OptimisticOpenClawMessage = UiMessage & {
+  createdAtMs: number
+  sessionKey: string
+}
 
 type SessionSelectOptions = {
   syncHistory?: boolean
@@ -150,6 +158,17 @@ function hasAssistantTextAfter(messages: OpenClawHistoryMessage[], sinceMs: numb
     if (text.length > 0) return true
   }
   return false
+}
+
+function collectUserTextSet(messages: OpenClawHistoryMessage[]): Set<string> {
+  const values = new Set<string>()
+  for (const row of messages) {
+    if (row.role !== 'user') continue
+    const content = readContentItems(row.content)
+    const text = extractTextSegments(content, ['text']).trim()
+    if (text.length > 0) values.add(text)
+  }
+  return values
 }
 
 function toPendingRunReasoningText(status: string, showProcess: boolean): string {
@@ -347,6 +366,9 @@ export function useOpenClawState() {
   const pendingRun = ref(false)
   const pendingRunId = ref('')
   const pendingRunStatus = ref('')
+  const heartbeatTriggering = ref(false)
+  const abortingRun = ref(false)
+  const optimisticUserMessages = ref<OptimisticOpenClawMessage[]>([])
 
   let pollTimer: number | null = null
   let pollInFlight = false
@@ -386,6 +408,37 @@ export function useOpenClawState() {
 
     return null
   })
+
+  function setPendingRunStatus(status: string): void {
+    pendingRunStatus.value = status.trim()
+  }
+
+  function pruneOptimisticMessages(sessionKey: string, historyMessages: OpenClawHistoryMessage[]): void {
+    const now = Date.now()
+    const historyTextSet = collectUserTextSet(historyMessages)
+    optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => {
+      if (row.sessionKey !== sessionKey) return true
+      if (now - row.createdAtMs > OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS) return false
+      const text = row.text.trim()
+      if (!text) return true
+      return !historyTextSet.has(text)
+    })
+  }
+
+  function renderMessagesFromHistory(historyMessages: OpenClawHistoryMessage[]): void {
+    const sessionKey = selectedSessionKey.value.trim()
+    const rendered = toUiMessages(historyMessages, showProcess.value)
+    if (!sessionKey) {
+      messages.value = rendered
+      return
+    }
+    const localOptimistic = optimisticUserMessages.value
+      .filter((row) => row.sessionKey === sessionKey)
+      .map(({ createdAtMs: _createdAtMs, sessionKey: _sessionKey, ...message }) => message)
+    messages.value = localOptimistic.length > 0
+      ? [...rendered, ...localOptimistic]
+      : rendered
+  }
 
   function chooseSessionFromList(preferredSessionKey: string): string {
     const preferred = preferredSessionKey.trim()
@@ -446,11 +499,13 @@ export function useOpenClawState() {
         sessionKey,
         limit: historyLimit.value,
       })
-      messages.value = toUiMessages(payload.messages, showProcess.value)
+      pruneOptimisticMessages(sessionKey, payload.messages)
+      renderMessagesFromHistory(payload.messages)
       if (pendingRun.value && hasAssistantTextAfter(payload.messages, lastSendAtMs)) {
         pendingRun.value = false
         pendingRunId.value = ''
-        pendingRunStatus.value = ''
+        setPendingRunStatus('')
+        optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
       }
       lastError.value = ''
     } catch (error) {
@@ -475,7 +530,7 @@ export function useOpenClawState() {
     messages.value = []
     pendingRun.value = false
     pendingRunId.value = ''
-    pendingRunStatus.value = ''
+    setPendingRunStatus('')
     await refreshHistory()
   }
 
@@ -585,9 +640,9 @@ export function useOpenClawState() {
     isSendingMessage.value = true
     pendingRun.value = true
     pendingRunId.value = ''
-    pendingRunStatus.value = 'queued'
+    setPendingRunStatus('queued')
     lastSendAtMs = Date.now()
-    let optimisticMessageId = ''
+    let optimisticMessage: OptimisticOpenClawMessage | null = null
 
     try {
       const fileAttachments = normalized.attachments.filter(
@@ -625,15 +680,27 @@ export function useOpenClawState() {
         .map((row) => row.dataUrl.trim())
         .filter((row) => row.length > 0)
       if (message.length > 0 || optimisticImages.length > 0) {
-        optimisticMessageId = `openclaw-user-optimistic:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+        optimisticMessage = {
+          id: `openclaw-user-optimistic:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+          role: 'user',
+          text: message,
+          messageType: 'openclaw.user.optimistic',
+          images: optimisticImages.length > 0 ? optimisticImages : undefined,
+          createdAtMs: Date.now(),
+          sessionKey,
+        }
+        optimisticUserMessages.value = [
+          ...optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey || row.id !== optimisticMessage?.id),
+          optimisticMessage,
+        ]
         messages.value = [
           ...messages.value,
           {
-            id: optimisticMessageId,
-            role: 'user',
-            text: message,
-            messageType: 'openclaw.user.optimistic',
-            images: optimisticImages.length > 0 ? optimisticImages : undefined,
+            id: optimisticMessage.id,
+            role: optimisticMessage.role,
+            text: optimisticMessage.text,
+            messageType: optimisticMessage.messageType,
+            images: optimisticMessage.images,
           },
         ]
       }
@@ -643,19 +710,20 @@ export function useOpenClawState() {
         deliver: false,
       })
       pendingRunId.value = sendResult.runId.trim()
-      pendingRunStatus.value = pendingRunId.value ? 'submitted' : 'running'
+      setPendingRunStatus(pendingRunId.value ? 'submitted' : 'running')
       await refreshHistory()
       await refreshSessions(sessionKey)
       await refreshHealth()
       void waitPendingRun({ force: true })
       lastError.value = ''
     } catch (error) {
-      if (optimisticMessageId.length > 0) {
-        messages.value = messages.value.filter((row) => row.id !== optimisticMessageId)
+      if (optimisticMessage) {
+        optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.id !== optimisticMessage?.id)
+        messages.value = messages.value.filter((row) => row.id !== optimisticMessage?.id)
       }
       pendingRun.value = false
       pendingRunId.value = ''
-      pendingRunStatus.value = ''
+      setPendingRunStatus('')
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
@@ -689,6 +757,64 @@ export function useOpenClawState() {
     }
   }
 
+  async function triggerHeartbeatNow(): Promise<void> {
+    const sessionKey = selectedSessionKey.value.trim()
+    if (!sessionKey || heartbeatTriggering.value) return
+
+    heartbeatTriggering.value = true
+    lastError.value = ''
+    try {
+      const result = await triggerOpenClawHeartbeat({ sessionKey })
+      if (result.runId.trim()) {
+        pendingRun.value = true
+        pendingRunId.value = result.runId.trim()
+        setPendingRunStatus(result.status.trim() || 'submitted')
+        lastSendAtMs = Date.now()
+        void waitPendingRun({ force: true })
+      } else {
+        setPendingRunStatus('heartbeat')
+      }
+      await refreshHistory({ silent: true })
+      await refreshSessions(sessionKey)
+      await refreshHealth()
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : '触发心跳失败'
+      throw error
+    } finally {
+      heartbeatTriggering.value = false
+    }
+  }
+
+  async function abortCurrentRunNow(): Promise<void> {
+    const sessionKey = selectedSessionKey.value.trim()
+    if (!sessionKey || abortingRun.value) return
+
+    abortingRun.value = true
+    lastError.value = ''
+    try {
+      const runId = pendingRunId.value.trim()
+      const result = await abortOpenClawRun({
+        sessionKey,
+        runId: runId || undefined,
+      })
+      if (!result.aborted) {
+        throw new Error('终止任务失败：网关未确认中止')
+      }
+      pendingRun.value = false
+      pendingRunId.value = ''
+      setPendingRunStatus('aborted')
+      await refreshHistory({ silent: true })
+      await refreshSessions(sessionKey)
+      await refreshHealth()
+      setPendingRunStatus('')
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : '终止任务失败'
+      throw error
+    } finally {
+      abortingRun.value = false
+    }
+  }
+
   async function waitPendingRun(options: { force?: boolean } = {}): Promise<void> {
     if (!pendingRun.value) return
 
@@ -706,16 +832,16 @@ export function useOpenClawState() {
         runId,
         timeoutMs: RUN_WAIT_TIMEOUT_MS,
       })
-      pendingRunStatus.value = statusPayload.status.trim() || pendingRunStatus.value || 'running'
+      setPendingRunStatus(statusPayload.status.trim() || pendingRunStatus.value || 'running')
       if (statusPayload.completed) {
         pendingRun.value = false
         pendingRunId.value = ''
-        pendingRunStatus.value = ''
+        setPendingRunStatus('')
         await refreshHistory({ silent: true })
       }
     } catch {
       if (!pendingRunStatus.value) {
-        pendingRunStatus.value = 'reconnecting'
+        setPendingRunStatus('reconnecting')
       }
     } finally {
       runWaitInFlight = false
@@ -768,6 +894,8 @@ export function useOpenClawState() {
     isLoadingSessions,
     isLoadingMessages,
     isSendingMessage,
+    heartbeatTriggering,
+    abortingRun,
     liveOverlay,
     lastError,
     initialize,
@@ -783,6 +911,8 @@ export function useOpenClawState() {
     toggleProcessView,
     loadOlderHistory,
     resetHistoryToLite,
+    triggerHeartbeatNow,
+    abortCurrentRunNow,
     startPolling,
     stopPolling,
   }

@@ -22,6 +22,10 @@ function readNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
+function readBoolean(value: unknown): boolean {
+  return value === true
+}
+
 async function requestOpenClaw<T>(
   path: string,
   options: RequestInit = {},
@@ -304,12 +308,85 @@ export async function waitOpenClawRun(request: OpenClawRunWaitRequest): Promise<
   )
 
   return {
-    ok: payload?.ok === true,
+    ok: readBoolean(payload?.ok),
     runId: readString(payload?.runId).trim() || runId,
     status: readString(payload?.status).trim() || 'running',
-    completed: payload?.completed === true,
+    completed: readBoolean(payload?.completed),
     result: payload?.result,
     error: payload?.error,
+  }
+}
+
+export async function triggerOpenClawHeartbeat(request: {
+  sessionKey?: string
+}): Promise<{
+  ok: boolean
+  runId: string
+  status: string
+  source: string
+  message: string
+}> {
+  const payload = await requestOpenClaw<{
+    ok?: boolean
+    runId?: string
+    status?: string
+    source?: string
+    message?: string
+  }>(
+    '/openclaw-api/heartbeat/trigger',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionKey: request.sessionKey?.trim() || '',
+      }),
+    },
+    'Failed to trigger OpenClaw heartbeat',
+    35_000,
+  )
+
+  return {
+    ok: readBoolean(payload?.ok),
+    runId: readString(payload?.runId).trim(),
+    status: readString(payload?.status).trim() || 'running',
+    source: readString(payload?.source).trim() || 'unknown',
+    message: readString(payload?.message).trim(),
+  }
+}
+
+export async function abortOpenClawRun(request: {
+  sessionKey?: string
+  runId?: string
+}): Promise<{
+  ok: boolean
+  aborted: boolean
+  status: string
+  source: string
+}> {
+  const payload = await requestOpenClaw<{
+    ok?: boolean
+    aborted?: boolean
+    status?: string
+    source?: string
+  }>(
+    '/openclaw-api/run/abort',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionKey: request.sessionKey?.trim() || '',
+        runId: request.runId?.trim() || '',
+      }),
+    },
+    'Failed to abort OpenClaw run',
+    25_000,
+  )
+
+  return {
+    ok: readBoolean(payload?.ok),
+    aborted: readBoolean(payload?.aborted),
+    status: readString(payload?.status).trim() || 'aborted',
+    source: readString(payload?.source).trim() || 'unknown',
   }
 }
 
