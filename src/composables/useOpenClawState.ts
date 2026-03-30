@@ -28,8 +28,8 @@ const HISTORY_MIN = 20
 const HISTORY_MAX = 400
 const HISTORY_STEP = 40
 const POLL_INTERVAL_MS = 4200
-const RUN_WAIT_INTERVAL_MS = 5000
-const RUN_WAIT_TIMEOUT_MS = 12000
+const RUN_WAIT_INTERVAL_MS = 7000
+const RUN_WAIT_TIMEOUT_MS = 25000
 const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
 const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
@@ -150,6 +150,19 @@ function hasAssistantTextAfter(messages: OpenClawHistoryMessage[], sinceMs: numb
     if (text.length > 0) return true
   }
   return false
+}
+
+function toPendingRunReasoningText(status: string, showProcess: boolean): string {
+  if (!showProcess) return ''
+  const normalized = status.trim().toLowerCase()
+  if (!normalized) return '正在等待模型返回结果…'
+  if (normalized === 'reconnecting' || normalized === 'unknown') {
+    return '正在重连并等待工具结果返回…'
+  }
+  if (normalized === 'submitted' || normalized === 'queued') {
+    return `任务已提交，状态 ${status}`
+  }
+  return `正在执行任务，状态 ${status}`
 }
 
 function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolean): UiMessage[] {
@@ -353,9 +366,7 @@ export function useOpenClawState() {
   const liveOverlay = computed<UiLiveOverlay | null>(() => {
     if (pendingRun.value) {
       const status = pendingRunStatus.value.trim()
-      const reasoningText = showProcess.value
-        ? (status.length > 0 ? `正在执行任务，状态 ${status}` : '正在等待模型返回结果…')
-        : ''
+      const reasoningText = toPendingRunReasoningText(status, showProcess.value)
       return {
         activityLabel: showProcess.value ? '执行中' : '处理中',
         activityDetails: [],
@@ -576,6 +587,7 @@ export function useOpenClawState() {
     pendingRunId.value = ''
     pendingRunStatus.value = 'queued'
     lastSendAtMs = Date.now()
+    let optimisticMessageId = ''
 
     try {
       const fileAttachments = normalized.attachments.filter(
@@ -609,6 +621,22 @@ export function useOpenClawState() {
       }
 
       const message = appendUploadedFilePathsToMessage(normalized.text, uploadedPaths)
+      const optimisticImages = imageAttachments
+        .map((row) => row.dataUrl.trim())
+        .filter((row) => row.length > 0)
+      if (message.length > 0 || optimisticImages.length > 0) {
+        optimisticMessageId = `openclaw-user-optimistic:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+        messages.value = [
+          ...messages.value,
+          {
+            id: optimisticMessageId,
+            role: 'user',
+            text: message,
+            messageType: 'openclaw.user.optimistic',
+            images: optimisticImages.length > 0 ? optimisticImages : undefined,
+          },
+        ]
+      }
       const sendResult = await sendOpenClawMessage({
         sessionKey,
         message,
@@ -622,6 +650,9 @@ export function useOpenClawState() {
       void waitPendingRun({ force: true })
       lastError.value = ''
     } catch (error) {
+      if (optimisticMessageId.length > 0) {
+        messages.value = messages.value.filter((row) => row.id !== optimisticMessageId)
+      }
       pendingRun.value = false
       pendingRunId.value = ''
       pendingRunStatus.value = ''
@@ -684,7 +715,7 @@ export function useOpenClawState() {
       }
     } catch {
       if (!pendingRunStatus.value) {
-        pendingRunStatus.value = 'running'
+        pendingRunStatus.value = 'reconnecting'
       }
     } finally {
       runWaitInFlight = false

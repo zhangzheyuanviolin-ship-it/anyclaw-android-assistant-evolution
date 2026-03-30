@@ -49,6 +49,10 @@ async function requestOpenClaw<T>(
       if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
         timerHost.clearTimeout(timeout)
       }
+      if (response.status >= 500 && attempt < 2) {
+        await new Promise((resolve) => timerHost?.setTimeout?.(resolve, 300 + attempt * 300) ?? resolve(null))
+        continue
+      }
       break
     } catch (error) {
       if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
