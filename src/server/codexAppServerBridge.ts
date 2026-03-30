@@ -4,7 +4,7 @@ import { accessSync, constants as fsConstants, createWriteStream } from 'node:fs
 import { mkdtemp, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, extname } from 'node:path'
 
 const prefixBin = process.env.PREFIX ? join(process.env.PREFIX, 'bin') : ''
 const shellPath = prefixBin ? join(prefixBin, 'sh') : '/bin/sh'
@@ -1398,6 +1398,21 @@ function sanitizeOpenClawUploadFileName(fileName: string): string {
     .replace(/_+/gu, '_')
     .slice(0, 120)
   return collapsed.length > 0 ? collapsed : 'attachment.bin'
+}
+
+function normalizeOpenClawUploadExtension(fileName: string): string {
+  const extension = extname(fileName.trim()).toLowerCase()
+  if (!extension) return '.bin'
+  if (extension.length > 12) return '.bin'
+  if (!/^\.[a-z0-9]+$/u.test(extension)) return '.bin'
+  return extension
+}
+
+function buildOpenClawUploadStoredName(fileName: string): string {
+  const stamp = Date.now().toString(36)
+  const rand = Math.random().toString(36).slice(2, 8)
+  const extension = normalizeOpenClawUploadExtension(fileName)
+  return 'att-' + stamp + rand + extension
 }
 
 
@@ -2927,7 +2942,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           (contentType.split(';')[0]?.trim() || 'application/octet-stream')
 
         await mkdir(OPENCLAW_UPLOAD_DIR, { recursive: true })
-        const storedName = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${fileName}`
+        const storedName = buildOpenClawUploadStoredName(fileName)
         const storedPath = join(OPENCLAW_UPLOAD_DIR, storedName)
 
         try {
@@ -2972,7 +2987,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         await mkdir(OPENCLAW_UPLOAD_DIR, { recursive: true })
-        const storedName = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${fileName}`
+        const storedName = buildOpenClawUploadStoredName(fileName)
         const storedPath = join(OPENCLAW_UPLOAD_DIR, storedName)
         await writeFile(storedPath, decoded, { mode: 0o600 })
 

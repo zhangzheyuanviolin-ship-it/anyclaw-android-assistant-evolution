@@ -278,12 +278,18 @@ function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolea
 function appendUploadedFilePathsToMessage(message: string, paths: string[]): string {
   const trimmed = message.trim()
   if (paths.length === 0) return trimmed
-  const rows = paths.map((path, index) => `${index + 1}. ${path}`)
-  const fileSection = [`已附加本地文件路径（共${paths.length}个）：`, ...rows].join('\n')
+  const rows = paths.map((path) => `PATH::${path}`)
+  const fileSection = [
+    `已附加本地文件路径（共${paths.length}个）。`,
+    '严格规则：后续所有工具调用必须逐字使用 PATH:: 后面的完整绝对路径，不得改写文件名、空格、下划线、连字符或扩展名。',
+    'PATH_BEGIN',
+    ...rows,
+    'PATH_END',
+  ].join('\n')
   if (trimmed.length === 0) {
-    return `${fileSection}\n\n请逐一读取以上全部文件后继续，并在回复中引用具体路径。`
+    return `${fileSection}\n\n请逐一读取以上全部文件后继续，并在回复中逐字引用完整路径。`
   }
-  return `${trimmed}\n\n${fileSection}\n\n请逐一读取以上全部文件后继续。`
+  return `${trimmed}\n\n${fileSection}\n\n请逐一读取以上全部文件后继续，并逐字引用完整路径。`
 }
 
 function normalizeComposerInput(input: string | OpenClawComposerSubmitPayload): {
