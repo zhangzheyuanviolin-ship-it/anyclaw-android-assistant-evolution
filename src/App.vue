@@ -229,24 +229,6 @@
                 >
                   {{ t('openclaw_reset_lite') }}
                 </button>
-                <button
-                  type="button"
-                  class="openclaw-toolbar-button"
-                  :aria-label="t('openclaw_trigger_heartbeat')"
-                  :disabled="!openClawSelectedSessionKey || isOpenClawHeartbeatTriggering"
-                  @click="onTriggerOpenClawHeartbeat"
-                >
-                  {{ t('openclaw_trigger_heartbeat') }}
-                </button>
-                <button
-                  type="button"
-                  class="openclaw-toolbar-button"
-                  :aria-label="t('openclaw_abort_task')"
-                  :disabled="!openClawSelectedSessionKey || isOpenClawAbortingRun"
-                  @click="onAbortOpenClawRun"
-                >
-                  {{ t('openclaw_abort_task') }}
-                </button>
                 <span class="openclaw-toolbar-tip">
                   {{ t('openclaw_history_window', { count: String(openClawHistoryLimit) }) }}
                 </span>
@@ -282,6 +264,10 @@
                 :disabled="isOpenClawSendingMessage"
                 :placeholder="t('openclaw_send_placeholder')"
                 :send-label="t('openclaw_send_button')"
+                :heartbeat-label="t('openclaw_trigger_heartbeat')"
+                :abort-label="t('openclaw_abort_task')"
+                :heartbeat-disabled="!openClawSelectedSessionKey || isOpenClawHeartbeatTriggering"
+                :abort-disabled="!openClawSelectedSessionKey || isOpenClawAbortingRun"
                 :attach-label="t('openclaw_attach_button')"
                 :attach-camera-label="t('openclaw_attach_camera')"
                 :attach-gallery-label="t('openclaw_attach_gallery')"
@@ -290,6 +276,8 @@
                 :image-tag-label="t('openclaw_attach_image_tag')"
                 :file-tag-label="t('openclaw_attach_file_tag')"
                 @submit="onSubmitOpenClawMessage"
+                @trigger-heartbeat="onTriggerOpenClawHeartbeat"
+                @abort-run="onAbortOpenClawRun"
               />
             </div>
           </template>

@@ -13,53 +13,72 @@
         @keydown.enter.exact.prevent="onSubmit"
       />
 
-      <div class="openclaw-composer-attach-wrap">
+      <div class="openclaw-composer-actions">
         <button
-          class="openclaw-composer-attach"
+          class="openclaw-composer-action"
           type="button"
-          :aria-label="attachLabel"
-          :disabled="disabled || !sessionKey"
-          @click="toggleAttachmentMenu"
+          :aria-label="heartbeatLabel"
+          :disabled="!sessionKey || heartbeatDisabled"
+          @click="onTriggerHeartbeat"
         >
-          {{ attachLabel }}
+          {{ heartbeatLabel }}
         </button>
+        <button
+          class="openclaw-composer-action"
+          type="button"
+          :aria-label="abortLabel"
+          :disabled="!sessionKey || abortDisabled"
+          @click="onAbortRun"
+        >
+          {{ abortLabel }}
+        </button>
+        <div class="openclaw-composer-attach-wrap">
+          <button
+            class="openclaw-composer-attach"
+            type="button"
+            :aria-label="attachLabel"
+            :disabled="disabled || !sessionKey"
+            @click="toggleAttachmentMenu"
+          >
+            {{ attachLabel }}
+          </button>
 
-        <div v-if="isAttachmentMenuOpen" class="openclaw-composer-attach-menu">
-          <button
-            class="openclaw-composer-attach-menu-item"
-            type="button"
-            :aria-label="attachCameraLabel"
-            @click="openCameraPicker"
-          >
-            {{ attachCameraLabel }}
-          </button>
-          <button
-            class="openclaw-composer-attach-menu-item"
-            type="button"
-            :aria-label="attachGalleryLabel"
-            @click="openGalleryPicker"
-          >
-            {{ attachGalleryLabel }}
-          </button>
-          <button
-            class="openclaw-composer-attach-menu-item"
-            type="button"
-            :aria-label="attachFilesLabel"
-            @click="openFilesPicker"
-          >
-            {{ attachFilesLabel }}
-          </button>
+          <div v-if="isAttachmentMenuOpen" class="openclaw-composer-attach-menu">
+            <button
+              class="openclaw-composer-attach-menu-item"
+              type="button"
+              :aria-label="attachCameraLabel"
+              @click="openCameraPicker"
+            >
+              {{ attachCameraLabel }}
+            </button>
+            <button
+              class="openclaw-composer-attach-menu-item"
+              type="button"
+              :aria-label="attachGalleryLabel"
+              @click="openGalleryPicker"
+            >
+              {{ attachGalleryLabel }}
+            </button>
+            <button
+              class="openclaw-composer-attach-menu-item"
+              type="button"
+              :aria-label="attachFilesLabel"
+              @click="openFilesPicker"
+            >
+              {{ attachFilesLabel }}
+            </button>
+          </div>
         </div>
+        <button
+          class="openclaw-composer-submit"
+          type="submit"
+          :aria-label="sendLabel"
+          :disabled="disabled || !sessionKey || (draft.trim().length === 0 && attachments.length === 0)"
+        >
+          {{ sendLabel }}
+        </button>
       </div>
-
-      <button
-        class="openclaw-composer-submit"
-        type="submit"
-        :aria-label="sendLabel"
-        :disabled="disabled || !sessionKey || (draft.trim().length === 0 && attachments.length === 0)"
-      >
-        {{ sendLabel }}
-      </button>
     </div>
 
     <div v-if="attachments.length > 0" class="openclaw-composer-attachments" :aria-label="attachLabel">
@@ -98,6 +117,7 @@
       class="openclaw-composer-hidden-input"
       type="file"
       accept="image/*"
+      multiple
       @change="onSelectGalleryFiles"
     />
     <input
@@ -127,6 +147,10 @@ const props = defineProps<{
   placeholder: string
   sendLabel: string
   attachLabel: string
+  heartbeatLabel: string
+  abortLabel: string
+  heartbeatDisabled?: boolean
+  abortDisabled?: boolean
   attachCameraLabel: string
   attachGalleryLabel: string
   attachFilesLabel: string
@@ -137,6 +161,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   submit: [payload: OpenClawComposerSubmitPayload]
+  'trigger-heartbeat': []
+  'abort-run': []
 }>()
 
 const draft = ref('')
@@ -302,6 +328,16 @@ function onSelectGenericFiles(event: Event): void {
   void onFilesSelected(target?.files ?? null, 'files', target)
 }
 
+function onTriggerHeartbeat(): void {
+  if (!props.sessionKey || props.heartbeatDisabled) return
+  emit('trigger-heartbeat')
+}
+
+function onAbortRun(): void {
+  if (!props.sessionKey || props.abortDisabled) return
+  emit('abort-run')
+}
+
 function onSubmit(): void {
   const text = draft.value.trim()
   const hasAttachments = attachments.value.length > 0
@@ -351,11 +387,11 @@ onBeforeUnmount(() => {
 }
 
 .openclaw-composer-shell {
-  @apply rounded-2xl border border-zinc-300 bg-white p-3 shadow-sm flex items-center gap-2;
+  @apply rounded-2xl border border-zinc-300 bg-white p-3 shadow-sm flex flex-col gap-2;
 }
 
 .openclaw-composer-input {
-  @apply flex-1 min-w-0 h-16 max-h-48 rounded-xl border-0 bg-transparent px-1 py-2 text-sm text-zinc-900 outline-none resize-y;
+  @apply w-full min-w-0 h-16 max-h-48 rounded-xl border-0 bg-transparent px-1 py-2 text-sm text-zinc-900 outline-none resize-y;
 }
 
 .openclaw-composer-input:disabled {
@@ -364,6 +400,14 @@ onBeforeUnmount(() => {
 
 .openclaw-composer-submit {
   @apply shrink-0 inline-flex h-9 items-center justify-center rounded-full border-0 px-4 bg-zinc-900 text-white text-sm transition hover:bg-black disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500;
+}
+
+.openclaw-composer-actions {
+  @apply w-full flex items-center gap-2 flex-wrap;
+}
+
+.openclaw-composer-action {
+  @apply shrink-0 inline-flex h-9 items-center justify-center rounded-full border border-zinc-300 bg-white px-3 text-xs text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400;
 }
 
 .openclaw-composer-attach-wrap {
