@@ -433,3 +433,35 @@ export async function uploadOpenClawAttachment(payload: {
     sizeBytes: readNumber(response.sizeBytes),
   }
 }
+
+export async function uploadOpenClawAttachmentBinary(payload: {
+  fileName: string
+  mimeType: string
+  file: Blob
+}): Promise<{ path: string; fileName: string; sizeBytes: number }> {
+  const fileName = payload.fileName.trim() || 'attachment.bin'
+  const mimeType = payload.mimeType.trim() || 'application/octet-stream'
+  const endpoint = `/openclaw-api/attachments/upload-stream?fileName=${encodeURIComponent(fileName)}&mimeType=${encodeURIComponent(mimeType)}`
+
+  const response = await requestOpenClaw<{ path?: string; fileName?: string; sizeBytes?: number }>(
+    endpoint,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': mimeType },
+      body: payload.file,
+    },
+    'Failed to upload OpenClaw attachment',
+    600_000,
+  )
+
+  const storedPath = readString(response.path).trim()
+  if (!storedPath) {
+    throw new Error('Failed to upload OpenClaw attachment: missing path')
+  }
+
+  return {
+    path: storedPath,
+    fileName: readString(response.fileName).trim() || fileName,
+    sizeBytes: readNumber(response.sizeBytes),
+  }
+}

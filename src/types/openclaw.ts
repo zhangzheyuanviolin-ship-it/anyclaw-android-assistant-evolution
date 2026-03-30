@@ -92,6 +92,7 @@ export type OpenClawComposerImageAttachment = {
   mimeType: string
   sizeBytes: number
   dataUrl: string
+  file: File
 }
 
 export type OpenClawComposerAttachment =

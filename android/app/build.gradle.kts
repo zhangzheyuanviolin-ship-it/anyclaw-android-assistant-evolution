@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 169
-        versionName = "1.0.5-openclaw-composer-actions-multiattach"
+        versionCode = 170
+        versionName = "1.0.6-openclaw-attachments-stream-multiselect"
     }
 
     flavorDimensions += "channel"

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { accessSync, constants as fsConstants } from 'node:fs'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { accessSync, constants as fsConstants, createWriteStream } from 'node:fs'
+import { mkdtemp, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -18,7 +18,8 @@ const runtimeHealthPath = homeDir ? join(homeDir, '.openclaw-android', 'state', 
 const OPENCLAW_UPLOAD_DIR = homeDir
   ? join(homeDir, '.openclaw', 'workspace', 'uploads')
   : join(process.cwd(), '.openclaw', 'workspace', 'uploads')
-const OPENCLAW_UPLOAD_MAX_BYTES = 15_000_000
+const OPENCLAW_UPLOAD_MAX_BYTES = 1_000_000_000
+const OPENCLAW_UPLOAD_STREAM_MAX_BYTES = 1_000_000_000
 const OPENCLAW_CONFIG_PATH = homeDir
   ? join(homeDir, '.openclaw', 'openclaw.json')
   : join(process.cwd(), '.openclaw', 'openclaw.json')
@@ -199,6 +200,13 @@ function normalizeText(value: unknown): string {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, `'\"'\"'`)}'`
+}
+
+function readHeaderText(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0].trim() : ''
+  }
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 function clampInt(value: number, min: number, max: number): number {
@@ -1390,6 +1398,49 @@ function sanitizeOpenClawUploadFileName(fileName: string): string {
     .replace(/_+/gu, '_')
     .slice(0, 120)
   return collapsed.length > 0 ? collapsed : 'attachment.bin'
+}
+
+
+async function writeOpenClawUploadStream(
+  req: IncomingMessage,
+  storedPath: string,
+  maxBytes: number,
+): Promise<number> {
+  const writer = createWriteStream(storedPath, {
+    flags: 'wx',
+    mode: 0o600,
+  })
+
+  let sizeBytes = 0
+  try {
+    for await (const chunk of req) {
+      const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+      sizeBytes += buffer.length
+      if (sizeBytes > maxBytes) {
+        throw new Error(`Attachment exceeds size limit (${Math.floor(maxBytes / 1_000_000)}MB)`)
+      }
+      if (!writer.write(buffer)) {
+        await new Promise<void>((resolve, reject) => {
+          writer.once('drain', resolve)
+          writer.once('error', reject)
+        })
+      }
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      writer.end((error) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve()
+      })
+    })
+    return sizeBytes
+  } catch (error) {
+    writer.destroy()
+    throw error
+  }
 }
 
 function decodeStrictBase64(value: string): Buffer {
@@ -2862,6 +2913,48 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         return
       }
 
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/attachments/upload-stream') {
+        const fileName = sanitizeOpenClawUploadFileName(
+          normalizeText(url.searchParams.get('fileName')) ||
+          readHeaderText(req.headers['x-file-name']) ||
+          'attachment.bin',
+        )
+        const contentType = readHeaderText(req.headers['content-type'])
+        const mimeType =
+          normalizeText(url.searchParams.get('mimeType')) ||
+          readHeaderText(req.headers['x-mime-type']) ||
+          (contentType.split(';')[0]?.trim() || 'application/octet-stream')
+
+        await mkdir(OPENCLAW_UPLOAD_DIR, { recursive: true })
+        const storedName = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${fileName}`
+        const storedPath = join(OPENCLAW_UPLOAD_DIR, storedName)
+
+        try {
+          const sizeBytes = await writeOpenClawUploadStream(
+            req,
+            storedPath,
+            OPENCLAW_UPLOAD_STREAM_MAX_BYTES,
+          )
+          setJson(res, 200, {
+            ok: true,
+            path: storedPath,
+            fileName,
+            mimeType,
+            sizeBytes,
+          })
+        } catch (error) {
+          await unlink(storedPath).catch(() => undefined)
+          const message = error instanceof Error ? error.message : 'Attachment upload failed'
+          if (message.includes('Attachment exceeds size limit')) {
+            setJson(res, 400, { error: message })
+          } else {
+            setJson(res, 500, { error: message })
+          }
+        }
+        return
+      }
+
       if (req.method === 'POST' && url.pathname === '/openclaw-api/attachments/upload') {
         const payload = asRecord(await readJsonBody(req))
         const fileName = sanitizeOpenClawUploadFileName(normalizeText(payload?.fileName))
@@ -2874,7 +2967,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         const decoded = decodeStrictBase64(contentBase64)
         if (decoded.length > OPENCLAW_UPLOAD_MAX_BYTES) {
-          setJson(res, 400, { error: 'Attachment exceeds size limit (15MB)' })
+          setJson(res, 400, { error: 'Attachment exceeds size limit (1000MB)' })
           return
         }
 

@@ -116,7 +116,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 return@registerForActivityResult
             }
-            val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            val uris = collectFileChooserUris(result.resultCode, result.data)
             callback.onReceiveValue(uris)
         }
 
@@ -348,6 +348,14 @@ class MainActivity : AppCompatActivity() {
                         null
                     }
 
+                val allowMultiple =
+                    fileChooserParams?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+                chooserIntent?.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
+                chooserIntent?.addCategory(Intent.CATEGORY_OPENABLE)
+                if (chooserIntent != null && chooserIntent.type.isNullOrBlank()) {
+                    chooserIntent.type = "*/*"
+                }
+
                 if (chooserIntent == null) {
                     this@MainActivity.filePathCallback?.onReceiveValue(null)
                     this@MainActivity.filePathCallback = null
@@ -375,6 +383,22 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun collectFileChooserUris(resultCode: Int, data: Intent?): Array<Uri>? {
+        if (resultCode != RESULT_OK) return null
+        val ordered = LinkedHashSet<Uri>()
+        val parsed = WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+        parsed?.forEach { uri ->
+            if (uri != null) ordered.add(uri)
+        }
+        data?.data?.let { ordered.add(it) }
+        data?.clipData?.let { clip ->
+            for (index in 0 until clip.itemCount) {
+                clip.getItemAt(index)?.uri?.let { ordered.add(it) }
+            }
+        }
+        return if (ordered.isEmpty()) null else ordered.toTypedArray()
     }
 
     private fun shouldUseCameraCapture(fileChooserParams: WebChromeClient.FileChooserParams?): Boolean {

@@ -9,7 +9,7 @@ import {
   resetOpenClawSession,
   sendOpenClawMessage,
   triggerOpenClawHeartbeat,
-  uploadOpenClawAttachment,
+  uploadOpenClawAttachmentBinary,
   waitOpenClawRun,
 } from '../api/openclawGateway'
 import type { UiLiveOverlay, UiMessage } from '../types/codex'
@@ -19,7 +19,6 @@ import type {
   OpenClawComposerSubmitPayload,
   OpenClawContentItem,
   OpenClawHistoryMessage,
-  OpenClawLocalFileAttachment,
   OpenClawSessionSummary,
 } from '../types/openclaw'
 
@@ -32,8 +31,6 @@ const HISTORY_STEP = 40
 const POLL_INTERVAL_MS = 4200
 const RUN_WAIT_INTERVAL_MS = 7000
 const RUN_WAIT_TIMEOUT_MS = 25000
-const OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES = 5_000_000
-const OPENCLAW_FILE_UPLOAD_MAX_BYTES = 15_000_000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
 const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
 const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
@@ -278,62 +275,15 @@ function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolea
   return output
 }
 
-function estimateBase64DecodedBytes(base64: string): number {
-  const normalized = base64.trim()
-  if (!normalized) return 0
-  const padding =
-    normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0
-  return Math.floor((normalized.length * 3) / 4) - padding
-}
-
-function toImageUploadPayload(image: OpenClawComposerImageAttachment): {
-  fileName: string
-  mimeType: string
-  contentBase64: string
-} | null {
-  const dataUrl = image.dataUrl.trim()
-  if (!dataUrl) return null
-  const match = /^data:([^;]+);base64,(.+)$/u.exec(dataUrl)
-  if (!match) return null
-  const mimeType = (match[1] || image.mimeType || 'image/png').trim()
-  const content = (match[2] || '').trim()
-  if (!mimeType || !content) return null
-  const sizeBytes = estimateBase64DecodedBytes(content)
-  if (!Number.isFinite(sizeBytes) || sizeBytes < 1 || sizeBytes > OPENCLAW_IMAGE_ATTACHMENT_MAX_BYTES) {
-    throw new Error(`图片附件过大或格式无效：${image.name}`)
-  }
-  return {
-    fileName: image.name.trim() || 'image',
-    mimeType,
-    contentBase64: content,
-  }
-}
-
-function readFileAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(new Error(`文件读取失败：${file.name}`))
-    reader.onload = () => {
-      const raw = typeof reader.result === 'string' ? reader.result : ''
-      const match = /^data:[^;]*;base64,(.+)$/u.exec(raw.trim())
-      if (!match || !match[1]) {
-        reject(new Error(`文件编码失败：${file.name}`))
-        return
-      }
-      resolve(match[1])
-    }
-    reader.readAsDataURL(file)
-  })
-}
-
 function appendUploadedFilePathsToMessage(message: string, paths: string[]): string {
   const trimmed = message.trim()
   if (paths.length === 0) return trimmed
-  const fileSection = ['已附加本地文件路径：', ...paths].join('\n')
+  const rows = paths.map((path, index) => `${index + 1}. ${path}`)
+  const fileSection = [`已附加本地文件路径（共${paths.length}个）：`, ...rows].join('\n')
   if (trimmed.length === 0) {
-    return `${fileSection}\n\n请先读取以上文件后继续。`
+    return `${fileSection}\n\n请逐一读取以上全部文件后继续，并在回复中引用具体路径。`
   }
-  return `${trimmed}\n\n${fileSection}`
+  return `${trimmed}\n\n${fileSection}\n\n请逐一读取以上全部文件后继续。`
 }
 
 function normalizeComposerInput(input: string | OpenClawComposerSubmitPayload): {
@@ -645,34 +595,34 @@ export function useOpenClawState() {
     let optimisticMessage: OptimisticOpenClawMessage | null = null
 
     try {
-      const fileAttachments = normalized.attachments.filter(
-        (row): row is OpenClawLocalFileAttachment => row.type === 'file',
-      )
       const imageAttachments = normalized.attachments.filter(
         (row): row is OpenClawComposerImageAttachment => row.type === 'image',
       )
 
       const uploadedPaths: string[] = []
-      for (const imageAttachment of imageAttachments) {
-        const imageUpload = toImageUploadPayload(imageAttachment)
-        if (!imageUpload) {
-          throw new Error(`图片附件无效：${imageAttachment.name}`)
+      const uploadFailures: string[] = []
+
+      for (const attachment of normalized.attachments) {
+        const fileName = attachment.name?.trim() || (attachment.type === 'image' ? 'image' : 'file')
+        const mimeType = attachment.mimeType?.trim() || 'application/octet-stream'
+        try {
+          const uploaded = await uploadOpenClawAttachmentBinary({
+            fileName,
+            mimeType,
+            file: attachment.file,
+          })
+          uploadedPaths.push(uploaded.path)
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : '附件上传失败'
+          uploadFailures.push(`${fileName}: ${reason}`)
         }
-        const uploaded = await uploadOpenClawAttachment(imageUpload)
-        uploadedPaths.push(uploaded.path)
       }
 
-      for (const fileAttachment of fileAttachments) {
-        if (fileAttachment.sizeBytes > OPENCLAW_FILE_UPLOAD_MAX_BYTES) {
-          throw new Error(`文件超过大小限制（15MB）：${fileAttachment.name}`)
+      if (!normalized.text && uploadedPaths.length === 0) {
+        if (uploadFailures.length > 0) {
+          throw new Error(`附件上传失败，未成功上传任何文件：\n${uploadFailures.join('\n')}`)
         }
-        const contentBase64 = await readFileAsBase64(fileAttachment.file)
-        const uploaded = await uploadOpenClawAttachment({
-          fileName: fileAttachment.name,
-          mimeType: fileAttachment.mimeType,
-          contentBase64,
-        })
-        uploadedPaths.push(uploaded.path)
+        throw new Error('发送消息失败：未检测到可发送的文本或附件')
       }
 
       const message = appendUploadedFilePathsToMessage(normalized.text, uploadedPaths)
@@ -715,7 +665,11 @@ export function useOpenClawState() {
       await refreshSessions(sessionKey)
       await refreshHealth()
       void waitPendingRun({ force: true })
-      lastError.value = ''
+      if (uploadFailures.length > 0) {
+        lastError.value = `部分附件上传失败（成功 ${uploadedPaths.length}，失败 ${uploadFailures.length}）：\n${uploadFailures.join('\n')}`
+      } else {
+        lastError.value = ''
+      }
     } catch (error) {
       if (optimisticMessage) {
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.id !== optimisticMessage?.id)

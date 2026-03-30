@@ -124,6 +124,7 @@
       ref="filesPickerRef"
       class="openclaw-composer-hidden-input"
       type="file"
+      accept="*/*"
       multiple
       @change="onSelectGenericFiles"
     />
@@ -138,8 +139,6 @@ import type {
   OpenClawComposerSubmitPayload,
 } from '../../types/openclaw'
 
-const IMAGE_SIZE_LIMIT_BYTES = 5_000_000
-const FILE_SIZE_LIMIT_BYTES = 15_000_000
 
 const props = defineProps<{
   sessionKey: string
@@ -228,12 +227,10 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 async function toImageAttachment(file: File): Promise<OpenClawComposerImageAttachment> {
-  if (file.size > IMAGE_SIZE_LIMIT_BYTES) {
-    throw new Error(`图片超过 5MB 限制：${file.name}`)
-  }
   const dataUrl = await readFileAsDataUrl(file)
   return {
     id: generateAttachmentId(),
+    file,
     type: 'image',
     name: file.name || 'image',
     mimeType: normalizeImageMimeType(file),
@@ -243,12 +240,6 @@ async function toImageAttachment(file: File): Promise<OpenClawComposerImageAttac
 }
 
 function toFileAttachment(file: File): OpenClawComposerAttachment {
-  if (file.size > FILE_SIZE_LIMIT_BYTES) {
-    throw new Error(`文件超过 15MB 限制：${file.name}`)
-  }
-  if (file.type.startsWith('image/')) {
-    throw new Error(`请用“${props.attachGalleryLabel}”添加图片：${file.name}`)
-  }
   return {
     id: generateAttachmentId(),
     type: 'file',
@@ -270,21 +261,30 @@ async function onFilesSelected(
   }
 
   const nextRows: OpenClawComposerAttachment[] = []
-  try {
-    for (const file of Array.from(files)) {
+  const failures: string[] = []
+
+  for (const file of Array.from(files)) {
+    try {
       if (source === 'files') {
         nextRows.push(toFileAttachment(file))
       } else {
         nextRows.push(await toImageAttachment(file))
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '附件处理失败：' + (file.name || '未知文件')
+      failures.push(message)
     }
+  }
+
+  try {
     attachments.value = [...attachments.value, ...nextRows]
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '附件处理失败'
-    showAttachmentError(message)
   } finally {
     if (pickerRef) pickerRef.value = ''
     isAttachmentMenuOpen.value = false
+  }
+
+  if (failures.length > 0) {
+    showAttachmentError('以下附件处理失败（其余附件已保留）：\n' + failures.join('\n'))
   }
 }
 
