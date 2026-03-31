@@ -28,12 +28,14 @@ const HISTORY_DEFAULT = 60
 const HISTORY_MIN = 20
 const HISTORY_MAX = 400
 const HISTORY_STEP = 40
-const POLL_INTERVAL_MS = 4200
-const RUN_WAIT_INTERVAL_MS = 7000
-const RUN_WAIT_TIMEOUT_MS = 25000
+const POLL_INTERVAL_MS = 2800
+const RUN_WAIT_INTERVAL_MS = 2600
+const RUN_WAIT_TIMEOUT_MS = 9000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
 const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
 const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
+const OPENCLAW_AUTO_HEARTBEAT_AFTER_MS = 180_000
+const OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS = 120_000
 
 type OptimisticOpenClawMessage = UiMessage & {
   createdAtMs: number
@@ -334,6 +336,8 @@ export function useOpenClawState() {
   let pollTick = 0
   let bootstrapInFlight: Promise<string> | null = null
   let lastBootstrapAttemptAtMs = 0
+  let pendingRunStartedAtMs = 0
+  let lastAutoHeartbeatAtMs = 0
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
@@ -461,6 +465,7 @@ export function useOpenClawState() {
         pendingRun.value = false
         pendingRunId.value = ''
         setPendingRunStatus('')
+        pendingRunStartedAtMs = 0
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
       }
       lastError.value = ''
@@ -487,6 +492,7 @@ export function useOpenClawState() {
     pendingRun.value = false
     pendingRunId.value = ''
     setPendingRunStatus('')
+    pendingRunStartedAtMs = 0
     await refreshHistory()
   }
 
@@ -667,6 +673,7 @@ export function useOpenClawState() {
       })
       pendingRunId.value = sendResult.runId.trim()
       setPendingRunStatus(pendingRunId.value ? 'submitted' : 'running')
+      pendingRunStartedAtMs = Date.now()
       await refreshHistory()
       await refreshSessions(sessionKey)
       await refreshHealth()
@@ -684,6 +691,7 @@ export function useOpenClawState() {
       pendingRun.value = false
       pendingRunId.value = ''
       setPendingRunStatus('')
+      pendingRunStartedAtMs = 0
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
@@ -730,6 +738,7 @@ export function useOpenClawState() {
         pendingRunId.value = result.runId.trim()
         setPendingRunStatus(result.status.trim() || 'submitted')
         lastSendAtMs = Date.now()
+        pendingRunStartedAtMs = Date.now()
         void waitPendingRun({ force: true })
       } else {
         setPendingRunStatus('heartbeat')
@@ -763,6 +772,7 @@ export function useOpenClawState() {
       pendingRun.value = false
       pendingRunId.value = ''
       setPendingRunStatus('aborted')
+      pendingRunStartedAtMs = 0
       await refreshHistory({ silent: true })
       await refreshSessions(sessionKey)
       await refreshHealth()
@@ -797,7 +807,25 @@ export function useOpenClawState() {
         pendingRun.value = false
         pendingRunId.value = ''
         setPendingRunStatus('')
+        pendingRunStartedAtMs = 0
         await refreshHistory({ silent: true })
+      } else {
+        const status = statusPayload.status.trim().toLowerCase()
+        const nowMs = Date.now()
+        const pendingAgeMs = pendingRunStartedAtMs > 0 ? nowMs - pendingRunStartedAtMs : 0
+        const shouldAutoHeartbeat = (
+          (status === 'running' || status === 'reconnecting' || status === 'unknown' || status === 'submitted') &&
+          pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
+          nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
+          !heartbeatTriggering.value &&
+          !abortingRun.value
+        )
+        if (shouldAutoHeartbeat) {
+          lastAutoHeartbeatAtMs = nowMs
+          void triggerHeartbeatNow().catch(() => {
+            // keep pending loop running even if auto-heartbeat fails
+          })
+        }
       }
     } catch {
       if (!pendingRunStatus.value) {

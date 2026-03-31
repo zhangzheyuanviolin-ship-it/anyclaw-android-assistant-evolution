@@ -314,6 +314,11 @@ export async function waitOpenClawRun(request: OpenClawRunWaitRequest): Promise<
     completed: readBoolean(payload?.completed),
     result: payload?.result,
     error: payload?.error,
+    rawStatus: readString(payload?.rawStatus).trim(),
+    source: readString(payload?.source).trim(),
+    retryable: readBoolean(payload?.retryable),
+    waiting: readBoolean(payload?.waiting),
+    revision: readNumber(payload?.revision),
   }
 }
 

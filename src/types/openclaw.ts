@@ -67,6 +67,11 @@ export type OpenClawRunWaitResponse = {
   completed: boolean
   result?: unknown
   error?: unknown
+  rawStatus?: string
+  source?: string
+  retryable?: boolean
+  waiting?: boolean
+  revision?: number
 }
 
 export type OpenClawImageAttachment = {

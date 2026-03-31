@@ -45,6 +45,12 @@ const OPENCLAW_GATEWAY_RETRY_BACKOFF_MS = [300, 700, 1200, 1800]
 const OPENCLAW_NATIVE_STRICT_MODE = true
 const OPENCLAW_RUN_CONTEXT_TTL_MS = 6 * 60 * 60_000
 const OPENCLAW_RUN_CONTEXT_MAX = 400
+const OPENCLAW_RUN_MONITOR_WAIT_TIMEOUT_MS = 85_000
+const OPENCLAW_RUN_MONITOR_IDLE_SLEEP_MS = 350
+const OPENCLAW_RUN_MONITOR_PROBE_INTERVAL_MS = 12_000
+const OPENCLAW_RUN_MONITOR_MAX_RETRYABLE_ERRORS = 18
+const OPENCLAW_RUN_MONITOR_MAX_NON_RETRYABLE_ERRORS = 3
+const OPENCLAW_RUN_WAIT_POLL_SLICE_MS = 450
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
 const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
@@ -130,7 +136,17 @@ type OpenClawNativeRunContext = {
   sentAtMs: number
   lastStatus: string
   lastError: string
+  lastResult: unknown
+  rawStatus: string
+  source: string
+  retryable: boolean
+  completed: boolean
   updatedAtMs: number
+  revision: number
+  monitorInFlight: boolean
+  retryableErrors: number
+  nonRetryableErrors: number
+  lastProbeAtMs: number
 }
 
 let openClawNativeReadyCacheValue: boolean | null = null
@@ -482,43 +498,289 @@ function pruneOpenClawNativeRuns(nowMs = Date.now()): void {
   }
 }
 
-function rememberOpenClawNativeRun(runId: string, sessionKey: string): void {
+function normalizeOpenClawRunStatus(status: string): string {
+  const normalized = status.trim().toLowerCase()
+  if (!normalized || normalized === 'timeout') return 'running'
+  return normalized
+}
+
+function isOpenClawRunCompletedStatus(status: string): boolean {
+  return OPENCLAW_COMPLETED_RUN_STATUSES.has(normalizeOpenClawRunStatus(status))
+}
+
+function rememberOpenClawNativeRun(runId: string, sessionKey = ''): void {
   const normalizedRunId = runId.trim()
   const normalizedSessionKey = sessionKey.trim()
-  if (!normalizedRunId || !normalizedSessionKey) return
+  if (!normalizedRunId) return
   const nowMs = Date.now()
-  openClawNativeRuns.set(normalizedRunId, {
+  const existing = openClawNativeRuns.get(normalizedRunId)
+  if (existing) {
+    if (normalizedSessionKey.length > 0) {
+      existing.sessionKey = normalizedSessionKey
+    }
+    existing.updatedAtMs = nowMs
+    existing.revision += 1
+    openClawNativeRuns.set(normalizedRunId, existing)
+    pruneOpenClawNativeRuns(nowMs)
+    return
+  }
+  const created: OpenClawNativeRunContext = {
     runId: normalizedRunId,
     sessionKey: normalizedSessionKey,
     sentAtMs: nowMs,
     lastStatus: 'submitted',
     lastError: '',
+    lastResult: null,
+    rawStatus: '',
+    source: 'chat.send',
+    retryable: true,
+    completed: false,
     updatedAtMs: nowMs,
-  })
+    revision: 1,
+    monitorInFlight: false,
+    retryableErrors: 0,
+    nonRetryableErrors: 0,
+    lastProbeAtMs: 0,
+  }
+  openClawNativeRuns.set(normalizedRunId, created)
   pruneOpenClawNativeRuns(nowMs)
 }
 
-function updateOpenClawNativeRun(runId: string, status: string, errorText = ''): void {
+function updateOpenClawNativeRun(
+  runId: string,
+  status: string,
+  errorText = '',
+  options: {
+    rawStatus?: string
+    result?: unknown
+    source?: string
+    retryable?: boolean
+    completed?: boolean
+    sessionKey?: string
+  } = {},
+): OpenClawNativeRunContext | null {
   const normalizedRunId = runId.trim()
-  if (!normalizedRunId) return
+  if (!normalizedRunId) return null
+  const normalizedStatus = normalizeOpenClawRunStatus(status)
   const nowMs = Date.now()
   const existing = openClawNativeRuns.get(normalizedRunId)
-  if (!existing) return
-  existing.lastStatus = status.trim() || existing.lastStatus
-  existing.lastError = errorText.trim()
-  existing.updatedAtMs = nowMs
-  if (OPENCLAW_COMPLETED_RUN_STATUSES.has(existing.lastStatus)) {
-    openClawNativeRuns.delete(normalizedRunId)
-  } else {
-    openClawNativeRuns.set(normalizedRunId, existing)
+  if (!existing) {
+    rememberOpenClawNativeRun(normalizedRunId, options.sessionKey)
   }
+  const context = openClawNativeRuns.get(normalizedRunId)
+  if (!context) return null
+  if (options.sessionKey && options.sessionKey.trim().length > 0) {
+    context.sessionKey = options.sessionKey.trim()
+  }
+  context.lastStatus = normalizedStatus || context.lastStatus || 'running'
+  context.lastError = errorText.trim()
+  if (Object.prototype.hasOwnProperty.call(options, 'result')) {
+    context.lastResult = options.result
+  }
+  context.rawStatus = options.rawStatus?.trim() ?? context.rawStatus
+  context.source = options.source?.trim() || context.source || 'unknown'
+  if (typeof options.retryable === 'boolean') {
+    context.retryable = options.retryable
+  }
+  context.completed = typeof options.completed === 'boolean'
+    ? options.completed
+    : isOpenClawRunCompletedStatus(context.lastStatus)
+  context.updatedAtMs = nowMs
+  context.revision += 1
+  openClawNativeRuns.set(normalizedRunId, context)
   pruneOpenClawNativeRuns(nowMs)
+  return context
 }
 
 function clearOpenClawNativeRun(runId: string): void {
   const normalizedRunId = runId.trim()
   if (!normalizedRunId) return
   openClawNativeRuns.delete(normalizedRunId)
+}
+
+function snapshotOpenClawNativeRun(runId: string): OpenClawNativeRunContext | null {
+  const context = openClawNativeRuns.get(runId.trim())
+  if (!context) return null
+  return { ...context }
+}
+
+async function waitForOpenClawRunSnapshot(
+  runId: string,
+  timeoutMs: number,
+): Promise<{
+  context: OpenClawNativeRunContext | null
+  timedOut: boolean
+}> {
+  const normalizedRunId = runId.trim()
+  if (!normalizedRunId) return { context: null, timedOut: false }
+  const initial = snapshotOpenClawNativeRun(normalizedRunId)
+  if (!initial) return { context: null, timedOut: false }
+  if (initial.completed) return { context: initial, timedOut: false }
+  const deadline = Date.now() + Math.max(500, timeoutMs)
+  const baseRevision = initial.revision
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now()
+    await sleepMs(Math.min(OPENCLAW_RUN_WAIT_POLL_SLICE_MS, Math.max(80, remaining)))
+    const next = snapshotOpenClawNativeRun(normalizedRunId)
+    if (!next) return { context: null, timedOut: false }
+    if (next.completed || next.revision !== baseRevision) {
+      return { context: next, timedOut: false }
+    }
+  }
+  return {
+    context: snapshotOpenClawNativeRun(normalizedRunId),
+    timedOut: true,
+  }
+}
+
+async function monitorOpenClawNativeRun(runId: string): Promise<void> {
+  const normalizedRunId = runId.trim()
+  if (!normalizedRunId) return
+  const initial = openClawNativeRuns.get(normalizedRunId)
+  if (!initial || initial.monitorInFlight || initial.completed) return
+  initial.monitorInFlight = true
+  initial.updatedAtMs = Date.now()
+  initial.revision += 1
+  openClawNativeRuns.set(normalizedRunId, initial)
+
+  try {
+    while (true) {
+      const current = openClawNativeRuns.get(normalizedRunId)
+      if (!current) return
+      if (current.completed || isOpenClawRunCompletedStatus(current.lastStatus)) {
+        return
+      }
+
+      try {
+        const nativeWait = await runOpenClawGatewayCall(
+          'agent.wait',
+          {
+            runId: normalizedRunId,
+            timeoutMs: OPENCLAW_RUN_MONITOR_WAIT_TIMEOUT_MS,
+          },
+          OPENCLAW_RUN_MONITOR_WAIT_TIMEOUT_MS + 30_000,
+        )
+        const record = asRecord(nativeWait) ?? {}
+        const rawStatus = normalizeText(record.status).toLowerCase()
+        const status = normalizeOpenClawRunStatus(rawStatus)
+        const completed = isOpenClawRunCompletedStatus(status)
+        rememberOpenClawNativeReady(true)
+        const updated = updateOpenClawNativeRun(
+          normalizedRunId,
+          status,
+          getErrorMessage(record.error, ''),
+          {
+            rawStatus,
+            result: record.result ?? null,
+            source: 'agent.wait',
+            retryable: true,
+            completed,
+          },
+        )
+        if (!updated) return
+        updated.retryableErrors = 0
+        updated.nonRetryableErrors = 0
+        updated.lastProbeAtMs = Date.now()
+        openClawNativeRuns.set(normalizedRunId, updated)
+        if (completed) return
+        await sleepMs(OPENCLAW_RUN_MONITOR_IDLE_SLEEP_MS)
+        continue
+      } catch (error) {
+        invalidateOpenClawNativeReadyCache()
+        const errorMessage = getErrorMessage(error, 'agent.wait failed')
+        const retryable = isOpenClawGatewayRetryableError(errorMessage)
+        const updated = updateOpenClawNativeRun(
+          normalizedRunId,
+          retryable ? 'reconnecting' : 'failed',
+          errorMessage,
+          {
+            source: 'agent.wait.error',
+            retryable,
+            completed: false,
+          },
+        )
+        if (!updated) return
+        if (retryable) {
+          updated.retryableErrors += 1
+        } else {
+          updated.nonRetryableErrors += 1
+        }
+        const nowMs = Date.now()
+        const shouldProbe = (
+          updated.sessionKey.length > 0 &&
+          (nowMs - updated.lastProbeAtMs >= OPENCLAW_RUN_MONITOR_PROBE_INTERVAL_MS || !retryable)
+        )
+        if (shouldProbe) {
+          updated.lastProbeAtMs = nowMs
+          openClawNativeRuns.set(normalizedRunId, updated)
+          const probe = await probeOpenClawRunCompletionByHistory(normalizedRunId)
+          if (probe) {
+            const probeStatus = normalizeOpenClawRunStatus(probe.status)
+            const probeCompleted = probe.completed || isOpenClawRunCompletedStatus(probeStatus)
+            updateOpenClawNativeRun(
+              normalizedRunId,
+              probeStatus,
+              getErrorMessage(probe.error, ''),
+              {
+                result: probe.result ?? null,
+                source: 'history-probe',
+                retryable: true,
+                completed: probeCompleted,
+              },
+            )
+            if (probeCompleted) return
+          }
+        }
+        const latest = openClawNativeRuns.get(normalizedRunId)
+        if (!latest) return
+        if (latest.nonRetryableErrors >= OPENCLAW_RUN_MONITOR_MAX_NON_RETRYABLE_ERRORS) {
+          updateOpenClawNativeRun(
+            normalizedRunId,
+            'failed',
+            latest.lastError || 'OpenClaw run failed',
+            {
+              source: 'monitor.guard',
+              retryable: false,
+              completed: true,
+            },
+          )
+          return
+        }
+        if (latest.retryableErrors >= OPENCLAW_RUN_MONITOR_MAX_RETRYABLE_ERRORS) {
+          updateOpenClawNativeRun(
+            normalizedRunId,
+            'reconnecting',
+            latest.lastError || 'OpenClaw run still reconnecting',
+            {
+              source: 'monitor.guard',
+              retryable: true,
+              completed: false,
+            },
+          )
+          return
+        }
+        const backoff = retryable
+          ? OPENCLAW_GATEWAY_RETRY_BACKOFF_MS[Math.min(latest.retryableErrors, OPENCLAW_GATEWAY_RETRY_BACKOFF_MS.length - 1)] + 400
+          : 1200 + latest.nonRetryableErrors * 500
+        await sleepMs(backoff)
+      }
+    }
+  } finally {
+    const finalContext = openClawNativeRuns.get(normalizedRunId)
+    if (finalContext) {
+      finalContext.monitorInFlight = false
+      finalContext.updatedAtMs = Date.now()
+      finalContext.revision += 1
+      openClawNativeRuns.set(normalizedRunId, finalContext)
+      pruneOpenClawNativeRuns()
+    }
+  }
+}
+
+function ensureOpenClawNativeRunMonitor(runId: string): void {
+  const context = openClawNativeRuns.get(runId.trim())
+  if (!context || context.monitorInFlight || context.completed) return
+  void monitorOpenClawNativeRun(context.runId)
 }
 
 function extractCronJobId(row: Record<string, unknown>): string {
@@ -2600,6 +2862,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             }
             rememberOpenClawNativeReady(true)
             rememberOpenClawNativeRun(runId, sessionKey)
+            ensureOpenClawNativeRunMonitor(runId)
             setJson(res, 200, { ok: true, runId })
             return
           } catch {
@@ -2651,73 +2914,107 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         )
 
         if (await isNativeOpenClawReady()) {
-          const waitAttempts = 3
-          for (let attempt = 0; attempt < waitAttempts; attempt += 1) {
-            try {
-              const nativeWait = await runOpenClawGatewayCall(
-                'agent.wait',
-                {
-                  runId,
-                  timeoutMs: waitTimeoutMs,
-                },
-                waitTimeoutMs + 30_000,
-              )
-              const record = asRecord(nativeWait) ?? {}
-              const rawStatus = normalizeText(record.status).toLowerCase()
-              const status = rawStatus === 'timeout' ? 'running' : (rawStatus || 'running')
-              const completed = OPENCLAW_COMPLETED_RUN_STATUSES.has(status)
-              rememberOpenClawNativeReady(true)
-              updateOpenClawNativeRun(runId, status, '')
-              if (completed) {
-                clearOpenClawNativeRun(runId)
-              }
-              setJson(res, 200, {
-                ok: true,
+          rememberOpenClawNativeRun(runId)
+          ensureOpenClawNativeRunMonitor(runId)
+
+          const snapshot = await waitForOpenClawRunSnapshot(runId, waitTimeoutMs)
+          if (snapshot.context) {
+            const status = normalizeOpenClawRunStatus(snapshot.context.lastStatus)
+            const completed = snapshot.context.completed || isOpenClawRunCompletedStatus(status)
+            if (completed !== snapshot.context.completed) {
+              updateOpenClawNativeRun(
                 runId,
                 status,
-                completed,
-                result: record.result ?? null,
-                error: record.error ?? null,
-                rawStatus,
-              })
-              return
-            } catch (error) {
-              invalidateOpenClawNativeReadyCache()
-              const errorMessage = getErrorMessage(error, 'agent.wait failed')
-              const retryable = isOpenClawGatewayRetryableError(errorMessage)
-              updateOpenClawNativeRun(runId, 'reconnecting', errorMessage)
-              if (retryable && attempt < waitAttempts - 1) {
-                await sleepMs(500 + attempt * 800)
-                continue
-              }
-              const probe = await probeOpenClawRunCompletionByHistory(runId)
-              if (probe) {
-                if (probe.completed) {
-                  clearOpenClawNativeRun(runId)
-                } else {
-                  updateOpenClawNativeRun(runId, probe.status, '')
-                }
-                setJson(res, 200, {
-                  ok: probe.completed,
-                  runId,
-                  status: probe.status,
-                  completed: probe.completed,
-                  result: probe.result ?? null,
-                  error: probe.error ?? null,
-                  source: 'history-probe',
-                })
-                return
-              }
-              setJson(res, 200, {
-                ok: false,
-                runId,
-                status: retryable ? 'reconnecting' : 'failed',
-                completed: false,
-                error: errorMessage,
-                retryable,
-              })
-              return
+                snapshot.context.lastError,
+                {
+                  rawStatus: snapshot.context.rawStatus,
+                  result: snapshot.context.lastResult,
+                  source: snapshot.context.source,
+                  retryable: snapshot.context.retryable,
+                  completed,
+                },
+              )
             }
+            setJson(res, 200, {
+              ok: true,
+              runId,
+              status,
+              completed,
+              result: completed ? snapshot.context.lastResult ?? null : null,
+              error: snapshot.context.lastError || null,
+              rawStatus: snapshot.context.rawStatus || status,
+              source: snapshot.context.source || 'run-monitor',
+              retryable: snapshot.context.retryable,
+              waiting: snapshot.timedOut,
+              revision: snapshot.context.revision,
+            })
+            return
+          }
+
+          try {
+            const nativeWait = await runOpenClawGatewayCall(
+              'agent.wait',
+              {
+                runId,
+                timeoutMs: waitTimeoutMs,
+              },
+              waitTimeoutMs + 30_000,
+            )
+            const record = asRecord(nativeWait) ?? {}
+            const rawStatus = normalizeText(record.status).toLowerCase()
+            const status = normalizeOpenClawRunStatus(rawStatus)
+            const completed = isOpenClawRunCompletedStatus(status)
+            rememberOpenClawNativeReady(true)
+            updateOpenClawNativeRun(
+              runId,
+              status,
+              getErrorMessage(record.error, ''),
+              {
+                rawStatus,
+                result: record.result ?? null,
+                source: 'agent.wait.fallback',
+                retryable: true,
+                completed,
+              },
+            )
+            if (!completed) {
+              ensureOpenClawNativeRunMonitor(runId)
+            }
+            setJson(res, 200, {
+              ok: true,
+              runId,
+              status,
+              completed,
+              result: record.result ?? null,
+              error: record.error ?? null,
+              rawStatus,
+              source: 'agent.wait.fallback',
+              retryable: true,
+            })
+            return
+          } catch (error) {
+            invalidateOpenClawNativeReadyCache()
+            const errorMessage = getErrorMessage(error, 'agent.wait failed')
+            const retryable = isOpenClawGatewayRetryableError(errorMessage)
+            updateOpenClawNativeRun(
+              runId,
+              retryable ? 'reconnecting' : 'failed',
+              errorMessage,
+              {
+                source: 'agent.wait.fallback.error',
+                retryable,
+                completed: false,
+              },
+            )
+            setJson(res, 200, {
+              ok: false,
+              runId,
+              status: retryable ? 'reconnecting' : 'failed',
+              completed: false,
+              error: errorMessage,
+              retryable,
+            })
+            return
           }
         }
         if (OPENCLAW_NATIVE_STRICT_MODE) {
@@ -2783,6 +3080,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
                 const runId = normalizeText(cronRunRecord.runId)
                 if (runId && sessionKey) {
                   rememberOpenClawNativeRun(runId, sessionKey)
+                  ensureOpenClawNativeRunMonitor(runId)
                 }
                 setJson(res, 200, {
                   ok: true,
@@ -2820,6 +3118,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             const runId = normalizeText(record.runId)
             if (runId) {
               rememberOpenClawNativeRun(runId, sessionKey)
+              ensureOpenClawNativeRunMonitor(runId)
             }
             setJson(res, 200, {
               ok: true,
