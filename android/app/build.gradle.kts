@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 174
-        versionName = "1.0.10-openclaw-watchdog-progress-fix"
+        versionCode = 175
+        versionName = "1.0.11-openclaw-watchdog-stall-guard"
     }
 
     flavorDimensions += "channel"

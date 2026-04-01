@@ -461,12 +461,13 @@ export function useOpenClawState() {
       })
       pruneOptimisticMessages(sessionKey, payload.messages)
       renderMessagesFromHistory(payload.messages)
-      if (pendingRun.value && hasAssistantTextAfter(payload.messages, lastSendAtMs)) {
-        pendingRun.value = false
-        pendingRunId.value = ''
-        setPendingRunStatus('')
-        pendingRunStartedAtMs = 0
+      if (hasAssistantTextAfter(payload.messages, lastSendAtMs)) {
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
+        if (pendingRun.value && pendingRunId.value.trim().length === 0) {
+          pendingRun.value = false
+          setPendingRunStatus('')
+          pendingRunStartedAtMs = 0
+        }
       }
       lastError.value = ''
     } catch (error) {
@@ -800,6 +801,7 @@ export function useOpenClawState() {
     try {
       const statusPayload = await waitOpenClawRun({
         runId,
+        sessionKey: selectedSessionKey.value.trim(),
         timeoutMs: RUN_WAIT_TIMEOUT_MS,
       })
       setPendingRunStatus(statusPayload.status.trim() || pendingRunStatus.value || 'running')

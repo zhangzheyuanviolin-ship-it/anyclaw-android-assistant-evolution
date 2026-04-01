@@ -57,6 +57,7 @@ export type OpenClawSendResponse = {
 
 export type OpenClawRunWaitRequest = {
   runId: string
+  sessionKey?: string
   timeoutMs?: number
 }
 

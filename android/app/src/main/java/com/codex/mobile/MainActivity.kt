@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
         private const val OPENCLAW_RUN_WATCHDOG_SUSPECT_AFTER_MS = 75_000
         private const val OPENCLAW_RUN_WATCHDOG_TRIGGER_AFTER_MS = 120_000
         private const val OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS = 90_000L
+        private const val OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS = 60_000L
         const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
         const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.SESSION_KEY"
@@ -80,6 +81,7 @@ class MainActivity : AppCompatActivity() {
     private val openClawRunWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawRunWatchdogStarted = false
     private var openClawRunWatchdogInFlight = false
+    private var openClawRunWatchdogInFlightSinceMs = 0L
     private var openClawRunWatchdogLastHeartbeatAtMs = 0L
     private var openClawRunWatchdogSuppressUntilMs = 0L
     private var openClawRunWatchdogLastRunId = ""
@@ -1081,11 +1083,20 @@ class MainActivity : AppCompatActivity() {
     private fun stopOpenClawRunWatchdogMonitor() {
         openClawRunWatchdogStarted = false
         openClawRunWatchdogInFlight = false
+        openClawRunWatchdogInFlightSinceMs = 0L
         openClawRunWatchdogHandler.removeCallbacks(openClawRunWatchdogPollRunnable)
     }
 
     private fun pollOpenClawRunWatchdogAsync() {
-        if (openClawRunWatchdogInFlight) return
+        if (openClawRunWatchdogInFlight) {
+            val inFlightAgeMs = System.currentTimeMillis() - openClawRunWatchdogInFlightSinceMs
+            if (inFlightAgeMs < OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS) {
+                return
+            }
+            Log.w(TAG, "OpenClaw run watchdog in-flight lock exceeded ${OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS}ms, forcing unlock")
+            openClawRunWatchdogInFlight = false
+            openClawRunWatchdogInFlightSinceMs = 0L
+        }
 
         val currentUrl = webView.url
         if (!isOpenClawNewChatUrl(currentUrl)) return
@@ -1095,6 +1106,7 @@ class MainActivity : AppCompatActivity() {
         if (System.currentTimeMillis() < openClawRunWatchdogSuppressUntilMs) return
 
         openClawRunWatchdogInFlight = true
+        openClawRunWatchdogInFlightSinceMs = System.currentTimeMillis()
         Thread {
             try {
                 val statusPayload = LocalBridgeClients.callOpenClawApi(
@@ -1152,9 +1164,8 @@ class MainActivity : AppCompatActivity() {
             } catch (error: Exception) {
                 Log.w(TAG, "OpenClaw native run watchdog poll failed: ${error.message}")
             } finally {
-                runOnUiThread {
-                    openClawRunWatchdogInFlight = false
-                }
+                openClawRunWatchdogInFlight = false
+                openClawRunWatchdogInFlightSinceMs = 0L
             }
         }.start()
     }

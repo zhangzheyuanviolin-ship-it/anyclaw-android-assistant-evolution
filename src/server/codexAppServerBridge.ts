@@ -529,6 +529,20 @@ function isOpenClawRunProgressfulStatus(status: string): boolean {
     normalized === 'in_progress'
 }
 
+function isOpenClawTransientRunStatus(status: string): boolean {
+  const normalized = normalizeOpenClawRunStatus(status)
+  return normalized === 'submitted' ||
+    normalized === 'queued' ||
+    normalized === 'running' ||
+    normalized === 'reconnecting' ||
+    normalized === 'started' ||
+    normalized === 'working' ||
+    normalized === 'processing' ||
+    normalized === 'executing' ||
+    normalized === 'in_progress' ||
+    normalized === 'unknown'
+}
+
 function didOpenClawRunProgressAdvance(
   context: OpenClawNativeRunContext,
   status: string,
@@ -537,6 +551,8 @@ function didOpenClawRunProgressAdvance(
     rawStatus?: string
     result?: unknown
     completed?: boolean
+    source?: string
+    retryable?: boolean
   },
 ): boolean {
   const nextStatus = normalizeOpenClawRunStatus(status)
@@ -547,9 +563,9 @@ function didOpenClawRunProgressAdvance(
 
   const previousStatus = normalizeOpenClawRunStatus(context.lastStatus)
   if (nextStatus !== previousStatus) {
-    const previousProgressful = isOpenClawRunProgressfulStatus(previousStatus)
-    const nextProgressful = isOpenClawRunProgressfulStatus(nextStatus)
-    if (!previousProgressful || !nextProgressful) {
+    const previousTransient = isOpenClawTransientRunStatus(previousStatus)
+    const nextTransient = isOpenClawTransientRunStatus(nextStatus)
+    if (!previousTransient || !nextTransient) {
       return true
     }
   }
@@ -567,14 +583,24 @@ function didOpenClawRunProgressAdvance(
   const nextError = errorText.trim()
   const previousError = context.lastError.trim()
   if (nextError.length > 0 && nextError !== previousError) {
-    return true
+    const retryable = options.retryable === true || isOpenClawGatewayRetryableError(nextError)
+    if (!retryable) {
+      return true
+    }
   }
 
   if (Object.prototype.hasOwnProperty.call(options, 'result')) {
     const previousResult = summarizeProgressPayload(context.lastResult)
     const nextResult = summarizeProgressPayload(options.result)
     if (nextResult.length > 0 && nextResult !== previousResult) {
-      return true
+      const source = options.source?.trim().toLowerCase() ?? ''
+      if (
+        source === 'history-probe' ||
+        source === 'agent.wait.fallback' ||
+        source === 'agent.wait'
+      ) {
+        return true
+      }
     }
   }
 
@@ -869,12 +895,29 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
   const normalizedSessionKey = typeof sessionKey === 'string' ? sessionKey.trim() : ''
 
   let latest: OpenClawNativeRunContext | null = null
+  let latestActive: OpenClawNativeRunContext | null = null
+  let latestMatchedSession: OpenClawNativeRunContext | null = null
   for (const context of openClawNativeRuns.values()) {
-    if (normalizedSessionKey && context.sessionKey !== normalizedSessionKey) continue
     if (!latest || context.updatedAtMs > latest.updatedAtMs) {
       latest = context
     }
+    if (!context.completed && (!latestActive || context.updatedAtMs > latestActive.updatedAtMs)) {
+      latestActive = context
+    }
+    if (
+      normalizedSessionKey &&
+      context.sessionKey === normalizedSessionKey &&
+      (!latestMatchedSession || context.updatedAtMs > latestMatchedSession.updatedAtMs)
+    ) {
+      latestMatchedSession = context
+    }
   }
+  if (normalizedSessionKey.length > 0) {
+    if (latestMatchedSession) return { ...latestMatchedSession }
+    if (latestActive) return { ...latestActive }
+    return latest ? { ...latest } : null
+  }
+  if (latestActive) return { ...latestActive }
   return latest ? { ...latest } : null
 }
 
@@ -3063,6 +3106,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/run/wait') {
         const payload = asRecord(await readJsonBody(req))
         const runId = normalizeText(payload?.runId)
+        const sessionKey = normalizeText(payload?.sessionKey)
         if (!runId) {
           setJson(res, 400, { error: 'Missing runId' })
           return
@@ -3076,7 +3120,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         )
 
         if (await isNativeOpenClawReady()) {
-          rememberOpenClawNativeRun(runId)
+          rememberOpenClawNativeRun(runId, sessionKey)
           ensureOpenClawNativeRunMonitor(runId)
 
           const snapshot = await waitForOpenClawRunSnapshot(runId, waitTimeoutMs)

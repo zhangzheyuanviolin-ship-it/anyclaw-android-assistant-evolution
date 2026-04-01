@@ -300,6 +300,7 @@ export async function waitOpenClawRun(request: OpenClawRunWaitRequest): Promise<
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         runId,
+        sessionKey: request.sessionKey?.trim() || '',
         timeoutMs,
       }),
     },
