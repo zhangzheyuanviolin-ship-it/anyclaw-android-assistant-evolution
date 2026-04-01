@@ -136,6 +136,7 @@ type OpenClawNativeRunContext = {
   runId: string
   sessionKey: string
   sentAtMs: number
+  lastProgressAtMs: number
   lastStatus: string
   lastError: string
   lastResult: unknown
@@ -506,6 +507,80 @@ function normalizeOpenClawRunStatus(status: string): string {
   return normalized
 }
 
+function summarizeProgressPayload(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    const serialized = JSON.stringify(value)
+    return serialized.length > 300 ? serialized.slice(0, 300) : serialized
+  } catch {
+    return String(value)
+  }
+}
+
+function isOpenClawRunProgressfulStatus(status: string): boolean {
+  const normalized = normalizeOpenClawRunStatus(status)
+  return normalized === 'running' ||
+    normalized === 'started' ||
+    normalized === 'working' ||
+    normalized === 'processing' ||
+    normalized === 'executing' ||
+    normalized === 'in_progress'
+}
+
+function didOpenClawRunProgressAdvance(
+  context: OpenClawNativeRunContext,
+  status: string,
+  errorText: string,
+  options: {
+    rawStatus?: string
+    result?: unknown
+    completed?: boolean
+  },
+): boolean {
+  const nextStatus = normalizeOpenClawRunStatus(status)
+  const nextCompleted = typeof options.completed === 'boolean'
+    ? options.completed
+    : isOpenClawRunCompletedStatus(nextStatus)
+  if (nextCompleted) return true
+
+  const previousStatus = normalizeOpenClawRunStatus(context.lastStatus)
+  if (nextStatus !== previousStatus) {
+    const previousProgressful = isOpenClawRunProgressfulStatus(previousStatus)
+    const nextProgressful = isOpenClawRunProgressfulStatus(nextStatus)
+    if (!previousProgressful || !nextProgressful) {
+      return true
+    }
+  }
+
+  const nextRawStatus = options.rawStatus?.trim() ?? ''
+  const previousRawStatus = context.rawStatus.trim()
+  if (
+    nextRawStatus.length > 0 &&
+    nextRawStatus !== 'timeout' &&
+    nextRawStatus !== previousRawStatus
+  ) {
+    return true
+  }
+
+  const nextError = errorText.trim()
+  const previousError = context.lastError.trim()
+  if (nextError.length > 0 && nextError !== previousError) {
+    return true
+  }
+
+  if (Object.prototype.hasOwnProperty.call(options, 'result')) {
+    const previousResult = summarizeProgressPayload(context.lastResult)
+    const nextResult = summarizeProgressPayload(options.result)
+    if (nextResult.length > 0 && nextResult !== previousResult) {
+      return true
+    }
+  }
+
+  return false
+}
+
 function isOpenClawRunCompletedStatus(status: string): boolean {
   return OPENCLAW_COMPLETED_RUN_STATUSES.has(normalizeOpenClawRunStatus(status))
 }
@@ -530,6 +605,7 @@ function rememberOpenClawNativeRun(runId: string, sessionKey = ''): void {
     runId: normalizedRunId,
     sessionKey: normalizedSessionKey,
     sentAtMs: nowMs,
+    lastProgressAtMs: nowMs,
     lastStatus: 'submitted',
     lastError: '',
     lastResult: null,
@@ -574,6 +650,7 @@ function updateOpenClawNativeRun(
   if (options.sessionKey && options.sessionKey.trim().length > 0) {
     context.sessionKey = options.sessionKey.trim()
   }
+  const progressAdvanced = didOpenClawRunProgressAdvance(context, normalizedStatus, errorText, options)
   context.lastStatus = normalizedStatus || context.lastStatus || 'running'
   context.lastError = errorText.trim()
   if (Object.prototype.hasOwnProperty.call(options, 'result')) {
@@ -587,6 +664,9 @@ function updateOpenClawNativeRun(
   context.completed = typeof options.completed === 'boolean'
     ? options.completed
     : isOpenClawRunCompletedStatus(context.lastStatus)
+  if (progressAdvanced) {
+    context.lastProgressAtMs = nowMs
+  }
   context.updatedAtMs = nowMs
   context.revision += 1
   openClawNativeRuns.set(normalizedRunId, context)
@@ -785,13 +865,12 @@ function ensureOpenClawNativeRunMonitor(runId: string): void {
   void monitorOpenClawNativeRun(context.runId)
 }
 
-function findLatestOpenClawNativeRunBySession(sessionKey: string): OpenClawNativeRunContext | null {
-  const normalizedSessionKey = sessionKey.trim()
-  if (!normalizedSessionKey) return null
+function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNativeRunContext | null {
+  const normalizedSessionKey = typeof sessionKey === 'string' ? sessionKey.trim() : ''
 
   let latest: OpenClawNativeRunContext | null = null
   for (const context of openClawNativeRuns.values()) {
-    if (context.sessionKey !== normalizedSessionKey) continue
+    if (normalizedSessionKey && context.sessionKey !== normalizedSessionKey) continue
     if (!latest || context.updatedAtMs > latest.updatedAtMs) {
       latest = context
     }
@@ -804,6 +883,7 @@ function buildOpenClawWatchdogStatus(
   suspectAfterMs: number,
   triggerAfterMs: number,
 ): {
+  sessionKey: string
   activeRun: boolean
   runId: string
   status: string
@@ -819,6 +899,7 @@ function buildOpenClawWatchdogStatus(
   const latest = findLatestOpenClawNativeRunBySession(sessionKey)
   if (!latest) {
     return {
+      sessionKey: sessionKey.trim(),
       activeRun: false,
       runId: '',
       status: 'idle',
@@ -835,7 +916,8 @@ function buildOpenClawWatchdogStatus(
 
   const status = normalizeOpenClawRunStatus(latest.lastStatus || latest.rawStatus)
   const completed = latest.completed || isOpenClawRunCompletedStatus(status)
-  const staleMs = Math.max(0, Date.now() - latest.updatedAtMs)
+  const staleBaseMs = latest.lastProgressAtMs > 0 ? latest.lastProgressAtMs : latest.updatedAtMs
+  const staleMs = Math.max(0, Date.now() - staleBaseMs)
   const activeRun = !completed
   const waiting = activeRun && staleMs >= suspectAfterMs
   let recommendAction = 'none'
@@ -848,6 +930,7 @@ function buildOpenClawWatchdogStatus(
   }
 
   return {
+    sessionKey: latest.sessionKey,
     activeRun,
     runId: latest.runId,
     status,
@@ -3122,10 +3205,6 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/watchdog/status') {
         const payload = asRecord(await readJsonBody(req))
         const sessionKey = normalizeText(payload?.sessionKey)
-        if (!sessionKey) {
-          setJson(res, 400, { error: 'Missing sessionKey' })
-          return
-        }
 
         const suspectAfterMs = normalizeTimeoutMs(
           payload?.suspectAfterMs,
@@ -3145,13 +3224,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         const status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
         if (status.activeRun && status.runId) {
-          rememberOpenClawNativeRun(status.runId, sessionKey)
           ensureOpenClawNativeRunMonitor(status.runId)
         }
 
         setJson(res, 200, {
           ok: true,
-          sessionKey,
           ...status,
           suspectAfterMs,
           triggerAfterMs,

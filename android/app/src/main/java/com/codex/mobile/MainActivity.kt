@@ -1086,13 +1086,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun pollOpenClawRunWatchdogAsync() {
         if (openClawRunWatchdogInFlight) return
-        if (!gatewayConnected) return
 
         val currentUrl = webView.url
         if (!isOpenClawNewChatUrl(currentUrl)) return
 
         val sessionKey = extractSessionFromCurrentUrl()?.trim().orEmpty()
-        if (sessionKey.isEmpty()) return
 
         if (System.currentTimeMillis() < openClawRunWatchdogSuppressUntilMs) return
 
@@ -1113,6 +1111,7 @@ class MainActivity : AppCompatActivity() {
 
                 val activeRun = statusPayload.optBoolean("activeRun", false)
                 val runId = statusPayload.optString("runId", "").trim()
+                val resolvedSessionKey = statusPayload.optString("sessionKey", "").trim()
                 val runStatus = statusPayload.optString("status", "").trim().lowercase()
                 val staleMs = statusPayload.optLong("staleMs", -1L)
                 val recommendAction = statusPayload.optString("recommendAction", "").trim()
@@ -1134,12 +1133,13 @@ class MainActivity : AppCompatActivity() {
                         (System.currentTimeMillis() - openClawRunWatchdogLastHeartbeatAtMs >=
                             OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS)
                 if (!shouldTriggerHeartbeat) return@Thread
+                val heartbeatSessionKey = if (resolvedSessionKey.isNotEmpty()) resolvedSessionKey else sessionKey
 
                 LocalBridgeClients.callOpenClawApi(
                     path = "/openclaw-api/heartbeat/trigger",
                     method = "POST",
                     body = JSONObject().apply {
-                        put("sessionKey", sessionKey)
+                        put("sessionKey", heartbeatSessionKey)
                     },
                     connectTimeoutMs = 8_000,
                     readTimeoutMs = 35_000,
@@ -1147,7 +1147,7 @@ class MainActivity : AppCompatActivity() {
                 openClawRunWatchdogLastHeartbeatAtMs = System.currentTimeMillis()
                 Log.i(
                     TAG,
-                    "Native run watchdog triggered heartbeat for session=$sessionKey runId=$runId staleMs=$staleMs",
+                    "Native run watchdog triggered heartbeat for session=$heartbeatSessionKey runId=$runId staleMs=$staleMs",
                 )
             } catch (error: Exception) {
                 Log.w(TAG, "OpenClaw native run watchdog poll failed: ${error.message}")
