@@ -713,6 +713,18 @@ function clearOpenClawNativeRun(runId: string): void {
   openClawNativeRuns.delete(normalizedRunId)
 }
 
+function clearOpenClawNativeRunsBySession(sessionKey: string): number {
+  const normalizedSessionKey = sessionKey.trim()
+  if (!normalizedSessionKey) return 0
+  let removed = 0
+  for (const [runId, context] of openClawNativeRuns.entries()) {
+    if (context.sessionKey !== normalizedSessionKey) continue
+    openClawNativeRuns.delete(runId)
+    removed += 1
+  }
+  return removed
+}
+
 function snapshotOpenClawNativeRun(runId: string): OpenClawNativeRunContext | null {
   const context = openClawNativeRuns.get(runId.trim())
   if (!context) return null
@@ -901,9 +913,24 @@ function ensureOpenClawNativeRunMonitor(runId: string): void {
 function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNativeRunContext | null {
   const normalizedSessionKey = typeof sessionKey === 'string' ? sessionKey.trim() : ''
 
+  if (normalizedSessionKey.length > 0) {
+    let latestMatchedSession: OpenClawNativeRunContext | null = null
+    let latestMatchedActive: OpenClawNativeRunContext | null = null
+    for (const context of openClawNativeRuns.values()) {
+      if (context.sessionKey !== normalizedSessionKey) continue
+      if (!latestMatchedSession || context.updatedAtMs > latestMatchedSession.updatedAtMs) {
+        latestMatchedSession = context
+      }
+      if (!context.completed && (!latestMatchedActive || context.updatedAtMs > latestMatchedActive.updatedAtMs)) {
+        latestMatchedActive = context
+      }
+    }
+    if (latestMatchedActive) return { ...latestMatchedActive }
+    return latestMatchedSession ? { ...latestMatchedSession } : null
+  }
+
   let latest: OpenClawNativeRunContext | null = null
   let latestActive: OpenClawNativeRunContext | null = null
-  let latestMatchedSession: OpenClawNativeRunContext | null = null
   for (const context of openClawNativeRuns.values()) {
     if (!latest || context.updatedAtMs > latest.updatedAtMs) {
       latest = context
@@ -911,18 +938,6 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
     if (!context.completed && (!latestActive || context.updatedAtMs > latestActive.updatedAtMs)) {
       latestActive = context
     }
-    if (
-      normalizedSessionKey &&
-      context.sessionKey === normalizedSessionKey &&
-      (!latestMatchedSession || context.updatedAtMs > latestMatchedSession.updatedAtMs)
-    ) {
-      latestMatchedSession = context
-    }
-  }
-  if (normalizedSessionKey.length > 0) {
-    if (latestMatchedSession) return { ...latestMatchedSession }
-    if (latestActive) return { ...latestActive }
-    return latest ? { ...latest } : null
   }
   if (latestActive) return { ...latestActive }
   return latest ? { ...latest } : null
@@ -3436,6 +3451,9 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             )
             if (runId) {
               clearOpenClawNativeRun(runId)
+            }
+            if (sessionKey) {
+              clearOpenClawNativeRunsBySession(sessionKey)
             }
             setJson(res, 200, {
               ok: true,

@@ -45,6 +45,16 @@ class MainActivity : AppCompatActivity() {
         private const val OPENCLAW_RUN_WATCHDOG_TRIGGER_AFTER_MS = 120_000
         private const val OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS = 90_000L
         private const val OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS = 60_000L
+        private val OPENCLAW_RUN_WATCHDOG_TERMINAL_STATUSES = setOf(
+            "aborted",
+            "completed",
+            "ok",
+            "failed",
+            "error",
+            "cancelled",
+            "canceled",
+            "idle",
+        )
         const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
         const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.SESSION_KEY"
@@ -1102,6 +1112,7 @@ class MainActivity : AppCompatActivity() {
         if (!isOpenClawNewChatUrl(currentUrl)) return
 
         val sessionKey = extractSessionFromCurrentUrl()?.trim().orEmpty()
+        if (sessionKey.isEmpty()) return
 
         if (System.currentTimeMillis() < openClawRunWatchdogSuppressUntilMs) return
 
@@ -1125,6 +1136,7 @@ class MainActivity : AppCompatActivity() {
                 val runId = statusPayload.optString("runId", "").trim()
                 val resolvedSessionKey = statusPayload.optString("sessionKey", "").trim()
                 val runStatus = statusPayload.optString("status", "").trim().lowercase()
+                val completed = statusPayload.optBoolean("completed", false)
                 val staleMs = statusPayload.optLong("staleMs", -1L)
                 val recommendAction = statusPayload.optString("recommendAction", "").trim()
 
@@ -1132,11 +1144,11 @@ class MainActivity : AppCompatActivity() {
                     openClawRunWatchdogLastRunId = runId
                     openClawRunWatchdogSuppressUntilMs = 0L
                 }
-                if (!activeRun) {
-                    if (runStatus == "aborted") {
-                        openClawRunWatchdogSuppressUntilMs =
-                            System.currentTimeMillis() + OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS
-                    }
+                val normalizedStatus = if (runStatus.isNotEmpty()) runStatus else if (completed) "completed" else "running"
+                val isTerminalStatus = OPENCLAW_RUN_WATCHDOG_TERMINAL_STATUSES.contains(normalizedStatus)
+                if (!activeRun || completed || isTerminalStatus) {
+                    openClawRunWatchdogSuppressUntilMs =
+                        System.currentTimeMillis() + OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS
                     return@Thread
                 }
 
@@ -1146,6 +1158,7 @@ class MainActivity : AppCompatActivity() {
                             OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS)
                 if (!shouldTriggerHeartbeat) return@Thread
                 val heartbeatSessionKey = if (resolvedSessionKey.isNotEmpty()) resolvedSessionKey else sessionKey
+                if (heartbeatSessionKey.isEmpty()) return@Thread
 
                 LocalBridgeClients.callOpenClawApi(
                     path = "/openclaw-api/heartbeat/trigger",

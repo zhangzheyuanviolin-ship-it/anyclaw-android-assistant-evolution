@@ -515,13 +515,11 @@ export function useOpenClawState() {
       renderMessagesFromHistory(payload.messages)
       const awaitingSince = getAwaitingAssistantSince(sessionKey)
       if (awaitingSince > 0 && hasAssistantResponseAfter(payload.messages, awaitingSince)) {
-        const hasTrackedRun = pendingRun.value && pendingRunId.value.trim().length > 0
-        if (!hasTrackedRun) {
-          clearAwaitingAssistant(sessionKey)
-        }
+        clearAwaitingAssistant(sessionKey)
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
-        if (pendingRun.value && pendingRunId.value.trim().length === 0) {
+        if (pendingRun.value) {
           pendingRun.value = false
+          pendingRunId.value = ''
           setPendingRunStatus('')
           pendingRunStartedAtMs = 0
         }
@@ -848,8 +846,13 @@ export function useOpenClawState() {
       await refreshHealth()
       setPendingRunStatus('')
     } catch (error) {
+      pendingRun.value = false
+      pendingRunId.value = ''
+      setPendingRunStatus('')
+      pendingRunStartedAtMs = 0
+      clearAwaitingAssistant(sessionKey)
+      lastAutoHeartbeatAtMs = Date.now()
       lastError.value = error instanceof Error ? error.message : '终止任务失败'
-      throw error
     } finally {
       abortingRun.value = false
     }
