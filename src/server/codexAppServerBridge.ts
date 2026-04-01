@@ -262,7 +262,12 @@ function isOpenClawGatewayRetryableError(message: string): boolean {
     normalized.includes('abnormal closure') ||
     normalized.includes('connection is not open') ||
     normalized.includes('openclaw gateway call timeout') ||
+    normalized.includes('gateway timeout after') ||
+    normalized.includes('timeout after') ||
     normalized.includes('timed out') ||
+    normalized.includes('etimedout') ||
+    normalized.includes('eai_again') ||
+    normalized.includes('network error') ||
     normalized.includes('econnreset') ||
     normalized.includes('socket hang up') ||
     normalized.includes('no json payload found') ||
@@ -369,8 +374,10 @@ async function runOpenClawGatewayCall(
   }
 
   const serializedParams = JSON.stringify(params ?? {})
+  const normalizedTimeoutMs = clampInt(Math.floor(timeoutMs), 1_000, 600_000)
+  const processTimeoutMs = normalizedTimeoutMs + 10_000
   const command =
-    `openclaw gateway call ${normalizedMethod} --json --params ${shellQuote(serializedParams)}`
+    `openclaw gateway call ${normalizedMethod} --timeout ${normalizedTimeoutMs} --json --params ${shellQuote(serializedParams)}`
 
   const runCommandOnce = () =>
     new Promise<string>((resolve, reject) => {
@@ -401,8 +408,8 @@ async function runOpenClawGatewayCall(
         } catch {
           // ignore kill errors
         }
-        reject(new Error(`OpenClaw gateway call timeout: ${normalizedMethod} (${timeoutMs}ms)`))
-      }, timeoutMs)
+        reject(new Error(`OpenClaw gateway call timeout: ${normalizedMethod} (${processTimeoutMs}ms)`))
+      }, processTimeoutMs)
 
       child.stdout.on('data', (chunk: string) => {
         stdoutBuffer += chunk

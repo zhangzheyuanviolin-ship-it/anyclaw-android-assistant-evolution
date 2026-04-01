@@ -515,7 +515,10 @@ export function useOpenClawState() {
       renderMessagesFromHistory(payload.messages)
       const awaitingSince = getAwaitingAssistantSince(sessionKey)
       if (awaitingSince > 0 && hasAssistantResponseAfter(payload.messages, awaitingSince)) {
-        clearAwaitingAssistant(sessionKey)
+        const hasTrackedRun = pendingRun.value && pendingRunId.value.trim().length > 0
+        if (!hasTrackedRun) {
+          clearAwaitingAssistant(sessionKey)
+        }
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
         if (pendingRun.value && pendingRunId.value.trim().length === 0) {
           pendingRun.value = false
@@ -870,7 +873,11 @@ export function useOpenClawState() {
         sessionKey: selectedSessionKey.value.trim(),
         timeoutMs: RUN_WAIT_TIMEOUT_MS,
       })
-      setPendingRunStatus(statusPayload.status.trim() || pendingRunStatus.value || 'running')
+      const rawStatus = statusPayload.status.trim().toLowerCase()
+      const normalizedStatus = statusPayload.retryable && (rawStatus === 'failed' || rawStatus === 'error')
+        ? 'reconnecting'
+        : rawStatus
+      setPendingRunStatus(normalizedStatus || pendingRunStatus.value || 'running')
       if (statusPayload.completed) {
         pendingRun.value = false
         pendingRunId.value = ''
@@ -879,13 +886,20 @@ export function useOpenClawState() {
         clearAwaitingAssistant(selectedSessionKey.value.trim())
         await refreshHistory({ silent: true })
       } else {
-        const status = statusPayload.status.trim().toLowerCase()
+        const status = normalizedStatus
         const nowMs = Date.now()
         const fallbackWaitingSince = getAwaitingAssistantSince(selectedSessionKey.value.trim())
         const waitingSince = pendingRunStartedAtMs > 0 ? pendingRunStartedAtMs : fallbackWaitingSince
         const pendingAgeMs = waitingSince > 0 ? nowMs - waitingSince : 0
         const shouldAutoHeartbeat = (
-          (status === 'running' || status === 'reconnecting' || status === 'unknown' || status === 'submitted') &&
+          (
+            status === 'running' ||
+            status === 'reconnecting' ||
+            status === 'unknown' ||
+            status === 'submitted' ||
+            status === 'failed' ||
+            status === 'error'
+          ) &&
           pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
           nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
           !heartbeatTriggering.value &&
@@ -899,9 +913,7 @@ export function useOpenClawState() {
         }
       }
     } catch {
-      if (!pendingRunStatus.value) {
-        setPendingRunStatus('reconnecting')
-      }
+      setPendingRunStatus('reconnecting')
     } finally {
       runWaitInFlight = false
     }
