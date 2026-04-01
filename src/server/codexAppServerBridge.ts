@@ -51,6 +51,8 @@ const OPENCLAW_RUN_MONITOR_PROBE_INTERVAL_MS = 12_000
 const OPENCLAW_RUN_MONITOR_MAX_RETRYABLE_ERRORS = 18
 const OPENCLAW_RUN_MONITOR_MAX_NON_RETRYABLE_ERRORS = 3
 const OPENCLAW_RUN_WAIT_POLL_SLICE_MS = 450
+const OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS = 75_000
+const OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS = 120_000
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
 const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
@@ -781,6 +783,83 @@ function ensureOpenClawNativeRunMonitor(runId: string): void {
   const context = openClawNativeRuns.get(runId.trim())
   if (!context || context.monitorInFlight || context.completed) return
   void monitorOpenClawNativeRun(context.runId)
+}
+
+function findLatestOpenClawNativeRunBySession(sessionKey: string): OpenClawNativeRunContext | null {
+  const normalizedSessionKey = sessionKey.trim()
+  if (!normalizedSessionKey) return null
+
+  let latest: OpenClawNativeRunContext | null = null
+  for (const context of openClawNativeRuns.values()) {
+    if (context.sessionKey !== normalizedSessionKey) continue
+    if (!latest || context.updatedAtMs > latest.updatedAtMs) {
+      latest = context
+    }
+  }
+  return latest ? { ...latest } : null
+}
+
+function buildOpenClawWatchdogStatus(
+  sessionKey: string,
+  suspectAfterMs: number,
+  triggerAfterMs: number,
+): {
+  activeRun: boolean
+  runId: string
+  status: string
+  rawStatus: string
+  completed: boolean
+  waiting: boolean
+  staleMs: number
+  revision: number
+  source: string
+  retryable: boolean
+  recommendAction: string
+} {
+  const latest = findLatestOpenClawNativeRunBySession(sessionKey)
+  if (!latest) {
+    return {
+      activeRun: false,
+      runId: '',
+      status: 'idle',
+      rawStatus: '',
+      completed: true,
+      waiting: false,
+      staleMs: 0,
+      revision: 0,
+      source: 'watchdog',
+      retryable: true,
+      recommendAction: 'idle',
+    }
+  }
+
+  const status = normalizeOpenClawRunStatus(latest.lastStatus || latest.rawStatus)
+  const completed = latest.completed || isOpenClawRunCompletedStatus(status)
+  const staleMs = Math.max(0, Date.now() - latest.updatedAtMs)
+  const activeRun = !completed
+  const waiting = activeRun && staleMs >= suspectAfterMs
+  let recommendAction = 'none'
+  if (!activeRun) {
+    recommendAction = 'idle'
+  } else if (staleMs >= triggerAfterMs) {
+    recommendAction = 'trigger_heartbeat'
+  } else if (staleMs >= suspectAfterMs) {
+    recommendAction = 'suspect_stall'
+  }
+
+  return {
+    activeRun,
+    runId: latest.runId,
+    status,
+    rawStatus: latest.rawStatus,
+    completed,
+    waiting,
+    staleMs,
+    revision: latest.revision,
+    source: latest.source || 'watchdog',
+    retryable: latest.retryable,
+    recommendAction,
+  }
 }
 
 function extractCronJobId(row: Record<string, unknown>): string {
@@ -3036,6 +3115,47 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           status: 'completed',
           completed: true,
           source: 'lightweight',
+        })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/watchdog/status') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        if (!sessionKey) {
+          setJson(res, 400, { error: 'Missing sessionKey' })
+          return
+        }
+
+        const suspectAfterMs = normalizeTimeoutMs(
+          payload?.suspectAfterMs,
+          OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS,
+          20_000,
+          300_000,
+        )
+        const triggerAfterMs = Math.max(
+          normalizeTimeoutMs(
+            payload?.triggerAfterMs,
+            OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS,
+            30_000,
+            600_000,
+          ),
+          suspectAfterMs + 5_000,
+        )
+
+        const status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
+        if (status.activeRun && status.runId) {
+          rememberOpenClawNativeRun(status.runId, sessionKey)
+          ensureOpenClawNativeRunMonitor(status.runId)
+        }
+
+        setJson(res, 200, {
+          ok: true,
+          sessionKey,
+          ...status,
+          suspectAfterMs,
+          triggerAfterMs,
+          checkedAtMs: Date.now(),
         })
         return
       }
