@@ -34,8 +34,8 @@ const RUN_WAIT_TIMEOUT_MS = 9000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
 const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
 const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
-const OPENCLAW_AUTO_HEARTBEAT_AFTER_MS = 180_000
-const OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS = 120_000
+const OPENCLAW_AUTO_HEARTBEAT_AFTER_MS = 120_000
+const OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS = 90_000
 
 type OptimisticOpenClawMessage = UiMessage & {
   createdAtMs: number
@@ -146,15 +146,17 @@ function extractImageSegments(items: OpenClawContentItem[]): string[] {
   return urls
 }
 
-function hasAssistantTextAfter(messages: OpenClawHistoryMessage[], sinceMs: number): boolean {
+function hasAssistantResponseAfter(messages: OpenClawHistoryMessage[], sinceMs: number): boolean {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const row = messages[index]
     const timestamp = typeof row.timestamp === 'number' ? row.timestamp : 0
     if (timestamp < sinceMs) continue
     if (row.role !== 'assistant') continue
     const items = readContentItems(row.content)
-    const text = extractTextSegments(items, ['text'])
+    const text = extractTextSegments(items, ['text']).trim()
     if (text.length > 0) return true
+    const images = extractImageSegments(items)
+    if (images.length > 0) return true
   }
   return false
 }
@@ -327,6 +329,7 @@ export function useOpenClawState() {
   const heartbeatTriggering = ref(false)
   const abortingRun = ref(false)
   const optimisticUserMessages = ref<OptimisticOpenClawMessage[]>([])
+  const awaitingReplySinceBySession = ref<Record<string, number>>({})
 
   let pollTimer: number | null = null
   let pollInFlight = false
@@ -371,6 +374,55 @@ export function useOpenClawState() {
 
   function setPendingRunStatus(status: string): void {
     pendingRunStatus.value = status.trim()
+  }
+
+  function markAwaitingAssistant(
+    sessionKey: string,
+    sinceMs: number,
+    mode: 'replace' | 'keep-earliest' = 'replace',
+  ): void {
+    const normalizedSessionKey = sessionKey.trim()
+    if (!normalizedSessionKey) return
+    const normalizedSince = Number.isFinite(sinceMs) ? Math.max(0, Math.floor(sinceMs)) : Date.now()
+    const existing = awaitingReplySinceBySession.value[normalizedSessionKey] ?? 0
+    const nextSince = mode === 'keep-earliest' && existing > 0
+      ? Math.min(existing, normalizedSince)
+      : normalizedSince
+    awaitingReplySinceBySession.value = {
+      ...awaitingReplySinceBySession.value,
+      [normalizedSessionKey]: nextSince,
+    }
+  }
+
+  function clearAwaitingAssistant(sessionKey: string): void {
+    const normalizedSessionKey = sessionKey.trim()
+    if (!normalizedSessionKey) return
+    if (!(normalizedSessionKey in awaitingReplySinceBySession.value)) return
+    const next = { ...awaitingReplySinceBySession.value }
+    delete next[normalizedSessionKey]
+    awaitingReplySinceBySession.value = next
+  }
+
+  function getAwaitingAssistantSince(sessionKey: string): number {
+    const normalizedSessionKey = sessionKey.trim()
+    if (!normalizedSessionKey) return 0
+    const raw = awaitingReplySinceBySession.value[normalizedSessionKey] ?? 0
+    if (!Number.isFinite(raw) || raw <= 0) return 0
+    return Math.floor(raw)
+  }
+
+  function keepPendingRunVisibleFromAwaiting(sessionKey: string): void {
+    const waitingSince = getAwaitingAssistantSince(sessionKey)
+    if (waitingSince <= 0) return
+    if (!pendingRun.value) {
+      pendingRun.value = true
+      if (!pendingRunStatus.value.trim()) {
+        setPendingRunStatus('running')
+      }
+    }
+    if (pendingRunStartedAtMs <= 0) {
+      pendingRunStartedAtMs = waitingSince
+    }
   }
 
   function pruneOptimisticMessages(sessionKey: string, historyMessages: OpenClawHistoryMessage[]): void {
@@ -461,7 +513,9 @@ export function useOpenClawState() {
       })
       pruneOptimisticMessages(sessionKey, payload.messages)
       renderMessagesFromHistory(payload.messages)
-      if (hasAssistantTextAfter(payload.messages, lastSendAtMs)) {
+      const awaitingSince = getAwaitingAssistantSince(sessionKey)
+      if (awaitingSince > 0 && hasAssistantResponseAfter(payload.messages, awaitingSince)) {
+        clearAwaitingAssistant(sessionKey)
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
         if (pendingRun.value && pendingRunId.value.trim().length === 0) {
           pendingRun.value = false
@@ -675,6 +729,7 @@ export function useOpenClawState() {
       pendingRunId.value = sendResult.runId.trim()
       setPendingRunStatus(pendingRunId.value ? 'submitted' : 'running')
       pendingRunStartedAtMs = Date.now()
+      markAwaitingAssistant(sessionKey, pendingRunStartedAtMs, 'replace')
       await refreshHistory()
       await refreshSessions(sessionKey)
       await refreshHealth()
@@ -693,6 +748,7 @@ export function useOpenClawState() {
       pendingRunId.value = ''
       setPendingRunStatus('')
       pendingRunStartedAtMs = 0
+      clearAwaitingAssistant(sessionKey)
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
@@ -733,17 +789,26 @@ export function useOpenClawState() {
     heartbeatTriggering.value = true
     lastError.value = ''
     try {
+      const heartbeatStartedAtMs = Date.now()
       const result = await triggerOpenClawHeartbeat({ sessionKey })
       if (result.runId.trim()) {
         pendingRun.value = true
         pendingRunId.value = result.runId.trim()
         setPendingRunStatus(result.status.trim() || 'submitted')
-        lastSendAtMs = Date.now()
-        pendingRunStartedAtMs = Date.now()
+        lastSendAtMs = heartbeatStartedAtMs
+        pendingRunStartedAtMs = heartbeatStartedAtMs
         void waitPendingRun({ force: true })
       } else {
+        pendingRun.value = true
+        if (!pendingRunStatus.value.trim()) {
+          setPendingRunStatus('running')
+        }
+        if (pendingRunStartedAtMs <= 0) {
+          pendingRunStartedAtMs = heartbeatStartedAtMs
+        }
         setPendingRunStatus('heartbeat')
       }
+      markAwaitingAssistant(sessionKey, pendingRunStartedAtMs || heartbeatStartedAtMs, 'keep-earliest')
       await refreshHistory({ silent: true })
       await refreshSessions(sessionKey)
       await refreshHealth()
@@ -774,6 +839,7 @@ export function useOpenClawState() {
       pendingRunId.value = ''
       setPendingRunStatus('aborted')
       pendingRunStartedAtMs = 0
+      clearAwaitingAssistant(sessionKey)
       await refreshHistory({ silent: true })
       await refreshSessions(sessionKey)
       await refreshHealth()
@@ -810,11 +876,14 @@ export function useOpenClawState() {
         pendingRunId.value = ''
         setPendingRunStatus('')
         pendingRunStartedAtMs = 0
+        clearAwaitingAssistant(selectedSessionKey.value.trim())
         await refreshHistory({ silent: true })
       } else {
         const status = statusPayload.status.trim().toLowerCase()
         const nowMs = Date.now()
-        const pendingAgeMs = pendingRunStartedAtMs > 0 ? nowMs - pendingRunStartedAtMs : 0
+        const fallbackWaitingSince = getAwaitingAssistantSince(selectedSessionKey.value.trim())
+        const waitingSince = pendingRunStartedAtMs > 0 ? pendingRunStartedAtMs : fallbackWaitingSince
+        const pendingAgeMs = waitingSince > 0 ? nowMs - waitingSince : 0
         const shouldAutoHeartbeat = (
           (status === 'running' || status === 'reconnecting' || status === 'unknown' || status === 'submitted') &&
           pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
@@ -838,6 +907,29 @@ export function useOpenClawState() {
     }
   }
 
+  async function enforceReplyWatchdog(): Promise<void> {
+    const sessionKey = selectedSessionKey.value.trim()
+    if (!sessionKey) return
+    const awaitingSince = getAwaitingAssistantSince(sessionKey)
+    if (awaitingSince <= 0) return
+
+    keepPendingRunVisibleFromAwaiting(sessionKey)
+
+    const nowMs = Date.now()
+    const pendingAgeMs = nowMs - awaitingSince
+    const shouldAutoHeartbeat = (
+      pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
+      nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
+      !heartbeatTriggering.value &&
+      !abortingRun.value
+    )
+    if (!shouldAutoHeartbeat) return
+    lastAutoHeartbeatAtMs = nowMs
+    void triggerHeartbeatNow().catch(() => {
+      // Keep polling loop alive even when heartbeat trigger fails.
+    })
+  }
+
   async function pollOnce(): Promise<void> {
     if (pollInFlight) return
 
@@ -854,6 +946,7 @@ export function useOpenClawState() {
       }
       await refreshHistory({ silent: true })
       await waitPendingRun()
+      await enforceReplyWatchdog()
     } finally {
       pollInFlight = false
     }
