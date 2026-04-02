@@ -26,6 +26,15 @@ function readBoolean(value: unknown): boolean {
   return value === true
 }
 
+function isFetchTransportError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return /failed to fetch|networkerror|load failed/i.test(message)
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
 async function requestOpenClaw<T>(
   path: string,
   options: RequestInit = {},
@@ -36,44 +45,66 @@ async function requestOpenClaw<T>(
   let response: Response | null = null
   let lastError: unknown = null
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const performFetch = async (timeoutOverrideMs = timeoutMs): Promise<Response> => {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
     const timeout =
-      controller && timeoutMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
+      controller && timeoutOverrideMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
         ? timerHost.setTimeout(() => {
             controller.abort()
-          }, timeoutMs)
+          }, timeoutOverrideMs)
         : null
 
     try {
-      response = await fetch(path, {
+      return await fetch(path, {
         ...options,
         signal: controller?.signal,
       })
+    } finally {
       if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
         timerHost.clearTimeout(timeout)
       }
+    }
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await performFetch(timeoutMs)
       if (response.status >= 500 && attempt < 2) {
         await new Promise((resolve) => timerHost?.setTimeout?.(resolve, 300 + attempt * 300) ?? resolve(null))
         continue
       }
       break
     } catch (error) {
-      if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
-        timerHost.clearTimeout(timeout)
-      }
       lastError = error
-      const message = error instanceof Error ? error.message : String(error ?? '')
-      const isTimeout = error instanceof DOMException && error.name === 'AbortError'
-      const retryable = isTimeout || /failed to fetch/i.test(message)
+      const timeout = isAbortError(error)
+      const retryable = timeout || isFetchTransportError(error)
       if (attempt < 2 && retryable) {
         await new Promise((resolve) => timerHost?.setTimeout?.(resolve, 250 + attempt * 250) ?? resolve(null))
         continue
       }
-      if (isTimeout) {
+      if (timeout) {
         throw new Error(`${fallbackMessage}: request timeout`)
       }
       throw error
+    }
+  }
+
+  // Gateway transport occasionally enters a short stale window where the first
+  // request fails with "Failed to fetch" but recovers immediately after health probe.
+  if (!response && isFetchTransportError(lastError)) {
+    try {
+      await fetch('/openclaw-api/health', {
+        method: 'GET',
+        cache: 'no-store',
+      })
+    } catch {
+      // ignore health probe failure; final attempt below still decides outcome
+    }
+
+    try {
+      response = await performFetch(Math.max(timeoutMs, 15_000))
+    } catch (error) {
+      lastError = error
     }
   }
 

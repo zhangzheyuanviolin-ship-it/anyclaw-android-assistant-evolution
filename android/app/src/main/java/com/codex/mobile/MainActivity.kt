@@ -43,7 +43,6 @@ class MainActivity : AppCompatActivity() {
         private const val OPENCLAW_RUN_WATCHDOG_POLL_MS = 7_000L
         private const val OPENCLAW_RUN_WATCHDOG_SUSPECT_AFTER_MS = 75_000
         private const val OPENCLAW_RUN_WATCHDOG_TRIGGER_AFTER_MS = 120_000
-        private const val OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS = 90_000L
         private const val OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS = 60_000L
         const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
         const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
@@ -82,9 +81,6 @@ class MainActivity : AppCompatActivity() {
     private var openClawRunWatchdogStarted = false
     private var openClawRunWatchdogInFlight = false
     private var openClawRunWatchdogInFlightSinceMs = 0L
-    private var openClawRunWatchdogLastHeartbeatAtMs = 0L
-    private var openClawRunWatchdogSuppressUntilMs = 0L
-    private var openClawRunWatchdogLastRunId = ""
     private val openClawRunWatchdogPollRunnable = object : Runnable {
         override fun run() {
             pollOpenClawRunWatchdogAsync()
@@ -293,8 +289,6 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 if (!isOpenClawChatUrl(url)) {
                     openClawRecoveryAttempts = 0
-                    openClawRunWatchdogLastRunId = ""
-                    openClawRunWatchdogSuppressUntilMs = 0L
                 }
                 cancelOpenClawWatchdog()
             }
@@ -1103,8 +1097,6 @@ class MainActivity : AppCompatActivity() {
 
         val sessionKey = extractSessionFromCurrentUrl()?.trim().orEmpty()
 
-        if (System.currentTimeMillis() < openClawRunWatchdogSuppressUntilMs) return
-
         openClawRunWatchdogInFlight = true
         openClawRunWatchdogInFlightSinceMs = System.currentTimeMillis()
         Thread {
@@ -1123,44 +1115,21 @@ class MainActivity : AppCompatActivity() {
 
                 val activeRun = statusPayload.optBoolean("activeRun", false)
                 val runId = statusPayload.optString("runId", "").trim()
-                val resolvedSessionKey = statusPayload.optString("sessionKey", "").trim()
-                val runStatus = statusPayload.optString("status", "").trim().lowercase()
                 val staleMs = statusPayload.optLong("staleMs", -1L)
-                val recommendAction = statusPayload.optString("recommendAction", "").trim()
+                val autoHeartbeatTriggered = statusPayload.optBoolean("autoHeartbeatTriggered", false)
+                val autoHeartbeatRunId = statusPayload.optString("autoHeartbeatRunId", "").trim()
+                val autoHeartbeatError = statusPayload.optString("autoHeartbeatError", "").trim()
 
-                if (runId.isNotEmpty() && runId != openClawRunWatchdogLastRunId) {
-                    openClawRunWatchdogLastRunId = runId
-                    openClawRunWatchdogSuppressUntilMs = 0L
+                if (autoHeartbeatTriggered) {
+                    Log.i(
+                        TAG,
+                        "Native run watchdog auto-heartbeat fired runId=$runId heartbeatRunId=$autoHeartbeatRunId staleMs=$staleMs",
+                    )
+                } else if (autoHeartbeatError.isNotEmpty()) {
+                    Log.w(TAG, "Native run watchdog auto-heartbeat failed: $autoHeartbeatError")
+                } else if (activeRun) {
+                    Log.d(TAG, "Native run watchdog observed active runId=$runId staleMs=$staleMs")
                 }
-                if (!activeRun) {
-                    if (runStatus == "aborted") {
-                        openClawRunWatchdogSuppressUntilMs =
-                            System.currentTimeMillis() + OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS
-                    }
-                    return@Thread
-                }
-
-                val shouldTriggerHeartbeat =
-                    recommendAction == "trigger_heartbeat" &&
-                        (System.currentTimeMillis() - openClawRunWatchdogLastHeartbeatAtMs >=
-                            OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS)
-                if (!shouldTriggerHeartbeat) return@Thread
-                val heartbeatSessionKey = if (resolvedSessionKey.isNotEmpty()) resolvedSessionKey else sessionKey
-
-                LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/heartbeat/trigger",
-                    method = "POST",
-                    body = JSONObject().apply {
-                        put("sessionKey", heartbeatSessionKey)
-                    },
-                    connectTimeoutMs = 8_000,
-                    readTimeoutMs = 35_000,
-                )
-                openClawRunWatchdogLastHeartbeatAtMs = System.currentTimeMillis()
-                Log.i(
-                    TAG,
-                    "Native run watchdog triggered heartbeat for session=$heartbeatSessionKey runId=$runId staleMs=$staleMs",
-                )
             } catch (error: Exception) {
                 Log.w(TAG, "OpenClaw native run watchdog poll failed: ${error.message}")
             } finally {
