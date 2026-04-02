@@ -35,6 +35,8 @@ const RUN_WAIT_TIMEOUT_MS = 9000
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
 const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
 const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
+const OPENCLAW_AUTO_HEARTBEAT_AFTER_MS = 120_000
+const OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS = 90_000
 const OPENCLAW_COMPLETED_OVERLAY_MS = 2400
 
 type OptimisticOpenClawMessage = UiMessage & {
@@ -353,6 +355,7 @@ export function useOpenClawState() {
   let bootstrapInFlight: Promise<string> | null = null
   let lastBootstrapAttemptAtMs = 0
   let pendingRunStartedAtMs = 0
+  let lastAutoHeartbeatAtMs = 0
   let completedOverlayHideTimer: number | null = null
 
   const selectedSession = computed(() =>
@@ -614,6 +617,7 @@ export function useOpenClawState() {
     setPendingRunStatus('')
     pendingRunStartedAtMs = 0
     clearAwaitingAssistant(sessionKey)
+    lastAutoHeartbeatAtMs = Date.now()
     clearCompletedOverlay()
   }
 
@@ -633,6 +637,7 @@ export function useOpenClawState() {
     pendingRunId.value = ''
     setPendingRunStatus('')
     pendingRunStartedAtMs = 0
+    lastAutoHeartbeatAtMs = 0
     await refreshHistory()
   }
 
@@ -745,6 +750,7 @@ export function useOpenClawState() {
     pendingRunId.value = ''
     setPendingRunStatus('queued')
     lastSendAtMs = Date.now()
+    lastAutoHeartbeatAtMs = 0
     let optimisticMessage: OptimisticOpenClawMessage | null = null
 
     try {
@@ -977,6 +983,49 @@ export function useOpenClawState() {
     }
   }
 
+  async function syncRunStateFromWatchdog(
+    sessionKey: string,
+    options: { triggerHeartbeat?: boolean } = {},
+  ): Promise<void> {
+    const normalizedSessionKey = sessionKey.trim()
+    if (!normalizedSessionKey) return
+    try {
+      const watchdog = await getOpenClawRunWatchdogStatus({
+        sessionKey: normalizedSessionKey,
+        suspectAfterMs: 75_000,
+        triggerAfterMs: 120_000,
+      })
+
+      const watchdogStatus = watchdog.status.trim().toLowerCase()
+      if (!watchdog.activeRun || watchdog.completed || isTerminalRunStatus(watchdogStatus)) {
+        return
+      }
+
+      if (watchdogStatus.length > 0 && watchdogStatus !== 'idle') {
+        setPendingRunStatus(watchdogStatus)
+      }
+
+      const awaitingSince = getAwaitingAssistantSince(normalizedSessionKey)
+      const pendingAgeMs = awaitingSince > 0 ? Date.now() - awaitingSince : 0
+      const shouldAutoHeartbeat = (
+        options.triggerHeartbeat === true &&
+        pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
+        watchdog.recommendAction === 'trigger_heartbeat' &&
+        !heartbeatTriggering.value &&
+        !abortingRun.value &&
+        Date.now() - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS
+      )
+
+      if (!shouldAutoHeartbeat) return
+      lastAutoHeartbeatAtMs = Date.now()
+      void triggerHeartbeatNow().catch(() => {
+        // keep polling alive even if the auto-heartbeat attempt fails
+      })
+    } catch {
+      // Leave the current UI state intact; run/wait will continue polling.
+    }
+  }
+
   async function enforceReplyWatchdog(): Promise<void> {
     const sessionKey = selectedSessionKey.value.trim()
     if (!sessionKey) return
@@ -990,6 +1039,7 @@ export function useOpenClawState() {
     if (awaitingSince <= 0) return
 
     keepPendingRunVisibleFromAwaiting(sessionKey)
+    await syncRunStateFromWatchdog(sessionKey, { triggerHeartbeat: true })
   }
 
   async function pollOnce(): Promise<void> {

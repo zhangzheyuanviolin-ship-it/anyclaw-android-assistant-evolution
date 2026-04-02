@@ -54,6 +54,7 @@ const OPENCLAW_RUN_WAIT_POLL_SLICE_MS = 450
 const OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS = 75_000
 const OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS = 120_000
 const OPENCLAW_WATCHDOG_AUTO_HEARTBEAT_COOLDOWN_MS = 90_000
+const OPENCLAW_GATEWAY_TOKEN_CACHE_MS = 5_000
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
 const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
@@ -165,6 +166,8 @@ type OpenClawWatchdogSessionState = {
 
 let openClawNativeReadyCacheValue: boolean | null = null
 let openClawNativeReadyCacheAtMs = 0
+let openClawGatewayTokenCacheValue = ''
+let openClawGatewayTokenCacheAtMs = 0
 const openClawNativeRuns = new Map<string, OpenClawNativeRunContext>()
 const openClawWatchdogSessionState = new Map<string, OpenClawWatchdogSessionState>()
 
@@ -223,6 +226,29 @@ async function readJsonFile(path: string): Promise<Record<string, unknown> | nul
   } catch {
     return null
   }
+}
+
+async function readOpenClawGatewayAuthToken(forceRefresh = false): Promise<string> {
+  const nowMs = Date.now()
+  if (
+    !forceRefresh &&
+    openClawGatewayTokenCacheAtMs > 0 &&
+    nowMs - openClawGatewayTokenCacheAtMs < OPENCLAW_GATEWAY_TOKEN_CACHE_MS
+  ) {
+    return openClawGatewayTokenCacheValue
+  }
+
+  const config = await readJsonFile(OPENCLAW_CONFIG_PATH)
+  const gateway = asRecord(config?.gateway)
+  const auth = asRecord(gateway?.auth)
+  const token =
+    normalizeText(auth?.token) ||
+    normalizeText(process.env.OPENCLAW_GATEWAY_TOKEN) ||
+    normalizeText(process.env.CLAWDBOT_GATEWAY_TOKEN)
+
+  openClawGatewayTokenCacheValue = token
+  openClawGatewayTokenCacheAtMs = nowMs
+  return token
 }
 
 function normalizeText(value: unknown): string {
@@ -390,6 +416,7 @@ async function runOpenClawGatewayCall(
   const processTimeoutMs = normalizedTimeoutMs + 10_000
   const command =
     `openclaw gateway call ${normalizedMethod} --timeout ${normalizedTimeoutMs} --json --params ${shellQuote(serializedParams)}`
+  const gatewayToken = await readOpenClawGatewayAuthToken()
 
   const runCommandOnce = () =>
     new Promise<string>((resolve, reject) => {
@@ -399,6 +426,10 @@ async function runOpenClawGatewayCall(
         if (!currentPath.split(':').includes(prefixBin)) {
           env.PATH = currentPath.length > 0 ? `${prefixBin}:${currentPath}` : prefixBin
         }
+      }
+      if (gatewayToken) {
+        env.OPENCLAW_GATEWAY_TOKEN = gatewayToken
+        env.CLAWDBOT_GATEWAY_TOKEN = gatewayToken
       }
 
       const child = spawn(shellPath, ['-c', command], {
@@ -1102,6 +1133,65 @@ function buildOpenClawWatchdogStatus(
     retryable: latest.retryable,
     recommendAction,
   }
+}
+
+async function resolveOpenClawWatchdogStatus(
+  sessionKey: string,
+  suspectAfterMs: number,
+  triggerAfterMs: number,
+): Promise<ReturnType<typeof buildOpenClawWatchdogStatus>> {
+  let status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
+  if (!status.activeRun || !status.runId) {
+    return status
+  }
+
+  const context = openClawNativeRuns.get(status.runId)
+  if (!context || context.completed || !isOpenClawPrimaryRun(context) || !context.sessionKey) {
+    return status
+  }
+
+  const nowMs = Date.now()
+  const shouldProbe = (
+    status.staleMs >= suspectAfterMs ||
+    nowMs - context.lastProbeAtMs >= OPENCLAW_RUN_MONITOR_PROBE_INTERVAL_MS ||
+    context.lastStatus === 'submitted' ||
+    context.lastStatus === 'reconnecting'
+  )
+
+  if (!shouldProbe) {
+    return status
+  }
+
+  context.lastProbeAtMs = nowMs
+  openClawNativeRuns.set(context.runId, context)
+
+  const probe = await probeOpenClawRunCompletionByHistory(context.runId)
+  if (!probe) {
+    return status
+  }
+
+  const probeStatus = normalizeOpenClawRunStatus(probe.status)
+  const probeCompleted = probe.completed || isOpenClawRunCompletedStatus(probeStatus)
+  updateOpenClawNativeRun(
+    context.runId,
+    probeStatus || context.lastStatus || 'running',
+    getErrorMessage(probe.error, ''),
+    {
+      result: probe.result ?? null,
+      source: 'watchdog.history-probe',
+      retryable: true,
+      completed: probeCompleted,
+      sessionKey: context.sessionKey,
+      kind: context.kind,
+      parentRunId: context.parentRunId,
+    },
+  )
+
+  status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
+  if (!status.activeRun && status.sessionKey) {
+    clearOpenClawWatchdogSessionState(status.sessionKey)
+  }
+  return status
 }
 
 function extractCronJobId(row: Record<string, unknown>): string {
@@ -3514,67 +3604,25 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           suspectAfterMs + 5_000,
         )
 
-        const status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
+        const status = await resolveOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
         if (status.activeRun && status.runId) {
           ensureOpenClawNativeRunMonitor(status.runId)
         }
 
         const watchdogSessionKey = status.sessionKey.trim() || sessionKey.trim()
-        let autoHeartbeatTriggered = false
-        let autoHeartbeatRunId = ''
-        let autoHeartbeatSource = ''
-        let autoHeartbeatError = ''
-        let autoHeartbeatAtMs = 0
-        let autoHeartbeatCooldownRemainingMs = 0
-
-        if (status.activeRun && status.recommendAction === 'trigger_heartbeat' && watchdogSessionKey) {
-          const sessionState = getOpenClawWatchdogSessionState(watchdogSessionKey)
-          const nowMs = Date.now()
-          const elapsedSinceLastAutoHeartbeatMs = nowMs - sessionState.lastAutoHeartbeatAtMs
-          if (elapsedSinceLastAutoHeartbeatMs >= OPENCLAW_WATCHDOG_AUTO_HEARTBEAT_COOLDOWN_MS) {
-            try {
-              const heartbeatResult = await triggerOpenClawHeartbeatInternal({
-                sessionKey: watchdogSessionKey,
-                parentRunId: status.runId,
-                triggerSource: 'watchdog.auto',
-              })
-              autoHeartbeatTriggered = heartbeatResult.ok
-              autoHeartbeatRunId = heartbeatResult.runId
-              autoHeartbeatSource = heartbeatResult.source
-              autoHeartbeatAtMs = nowMs
-              openClawWatchdogSessionState.set(watchdogSessionKey, {
-                lastAutoHeartbeatAtMs: nowMs,
-                lastAutoHeartbeatRunId: autoHeartbeatRunId,
-                lastAutoHeartbeatSource: autoHeartbeatSource || 'watchdog.auto',
-              })
-            } catch (error) {
-              autoHeartbeatError = getErrorMessage(error, 'OpenClaw watchdog auto-heartbeat failed')
-              autoHeartbeatAtMs = nowMs
-              openClawWatchdogSessionState.set(watchdogSessionKey, {
-                lastAutoHeartbeatAtMs: nowMs,
-                lastAutoHeartbeatRunId: '',
-                lastAutoHeartbeatSource: 'watchdog.auto.error',
-              })
-            }
-          } else {
-            autoHeartbeatCooldownRemainingMs = Math.max(
-              0,
-              OPENCLAW_WATCHDOG_AUTO_HEARTBEAT_COOLDOWN_MS - elapsedSinceLastAutoHeartbeatMs,
-            )
-          }
-        } else if (!status.activeRun && watchdogSessionKey) {
+        if (!status.activeRun && watchdogSessionKey) {
           clearOpenClawWatchdogSessionState(watchdogSessionKey)
         }
 
         setJson(res, 200, {
           ok: true,
           ...status,
-          autoHeartbeatTriggered,
-          autoHeartbeatRunId,
-          autoHeartbeatSource,
-          autoHeartbeatError,
-          autoHeartbeatAtMs,
-          autoHeartbeatCooldownRemainingMs,
+          autoHeartbeatTriggered: false,
+          autoHeartbeatRunId: '',
+          autoHeartbeatSource: '',
+          autoHeartbeatError: '',
+          autoHeartbeatAtMs: 0,
+          autoHeartbeatCooldownRemainingMs: 0,
           autoHeartbeatCooldownMs: OPENCLAW_WATCHDOG_AUTO_HEARTBEAT_COOLDOWN_MS,
           suspectAfterMs,
           triggerAfterMs,
