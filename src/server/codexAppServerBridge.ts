@@ -874,14 +874,34 @@ async function monitorOpenClawNativeRun(runId: string): Promise<void> {
           return
         }
         if (latest.retryableErrors >= OPENCLAW_RUN_MONITOR_MAX_RETRYABLE_ERRORS) {
+          const probe = await probeOpenClawRunCompletionByHistory(normalizedRunId)
+          if (probe) {
+            const probeStatus = normalizeOpenClawRunStatus(probe.status)
+            const probeCompleted = probe.completed || isOpenClawRunCompletedStatus(probeStatus)
+            updateOpenClawNativeRun(
+              normalizedRunId,
+              probeStatus,
+              getErrorMessage(probe.error, ''),
+              {
+                result: probe.result ?? null,
+                source: 'history-probe',
+                retryable: true,
+                completed: probeCompleted,
+              },
+            )
+            if (probeCompleted) return
+          }
+
+          // Prevent an unbounded "active reconnecting" state that keeps watchdog
+          // heartbeats firing forever after the task is already done or lost.
           updateOpenClawNativeRun(
             normalizedRunId,
-            'reconnecting',
-            latest.lastError || 'OpenClaw run still reconnecting',
+            'failed',
+            latest.lastError || 'OpenClaw run monitor lost connectivity',
             {
               source: 'monitor.guard',
-              retryable: true,
-              completed: false,
+              retryable: false,
+              completed: true,
             },
           )
           return
@@ -933,8 +953,7 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
   }
   if (normalizedSessionKey.length > 0) {
     if (latestMatchedSession) return { ...latestMatchedSession }
-    if (latestActive) return { ...latestActive }
-    return latest ? { ...latest } : null
+    return null
   }
   if (latestActive) return { ...latestActive }
   return latest ? { ...latest } : null
@@ -3144,18 +3163,47 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
           const snapshot = await waitForOpenClawRunSnapshot(runId, waitTimeoutMs)
           if (snapshot.context) {
-            const status = normalizeOpenClawRunStatus(snapshot.context.lastStatus)
-            const completed = snapshot.context.completed || isOpenClawRunCompletedStatus(status)
-            if (completed !== snapshot.context.completed) {
+            let nextContext = snapshot.context
+            let status = normalizeOpenClawRunStatus(nextContext.lastStatus)
+            let completed = nextContext.completed || isOpenClawRunCompletedStatus(status)
+
+            if (!completed && (status === 'reconnecting' || status === 'unknown')) {
+              const probe = await probeOpenClawRunCompletionByHistory(runId)
+              if (probe) {
+                const probeStatus = normalizeOpenClawRunStatus(probe.status)
+                const probeCompleted = probe.completed || isOpenClawRunCompletedStatus(probeStatus)
+                const updated = updateOpenClawNativeRun(
+                  runId,
+                  probeStatus,
+                  getErrorMessage(probe.error, ''),
+                  {
+                    result: probe.result ?? null,
+                    source: 'history-probe',
+                    retryable: true,
+                    completed: probeCompleted,
+                  },
+                )
+                if (updated) {
+                  nextContext = { ...updated }
+                  status = normalizeOpenClawRunStatus(nextContext.lastStatus)
+                  completed = nextContext.completed || isOpenClawRunCompletedStatus(status)
+                } else {
+                  status = probeStatus
+                  completed = probeCompleted
+                }
+              }
+            }
+
+            if (completed !== nextContext.completed) {
               updateOpenClawNativeRun(
                 runId,
                 status,
-                snapshot.context.lastError,
+                nextContext.lastError,
                 {
-                  rawStatus: snapshot.context.rawStatus,
-                  result: snapshot.context.lastResult,
-                  source: snapshot.context.source,
-                  retryable: snapshot.context.retryable,
+                  rawStatus: nextContext.rawStatus,
+                  result: nextContext.lastResult,
+                  source: nextContext.source,
+                  retryable: nextContext.retryable,
                   completed,
                 },
               )
@@ -3165,13 +3213,13 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
               runId,
               status,
               completed,
-              result: completed ? snapshot.context.lastResult ?? null : null,
-              error: snapshot.context.lastError || null,
-              rawStatus: snapshot.context.rawStatus || status,
-              source: snapshot.context.source || 'run-monitor',
-              retryable: snapshot.context.retryable,
+              result: completed ? nextContext.lastResult ?? null : null,
+              error: nextContext.lastError || null,
+              rawStatus: nextContext.rawStatus || status,
+              source: nextContext.source || 'run-monitor',
+              retryable: nextContext.retryable,
               waiting: snapshot.timedOut,
-              revision: snapshot.context.revision,
+              revision: nextContext.revision,
             })
             return
           }
@@ -3338,18 +3386,22 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
                 )
                 const cronRunRecord = asRecord(cronRun) ?? {}
                 const runId = normalizeText(cronRunRecord.runId)
-                if (runId && sessionKey) {
-                  rememberOpenClawNativeRun(runId, sessionKey)
-                  ensureOpenClawNativeRunMonitor(runId)
+                if (runId) {
+                  if (sessionKey) {
+                    rememberOpenClawNativeRun(runId, sessionKey)
+                    ensureOpenClawNativeRunMonitor(runId)
+                  }
+                  setJson(res, 200, {
+                    ok: true,
+                    status: 'submitted',
+                    runId,
+                    source: 'cron.run',
+                    message: `Triggered ${heartbeatJob.name}`,
+                  })
+                  return
                 }
-                setJson(res, 200, {
-                  ok: true,
-                  status: 'submitted',
-                  runId,
-                  source: 'cron.run',
-                  message: `Triggered ${heartbeatJob.name}`,
-                })
-                return
+                // Some runtimes acknowledge cron.run without runId. Fall through
+                // to chat.send fallback so callers can always track a concrete run.
               }
             } catch {
               invalidateOpenClawNativeReadyCache()

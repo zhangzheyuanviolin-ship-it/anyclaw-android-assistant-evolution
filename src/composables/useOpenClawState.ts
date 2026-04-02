@@ -968,6 +968,13 @@ export function useOpenClawState() {
   async function enforceReplyWatchdog(): Promise<void> {
     const sessionKey = selectedSessionKey.value.trim()
     if (!sessionKey) return
+
+    // Once the run UI state has fully ended, force-stop auto-heartbeat loop.
+    if (!pendingRun.value && pendingRunId.value.trim().length === 0) {
+      clearAwaitingAssistant(sessionKey)
+      return
+    }
+
     const awaitingSince = getAwaitingAssistantSince(sessionKey)
     if (awaitingSince <= 0) return
 
