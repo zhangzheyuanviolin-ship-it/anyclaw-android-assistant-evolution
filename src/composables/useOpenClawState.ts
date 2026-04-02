@@ -199,6 +199,15 @@ function isTerminalRunStatus(status: string): boolean {
     normalized === 'idle'
 }
 
+
+type OpenClawWatchdogSnapshot = {
+  queried: boolean
+  activeRun: boolean
+  completed: boolean
+  status: string
+  runId: string
+}
+
 function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolean): UiMessage[] {
   const output: UiMessage[] = []
 
@@ -564,26 +573,38 @@ export function useOpenClawState() {
       const awaitingSince = getAwaitingAssistantSince(sessionKey)
       if (awaitingSince > 0 && hasAssistantResponseAfter(payload.messages, awaitingSince)) {
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
-        let shouldFinalizePendingRun = true
+        let shouldFinalizePendingRun = false
+        let watchdogQueried = false
+        let watchdogActive = false
+        let watchdogCompleted = false
+        let watchdogStatus = ''
+        let watchdogRunId = ''
         const trackedRunId = pendingRunId.value.trim()
-        if (pendingRun.value && trackedRunId.length > 0) {
-          shouldFinalizePendingRun = false
-          try {
-            const watchdog = await getOpenClawRunWatchdogStatus({
-              sessionKey,
-              suspectAfterMs: 75_000,
-              triggerAfterMs: 120_000,
-            })
-            const watchdogRunId = watchdog.runId.trim()
-            const status = watchdog.status.trim().toLowerCase()
-            if (!watchdog.activeRun || watchdog.completed || isTerminalRunStatus(status)) {
-              shouldFinalizePendingRun = true
-            } else if (watchdogRunId.length > 0 && watchdogRunId !== trackedRunId) {
-              shouldFinalizePendingRun = true
-            }
-          } catch {
-            shouldFinalizePendingRun = false
+
+        try {
+          const watchdog = await getOpenClawRunWatchdogStatus({
+            sessionKey,
+            suspectAfterMs: 75_000,
+            triggerAfterMs: 120_000,
+          })
+          watchdogQueried = true
+          watchdogActive = watchdog.activeRun
+          watchdogCompleted = watchdog.completed
+          watchdogRunId = watchdog.runId.trim()
+          watchdogStatus = watchdog.status.trim().toLowerCase()
+          if (!watchdogActive || watchdogCompleted || isTerminalRunStatus(watchdogStatus)) {
+            shouldFinalizePendingRun = true
           }
+          if (
+            trackedRunId.length > 0 &&
+            watchdogRunId.length > 0 &&
+            watchdogRunId !== trackedRunId &&
+            !watchdogActive
+          ) {
+            shouldFinalizePendingRun = true
+          }
+        } catch {
+          shouldFinalizePendingRun = false
         }
 
         if (shouldFinalizePendingRun) {
@@ -596,8 +617,24 @@ export function useOpenClawState() {
           showCompletedOverlay(finalStatus)
         } else {
           keepPendingRunVisibleFromAwaiting(sessionKey)
-          if (!pendingRunStatus.value.trim()) {
+          if (watchdogQueried && watchdogActive) {
+            pendingRun.value = true
+            if (!pendingRunId.value.trim() && watchdogRunId.length > 0) {
+              pendingRunId.value = watchdogRunId
+            }
+            if (watchdogStatus.length > 0 && watchdogStatus !== 'idle') {
+              setPendingRunStatus(watchdogStatus)
+            } else if (!pendingRunStatus.value.trim()) {
+              setPendingRunStatus('running')
+            }
+          } else if (!pendingRunStatus.value.trim()) {
             setPendingRunStatus('running')
+          }
+          if (pendingRunStartedAtMs <= 0) {
+            pendingRunStartedAtMs = awaitingSince
+          }
+          if (!pendingRun.value && !watchdogCompleted) {
+            pendingRun.value = true
           }
         }
       }
@@ -986,9 +1023,26 @@ export function useOpenClawState() {
   async function syncRunStateFromWatchdog(
     sessionKey: string,
     options: { triggerHeartbeat?: boolean } = {},
-  ): Promise<void> {
+  ): Promise<OpenClawWatchdogSnapshot> {
     const normalizedSessionKey = sessionKey.trim()
-    if (!normalizedSessionKey) return
+    if (!normalizedSessionKey) {
+      return {
+        queried: false,
+        activeRun: false,
+        completed: false,
+        status: '',
+        runId: '',
+      }
+    }
+
+    const snapshot: OpenClawWatchdogSnapshot = {
+      queried: false,
+      activeRun: false,
+      completed: false,
+      status: '',
+      runId: '',
+    }
+
     try {
       const watchdog = await getOpenClawRunWatchdogStatus({
         sessionKey: normalizedSessionKey,
@@ -996,33 +1050,55 @@ export function useOpenClawState() {
         triggerAfterMs: 120_000,
       })
 
-      const watchdogStatus = watchdog.status.trim().toLowerCase()
-      if (!watchdog.activeRun || watchdog.completed || isTerminalRunStatus(watchdogStatus)) {
-        return
+      snapshot.queried = true
+      snapshot.activeRun = watchdog.activeRun
+      snapshot.completed = watchdog.completed
+      snapshot.status = watchdog.status.trim().toLowerCase()
+      snapshot.runId = watchdog.runId.trim()
+
+      const watchdogStatus = snapshot.status
+      if (snapshot.activeRun && !snapshot.completed && !isTerminalRunStatus(watchdogStatus)) {
+        if (!pendingRun.value) {
+          pendingRun.value = true
+        }
+        if (!pendingRunId.value.trim() && snapshot.runId.length > 0) {
+          pendingRunId.value = snapshot.runId
+        }
+        if (watchdogStatus.length > 0 && watchdogStatus !== 'idle') {
+          setPendingRunStatus(watchdogStatus)
+        } else if (!pendingRunStatus.value.trim()) {
+          setPendingRunStatus('running')
+        }
       }
 
-      if (watchdogStatus.length > 0 && watchdogStatus !== 'idle') {
-        setPendingRunStatus(watchdogStatus)
+      if (!snapshot.activeRun || snapshot.completed || isTerminalRunStatus(watchdogStatus)) {
+        return snapshot
       }
 
       const awaitingSince = getAwaitingAssistantSince(normalizedSessionKey)
+      if (pendingRunStartedAtMs <= 0) {
+        pendingRunStartedAtMs = awaitingSince > 0 ? awaitingSince : Date.now()
+      }
+
       const pendingAgeMs = awaitingSince > 0 ? Date.now() - awaitingSince : 0
       const shouldAutoHeartbeat = (
         options.triggerHeartbeat === true &&
         pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
-        watchdog.recommendAction === 'trigger_heartbeat' &&
+        (watchdog.recommendAction === 'trigger_heartbeat' || watchdogStatus === 'reconnecting') &&
         !heartbeatTriggering.value &&
         !abortingRun.value &&
         Date.now() - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS
       )
 
-      if (!shouldAutoHeartbeat) return
+      if (!shouldAutoHeartbeat) return snapshot
       lastAutoHeartbeatAtMs = Date.now()
       void triggerHeartbeatNow().catch(() => {
         // keep polling alive even if the auto-heartbeat attempt fails
       })
+      return snapshot
     } catch {
       // Leave the current UI state intact; run/wait will continue polling.
+      return snapshot
     }
   }
 
@@ -1030,16 +1106,27 @@ export function useOpenClawState() {
     const sessionKey = selectedSessionKey.value.trim()
     if (!sessionKey) return
 
-    if (!pendingRun.value && pendingRunId.value.trim().length === 0) {
-      clearAwaitingAssistant(sessionKey)
+    const awaitingSince = getAwaitingAssistantSince(sessionKey)
+    if (awaitingSince <= 0) {
+      if (!pendingRun.value && pendingRunId.value.trim().length === 0) {
+        clearAwaitingAssistant(sessionKey)
+      }
       return
     }
 
-    const awaitingSince = getAwaitingAssistantSince(sessionKey)
-    if (awaitingSince <= 0) return
-
     keepPendingRunVisibleFromAwaiting(sessionKey)
-    await syncRunStateFromWatchdog(sessionKey, { triggerHeartbeat: true })
+    const snapshot = await syncRunStateFromWatchdog(sessionKey, { triggerHeartbeat: true })
+    if (!snapshot.queried) return
+
+    const terminal = snapshot.completed || isTerminalRunStatus(snapshot.status)
+    if (terminal && !snapshot.activeRun) {
+      clearAwaitingAssistant(sessionKey)
+      pendingRun.value = false
+      pendingRunId.value = ''
+      setPendingRunStatus('')
+      pendingRunStartedAtMs = 0
+      showCompletedOverlay(snapshot.status || 'completed')
+    }
   }
 
   async function pollOnce(): Promise<void> {

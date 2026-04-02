@@ -996,19 +996,25 @@ async function monitorOpenClawNativeRun(runId: string): Promise<void> {
             if (probeCompleted) return
           }
 
-          // Prevent an unbounded "active reconnecting" state that keeps watchdog
-          // heartbeats firing forever after the task is already done or lost.
+          // Keep the run active and retryable instead of force-closing it as completed.
           updateOpenClawNativeRun(
             normalizedRunId,
-            'failed',
+            'reconnecting',
             latest.lastError || 'OpenClaw run monitor lost connectivity',
             {
-              source: 'monitor.guard',
-              retryable: false,
-              completed: true,
+              source: 'monitor.guard.retry-limit',
+              retryable: true,
+              completed: false,
             },
           )
-          return
+          const guardContext = openClawNativeRuns.get(normalizedRunId)
+          if (guardContext) {
+            guardContext.retryableErrors = 0
+            guardContext.lastProbeAtMs = Date.now()
+            openClawNativeRuns.set(normalizedRunId, guardContext)
+          }
+          await sleepMs(OPENCLAW_RUN_MONITOR_IDLE_SLEEP_MS)
+          continue
         }
         const backoff = retryable
           ? OPENCLAW_GATEWAY_RETRY_BACKOFF_MS[Math.min(latest.retryableErrors, OPENCLAW_GATEWAY_RETRY_BACKOFF_MS.length - 1)] + 400
@@ -1044,6 +1050,7 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
   let latest: OpenClawNativeRunContext | null = null
   let latestActive: OpenClawNativeRunContext | null = null
   let latestMatchedSession: OpenClawNativeRunContext | null = null
+  let latestMatchedSessionActive: OpenClawNativeRunContext | null = null
   for (const context of openClawNativeRuns.values()) {
     if (!isOpenClawPrimaryRun(context)) continue
     if (!latest || context.updatedAtMs > latest.updatedAtMs) {
@@ -1052,15 +1059,17 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
     if (!context.completed && (!latestActive || context.updatedAtMs > latestActive.updatedAtMs)) {
       latestActive = context
     }
-    if (
-      normalizedSessionKey &&
-      context.sessionKey === normalizedSessionKey &&
-      (!latestMatchedSession || context.updatedAtMs > latestMatchedSession.updatedAtMs)
-    ) {
-      latestMatchedSession = context
+    if (normalizedSessionKey && context.sessionKey === normalizedSessionKey) {
+      if (!latestMatchedSession || context.updatedAtMs > latestMatchedSession.updatedAtMs) {
+        latestMatchedSession = context
+      }
+      if (!context.completed && (!latestMatchedSessionActive || context.updatedAtMs > latestMatchedSessionActive.updatedAtMs)) {
+        latestMatchedSessionActive = context
+      }
     }
   }
   if (normalizedSessionKey.length > 0) {
+    if (latestMatchedSessionActive) return { ...latestMatchedSessionActive }
     if (latestMatchedSession) return { ...latestMatchedSession }
     return null
   }
@@ -1351,6 +1360,17 @@ function isLikelyAssistantResultContent(content: unknown): boolean {
   return false
 }
 
+function hasAssistantToolCallContent(content: unknown): boolean {
+  if (!Array.isArray(content)) return false
+  for (const row of content) {
+    const item = asRecord(row)
+    if (!item) continue
+    const type = normalizeText(item.type)
+    if (type === 'toolcall' || type === 'toolCall') return true
+  }
+  return false
+}
+
 async function probeOpenClawRunCompletionByHistory(runId: string): Promise<{
   completed: boolean
   status: string
@@ -1370,33 +1390,61 @@ async function probeOpenClawRunCompletionByHistory(runId: string): Promise<{
     )
     const record = asRecord(nativeHistory) ?? {}
     const rows = Array.isArray(record.messages) ? record.messages : []
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
+
+    let latestKind = ''
+    let latestTimestamp = 0
+    let latestIndex = -1
+    let latestErrorContent: unknown = null
+
+    for (let index = 0; index < rows.length; index += 1) {
       const row = asRecord(rows[index]) ?? {}
       const timestamp = typeof row.timestamp === 'number' && Number.isFinite(row.timestamp)
         ? row.timestamp
         : 0
       if (timestamp < context.sentAtMs) continue
+
       const role = normalizeText(row.role)
-      if (role === 'assistant' && isLikelyAssistantResultContent(row.content)) {
-        return {
-          completed: true,
-          status: 'completed',
-          result: {
-            source: 'history-probe',
-            sessionKey: context.sessionKey,
-          },
-          error: null,
+      let kind = ''
+      if (role === 'assistant') {
+        if (hasAssistantToolCallContent(row.content)) {
+          kind = 'assistant_toolcall'
+        } else if (isLikelyAssistantResultContent(row.content)) {
+          kind = 'assistant_result'
         }
+      } else if (role === 'toolResult') {
+        kind = row.isError === true ? 'tool_result_error' : 'tool_result'
       }
-      if (role === 'toolResult' && row.isError === true) {
-        return {
-          completed: true,
-          status: 'failed',
-          result: null,
-          error: row.content ?? 'toolResult error',
-        }
+
+      if (!kind) continue
+      if (timestamp > latestTimestamp || (timestamp === latestTimestamp && index > latestIndex)) {
+        latestKind = kind
+        latestTimestamp = timestamp
+        latestIndex = index
+        latestErrorContent = kind === 'tool_result_error' ? (row.content ?? 'toolResult error') : null
       }
     }
+
+    if (latestKind === 'assistant_result') {
+      return {
+        completed: true,
+        status: 'completed',
+        result: {
+          source: 'history-probe',
+          sessionKey: context.sessionKey,
+        },
+        error: null,
+      }
+    }
+
+    if (latestKind === 'tool_result_error') {
+      return {
+        completed: true,
+        status: 'failed',
+        result: null,
+        error: latestErrorContent,
+      }
+    }
+
     return {
       completed: false,
       status: 'running',
