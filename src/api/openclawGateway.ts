@@ -323,6 +323,68 @@ export async function waitOpenClawRun(request: OpenClawRunWaitRequest): Promise<
   }
 }
 
+export async function getOpenClawRunWatchdogStatus(request: {
+  sessionKey: string
+  suspectAfterMs?: number
+  triggerAfterMs?: number
+}): Promise<{
+  ok: boolean
+  sessionKey: string
+  activeRun: boolean
+  runId: string
+  status: string
+  completed: boolean
+  recommendAction: string
+}> {
+  const sessionKey = request.sessionKey.trim()
+  if (!sessionKey) {
+    throw new Error('OpenClaw watchdog status requires session key')
+  }
+
+  const suspectAfterMs =
+    typeof request.suspectAfterMs === 'number' && Number.isFinite(request.suspectAfterMs)
+      ? Math.max(20_000, Math.min(300_000, Math.floor(request.suspectAfterMs)))
+      : 75_000
+
+  const triggerAfterMs =
+    typeof request.triggerAfterMs === 'number' && Number.isFinite(request.triggerAfterMs)
+      ? Math.max(suspectAfterMs + 5_000, Math.min(600_000, Math.floor(request.triggerAfterMs)))
+      : 120_000
+
+  const payload = await requestOpenClaw<{
+    ok?: boolean
+    sessionKey?: string
+    activeRun?: boolean
+    runId?: string
+    status?: string
+    completed?: boolean
+    recommendAction?: string
+  }>(
+    '/openclaw-api/watchdog/status',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionKey,
+        suspectAfterMs,
+        triggerAfterMs,
+      }),
+    },
+    'Failed to read OpenClaw watchdog status',
+    10_000,
+  )
+
+  return {
+    ok: readBoolean(payload?.ok),
+    sessionKey: readString(payload?.sessionKey).trim() || sessionKey,
+    activeRun: readBoolean(payload?.activeRun),
+    runId: readString(payload?.runId).trim(),
+    status: readString(payload?.status).trim() || 'idle',
+    completed: readBoolean(payload?.completed),
+    recommendAction: readString(payload?.recommendAction).trim() || 'none',
+  }
+}
+
 export async function triggerOpenClawHeartbeat(request: {
   sessionKey?: string
 }): Promise<{

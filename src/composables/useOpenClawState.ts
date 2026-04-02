@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import {
   abortOpenClawRun,
   createOpenClawSession,
+  getOpenClawRunWatchdogStatus,
   getOpenClawHealth,
   listOpenClawSessions,
   readOpenClawHistory,
@@ -183,6 +184,18 @@ function toPendingRunReasoningText(status: string, showProcess: boolean): string
     return `任务已提交，状态 ${status}`
   }
   return `正在执行任务，状态 ${status}`
+}
+
+function isTerminalRunStatus(status: string): boolean {
+  const normalized = status.trim().toLowerCase()
+  return normalized === 'ok' ||
+    normalized === 'completed' ||
+    normalized === 'failed' ||
+    normalized === 'error' ||
+    normalized === 'cancelled' ||
+    normalized === 'canceled' ||
+    normalized === 'aborted' ||
+    normalized === 'idle'
 }
 
 function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolean): UiMessage[] {
@@ -515,13 +528,40 @@ export function useOpenClawState() {
       renderMessagesFromHistory(payload.messages)
       const awaitingSince = getAwaitingAssistantSince(sessionKey)
       if (awaitingSince > 0 && hasAssistantResponseAfter(payload.messages, awaitingSince)) {
-        clearAwaitingAssistant(sessionKey)
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
-        if (pendingRun.value) {
+        let shouldFinalizePendingRun = true
+        const trackedRunId = pendingRunId.value.trim()
+        if (pendingRun.value && trackedRunId.length > 0) {
+          shouldFinalizePendingRun = false
+          try {
+            const watchdog = await getOpenClawRunWatchdogStatus({
+              sessionKey,
+              suspectAfterMs: 75_000,
+              triggerAfterMs: 120_000,
+            })
+            const watchdogRunId = watchdog.runId.trim()
+            const status = watchdog.status.trim().toLowerCase()
+            if (!watchdog.activeRun || watchdog.completed || isTerminalRunStatus(status)) {
+              shouldFinalizePendingRun = true
+            } else if (watchdogRunId.length > 0 && watchdogRunId !== trackedRunId) {
+              shouldFinalizePendingRun = true
+            }
+          } catch {
+            shouldFinalizePendingRun = false
+          }
+        }
+
+        if (shouldFinalizePendingRun) {
+          clearAwaitingAssistant(sessionKey)
           pendingRun.value = false
           pendingRunId.value = ''
           setPendingRunStatus('')
           pendingRunStartedAtMs = 0
+        } else {
+          keepPendingRunVisibleFromAwaiting(sessionKey)
+          if (!pendingRunStatus.value.trim()) {
+            setPendingRunStatus('running')
+          }
         }
       }
       lastError.value = ''
@@ -532,6 +572,15 @@ export function useOpenClawState() {
         isLoadingMessages.value = false
       }
     }
+  }
+
+  function clearLocalPendingRunState(sessionKey: string): void {
+    pendingRun.value = false
+    pendingRunId.value = ''
+    setPendingRunStatus('')
+    pendingRunStartedAtMs = 0
+    clearAwaitingAssistant(sessionKey)
+    lastAutoHeartbeatAtMs = Date.now()
   }
 
   async function selectSession(sessionKey: string, options: SessionSelectOptions = {}): Promise<void> {
@@ -792,13 +841,18 @@ export function useOpenClawState() {
     try {
       const heartbeatStartedAtMs = Date.now()
       const result = await triggerOpenClawHeartbeat({ sessionKey })
+      const existingRunId = pendingRunId.value.trim()
       if (result.runId.trim()) {
         pendingRun.value = true
-        pendingRunId.value = result.runId.trim()
-        setPendingRunStatus(result.status.trim() || 'submitted')
-        lastSendAtMs = heartbeatStartedAtMs
-        pendingRunStartedAtMs = heartbeatStartedAtMs
-        void waitPendingRun({ force: true })
+        if (!existingRunId) {
+          pendingRunId.value = result.runId.trim()
+          setPendingRunStatus(result.status.trim() || 'submitted')
+          lastSendAtMs = heartbeatStartedAtMs
+          pendingRunStartedAtMs = heartbeatStartedAtMs
+          void waitPendingRun({ force: true })
+        } else if (!pendingRunStatus.value.trim()) {
+          setPendingRunStatus('running')
+        }
       } else {
         pendingRun.value = true
         if (!pendingRunStatus.value.trim()) {
@@ -807,7 +861,6 @@ export function useOpenClawState() {
         if (pendingRunStartedAtMs <= 0) {
           pendingRunStartedAtMs = heartbeatStartedAtMs
         }
-        setPendingRunStatus('heartbeat')
       }
       markAwaitingAssistant(sessionKey, pendingRunStartedAtMs || heartbeatStartedAtMs, 'keep-earliest')
       await refreshHistory({ silent: true })
@@ -827,32 +880,22 @@ export function useOpenClawState() {
 
     abortingRun.value = true
     lastError.value = ''
+    const runId = pendingRunId.value.trim()
+    clearLocalPendingRunState(sessionKey)
     try {
-      const runId = pendingRunId.value.trim()
-      const result = await abortOpenClawRun({
+      void abortOpenClawRun({
         sessionKey,
         runId: runId || undefined,
+      }).then(async (result) => {
+        if (!result.aborted) {
+          lastError.value = '终止请求已发送，但网关未确认中止'
+        }
+        await refreshHistory({ silent: true })
+        await refreshSessions(sessionKey)
+        await refreshHealth()
+      }).catch((error) => {
+        lastError.value = error instanceof Error ? `终止请求已发送，本地已解锁：${error.message}` : '终止请求已发送，本地已解锁'
       })
-      if (!result.aborted) {
-        throw new Error('终止任务失败：网关未确认中止')
-      }
-      pendingRun.value = false
-      pendingRunId.value = ''
-      setPendingRunStatus('aborted')
-      pendingRunStartedAtMs = 0
-      clearAwaitingAssistant(sessionKey)
-      await refreshHistory({ silent: true })
-      await refreshSessions(sessionKey)
-      await refreshHealth()
-      setPendingRunStatus('')
-    } catch (error) {
-      pendingRun.value = false
-      pendingRunId.value = ''
-      setPendingRunStatus('')
-      pendingRunStartedAtMs = 0
-      clearAwaitingAssistant(sessionKey)
-      lastAutoHeartbeatAtMs = Date.now()
-      lastError.value = error instanceof Error ? error.message : '终止任务失败'
     } finally {
       abortingRun.value = false
     }

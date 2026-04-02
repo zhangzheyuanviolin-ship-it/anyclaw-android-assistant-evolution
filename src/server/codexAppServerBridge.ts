@@ -913,24 +913,9 @@ function ensureOpenClawNativeRunMonitor(runId: string): void {
 function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNativeRunContext | null {
   const normalizedSessionKey = typeof sessionKey === 'string' ? sessionKey.trim() : ''
 
-  if (normalizedSessionKey.length > 0) {
-    let latestMatchedSession: OpenClawNativeRunContext | null = null
-    let latestMatchedActive: OpenClawNativeRunContext | null = null
-    for (const context of openClawNativeRuns.values()) {
-      if (context.sessionKey !== normalizedSessionKey) continue
-      if (!latestMatchedSession || context.updatedAtMs > latestMatchedSession.updatedAtMs) {
-        latestMatchedSession = context
-      }
-      if (!context.completed && (!latestMatchedActive || context.updatedAtMs > latestMatchedActive.updatedAtMs)) {
-        latestMatchedActive = context
-      }
-    }
-    if (latestMatchedActive) return { ...latestMatchedActive }
-    return latestMatchedSession ? { ...latestMatchedSession } : null
-  }
-
   let latest: OpenClawNativeRunContext | null = null
   let latestActive: OpenClawNativeRunContext | null = null
+  let latestMatchedSession: OpenClawNativeRunContext | null = null
   for (const context of openClawNativeRuns.values()) {
     if (!latest || context.updatedAtMs > latest.updatedAtMs) {
       latest = context
@@ -938,6 +923,18 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
     if (!context.completed && (!latestActive || context.updatedAtMs > latestActive.updatedAtMs)) {
       latestActive = context
     }
+    if (
+      normalizedSessionKey &&
+      context.sessionKey === normalizedSessionKey &&
+      (!latestMatchedSession || context.updatedAtMs > latestMatchedSession.updatedAtMs)
+    ) {
+      latestMatchedSession = context
+    }
+  }
+  if (normalizedSessionKey.length > 0) {
+    if (latestMatchedSession) return { ...latestMatchedSession }
+    if (latestActive) return { ...latestActive }
+    return latest ? { ...latest } : null
   }
   if (latestActive) return { ...latestActive }
   return latest ? { ...latest } : null
