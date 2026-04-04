@@ -26,15 +26,6 @@ function readBoolean(value: unknown): boolean {
   return value === true
 }
 
-function isFetchTransportError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? '')
-  return /failed to fetch|networkerror|load failed/i.test(message)
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError'
-}
-
 async function requestOpenClaw<T>(
   path: string,
   options: RequestInit = {},
@@ -45,66 +36,44 @@ async function requestOpenClaw<T>(
   let response: Response | null = null
   let lastError: unknown = null
 
-  const performFetch = async (timeoutOverrideMs = timeoutMs): Promise<Response> => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
     const timeout =
-      controller && timeoutOverrideMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
+      controller && timeoutMs > 0 && timerHost && typeof timerHost.setTimeout === 'function'
         ? timerHost.setTimeout(() => {
             controller.abort()
-          }, timeoutOverrideMs)
+          }, timeoutMs)
         : null
 
     try {
-      return await fetch(path, {
+      response = await fetch(path, {
         ...options,
         signal: controller?.signal,
       })
-    } finally {
       if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
         timerHost.clearTimeout(timeout)
       }
-    }
-  }
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      response = await performFetch(timeoutMs)
       if (response.status >= 500 && attempt < 2) {
         await new Promise((resolve) => timerHost?.setTimeout?.(resolve, 300 + attempt * 300) ?? resolve(null))
         continue
       }
       break
     } catch (error) {
+      if (timeout !== null && timerHost && typeof timerHost.clearTimeout === 'function') {
+        timerHost.clearTimeout(timeout)
+      }
       lastError = error
-      const timeout = isAbortError(error)
-      const retryable = timeout || isFetchTransportError(error)
+      const message = error instanceof Error ? error.message : String(error ?? '')
+      const isTimeout = error instanceof DOMException && error.name === 'AbortError'
+      const retryable = isTimeout || /failed to fetch/i.test(message)
       if (attempt < 2 && retryable) {
         await new Promise((resolve) => timerHost?.setTimeout?.(resolve, 250 + attempt * 250) ?? resolve(null))
         continue
       }
-      if (timeout) {
+      if (isTimeout) {
         throw new Error(`${fallbackMessage}: request timeout`)
       }
       throw error
-    }
-  }
-
-  // Gateway transport occasionally enters a short stale window where the first
-  // request fails with "Failed to fetch" but recovers immediately after health probe.
-  if (!response && isFetchTransportError(lastError)) {
-    try {
-      await fetch('/openclaw-api/health', {
-        method: 'GET',
-        cache: 'no-store',
-      })
-    } catch {
-      // ignore health probe failure; final attempt below still decides outcome
-    }
-
-    try {
-      response = await performFetch(Math.max(timeoutMs, 15_000))
-    } catch (error) {
-      lastError = error
     }
   }
 
@@ -351,68 +320,6 @@ export async function waitOpenClawRun(request: OpenClawRunWaitRequest): Promise<
     retryable: readBoolean(payload?.retryable),
     waiting: readBoolean(payload?.waiting),
     revision: readNumber(payload?.revision),
-  }
-}
-
-export async function getOpenClawRunWatchdogStatus(request: {
-  sessionKey: string
-  suspectAfterMs?: number
-  triggerAfterMs?: number
-}): Promise<{
-  ok: boolean
-  sessionKey: string
-  activeRun: boolean
-  runId: string
-  status: string
-  completed: boolean
-  recommendAction: string
-}> {
-  const sessionKey = request.sessionKey.trim()
-  if (!sessionKey) {
-    throw new Error('OpenClaw watchdog status requires session key')
-  }
-
-  const suspectAfterMs =
-    typeof request.suspectAfterMs === 'number' && Number.isFinite(request.suspectAfterMs)
-      ? Math.max(20_000, Math.min(300_000, Math.floor(request.suspectAfterMs)))
-      : 75_000
-
-  const triggerAfterMs =
-    typeof request.triggerAfterMs === 'number' && Number.isFinite(request.triggerAfterMs)
-      ? Math.max(suspectAfterMs + 5_000, Math.min(600_000, Math.floor(request.triggerAfterMs)))
-      : 120_000
-
-  const payload = await requestOpenClaw<{
-    ok?: boolean
-    sessionKey?: string
-    activeRun?: boolean
-    runId?: string
-    status?: string
-    completed?: boolean
-    recommendAction?: string
-  }>(
-    '/openclaw-api/watchdog/status',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionKey,
-        suspectAfterMs,
-        triggerAfterMs,
-      }),
-    },
-    'Failed to read OpenClaw watchdog status',
-    10_000,
-  )
-
-  return {
-    ok: readBoolean(payload?.ok),
-    sessionKey: readString(payload?.sessionKey).trim() || sessionKey,
-    activeRun: readBoolean(payload?.activeRun),
-    runId: readString(payload?.runId).trim(),
-    status: readString(payload?.status).trim() || 'idle',
-    completed: readBoolean(payload?.completed),
-    recommendAction: readString(payload?.recommendAction).trim() || 'none',
   }
 }
 

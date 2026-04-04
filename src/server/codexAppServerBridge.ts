@@ -53,8 +53,6 @@ const OPENCLAW_RUN_MONITOR_MAX_NON_RETRYABLE_ERRORS = 3
 const OPENCLAW_RUN_WAIT_POLL_SLICE_MS = 450
 const OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS = 75_000
 const OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS = 120_000
-const OPENCLAW_WATCHDOG_AUTO_HEARTBEAT_COOLDOWN_MS = 90_000
-const OPENCLAW_GATEWAY_TOKEN_CACHE_MS = 5_000
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
 const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
 
@@ -134,13 +132,9 @@ type LightweightModelConfig = {
   apiKey: string
 }
 
-type OpenClawRunKind = 'primary' | 'heartbeat'
-
 type OpenClawNativeRunContext = {
   runId: string
   sessionKey: string
-  kind: OpenClawRunKind
-  parentRunId: string
   sentAtMs: number
   lastProgressAtMs: number
   lastStatus: string
@@ -158,18 +152,9 @@ type OpenClawNativeRunContext = {
   lastProbeAtMs: number
 }
 
-type OpenClawWatchdogSessionState = {
-  lastAutoHeartbeatAtMs: number
-  lastAutoHeartbeatRunId: string
-  lastAutoHeartbeatSource: string
-}
-
 let openClawNativeReadyCacheValue: boolean | null = null
 let openClawNativeReadyCacheAtMs = 0
-let openClawGatewayTokenCacheValue = ''
-let openClawGatewayTokenCacheAtMs = 0
 const openClawNativeRuns = new Map<string, OpenClawNativeRunContext>()
-const openClawWatchdogSessionState = new Map<string, OpenClawWatchdogSessionState>()
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -226,29 +211,6 @@ async function readJsonFile(path: string): Promise<Record<string, unknown> | nul
   } catch {
     return null
   }
-}
-
-async function readOpenClawGatewayAuthToken(forceRefresh = false): Promise<string> {
-  const nowMs = Date.now()
-  if (
-    !forceRefresh &&
-    openClawGatewayTokenCacheAtMs > 0 &&
-    nowMs - openClawGatewayTokenCacheAtMs < OPENCLAW_GATEWAY_TOKEN_CACHE_MS
-  ) {
-    return openClawGatewayTokenCacheValue
-  }
-
-  const config = await readJsonFile(OPENCLAW_CONFIG_PATH)
-  const gateway = asRecord(config?.gateway)
-  const auth = asRecord(gateway?.auth)
-  const token =
-    normalizeText(auth?.token) ||
-    normalizeText(process.env.OPENCLAW_GATEWAY_TOKEN) ||
-    normalizeText(process.env.CLAWDBOT_GATEWAY_TOKEN)
-
-  openClawGatewayTokenCacheValue = token
-  openClawGatewayTokenCacheAtMs = nowMs
-  return token
 }
 
 function normalizeText(value: unknown): string {
@@ -416,7 +378,6 @@ async function runOpenClawGatewayCall(
   const processTimeoutMs = normalizedTimeoutMs + 10_000
   const command =
     `openclaw gateway call ${normalizedMethod} --timeout ${normalizedTimeoutMs} --json --params ${shellQuote(serializedParams)}`
-  const gatewayToken = await readOpenClawGatewayAuthToken()
 
   const runCommandOnce = () =>
     new Promise<string>((resolve, reject) => {
@@ -426,10 +387,6 @@ async function runOpenClawGatewayCall(
         if (!currentPath.split(':').includes(prefixBin)) {
           env.PATH = currentPath.length > 0 ? `${prefixBin}:${currentPath}` : prefixBin
         }
-      }
-      if (gatewayToken) {
-        env.OPENCLAW_GATEWAY_TOKEN = gatewayToken
-        env.CLAWDBOT_GATEWAY_TOKEN = gatewayToken
       }
 
       const child = spawn(shellPath, ['-c', command], {
@@ -661,35 +618,15 @@ function isOpenClawRunCompletedStatus(status: string): boolean {
   return OPENCLAW_COMPLETED_RUN_STATUSES.has(normalizeOpenClawRunStatus(status))
 }
 
-function rememberOpenClawNativeRun(
-  runId: string,
-  sessionKey = '',
-  options: {
-    kind?: OpenClawRunKind
-    parentRunId?: string
-    source?: string
-  } = {},
-): void {
+function rememberOpenClawNativeRun(runId: string, sessionKey = ''): void {
   const normalizedRunId = runId.trim()
   const normalizedSessionKey = sessionKey.trim()
-  const normalizedKind: OpenClawRunKind = options.kind === 'heartbeat' ? 'heartbeat' : 'primary'
-  const normalizedParentRunId = options.parentRunId?.trim() ?? ''
-  const normalizedSource = options.source?.trim() ?? ''
   if (!normalizedRunId) return
   const nowMs = Date.now()
   const existing = openClawNativeRuns.get(normalizedRunId)
   if (existing) {
     if (normalizedSessionKey.length > 0) {
       existing.sessionKey = normalizedSessionKey
-    }
-    if (options.kind === 'primary' || options.kind === 'heartbeat') {
-      existing.kind = options.kind
-    }
-    if (Object.prototype.hasOwnProperty.call(options, 'parentRunId')) {
-      existing.parentRunId = normalizedParentRunId
-    }
-    if (normalizedSource.length > 0) {
-      existing.source = normalizedSource
     }
     existing.updatedAtMs = nowMs
     existing.revision += 1
@@ -700,15 +637,13 @@ function rememberOpenClawNativeRun(
   const created: OpenClawNativeRunContext = {
     runId: normalizedRunId,
     sessionKey: normalizedSessionKey,
-    kind: normalizedKind,
-    parentRunId: normalizedParentRunId,
     sentAtMs: nowMs,
     lastProgressAtMs: nowMs,
     lastStatus: 'submitted',
     lastError: '',
     lastResult: null,
     rawStatus: '',
-    source: normalizedSource || (normalizedKind === 'heartbeat' ? 'heartbeat' : 'chat.send'),
+    source: 'chat.send',
     retryable: true,
     completed: false,
     updatedAtMs: nowMs,
@@ -733,8 +668,6 @@ function updateOpenClawNativeRun(
     retryable?: boolean
     completed?: boolean
     sessionKey?: string
-    kind?: OpenClawRunKind
-    parentRunId?: string
   } = {},
 ): OpenClawNativeRunContext | null {
   const normalizedRunId = runId.trim()
@@ -743,22 +676,12 @@ function updateOpenClawNativeRun(
   const nowMs = Date.now()
   const existing = openClawNativeRuns.get(normalizedRunId)
   if (!existing) {
-    rememberOpenClawNativeRun(normalizedRunId, options.sessionKey, {
-      kind: options.kind,
-      parentRunId: options.parentRunId,
-      source: options.source,
-    })
+    rememberOpenClawNativeRun(normalizedRunId, options.sessionKey)
   }
   const context = openClawNativeRuns.get(normalizedRunId)
   if (!context) return null
   if (options.sessionKey && options.sessionKey.trim().length > 0) {
     context.sessionKey = options.sessionKey.trim()
-  }
-  if (options.kind === 'primary' || options.kind === 'heartbeat') {
-    context.kind = options.kind
-  }
-  if (Object.prototype.hasOwnProperty.call(options, 'parentRunId')) {
-    context.parentRunId = options.parentRunId?.trim() ?? ''
   }
   const progressAdvanced = didOpenClawRunProgressAdvance(context, normalizedStatus, errorText, options)
   context.lastStatus = normalizedStatus || context.lastStatus || 'running'
@@ -788,45 +711,6 @@ function clearOpenClawNativeRun(runId: string): void {
   const normalizedRunId = runId.trim()
   if (!normalizedRunId) return
   openClawNativeRuns.delete(normalizedRunId)
-}
-
-function clearOpenClawWatchdogSessionState(sessionKey: string): void {
-  const normalizedSessionKey = sessionKey.trim()
-  if (!normalizedSessionKey) return
-  openClawWatchdogSessionState.delete(normalizedSessionKey)
-}
-
-function getOpenClawWatchdogSessionState(sessionKey: string): OpenClawWatchdogSessionState {
-  const normalizedSessionKey = sessionKey.trim()
-  if (!normalizedSessionKey) {
-    return {
-      lastAutoHeartbeatAtMs: 0,
-      lastAutoHeartbeatRunId: '',
-      lastAutoHeartbeatSource: '',
-    }
-  }
-  const existing = openClawWatchdogSessionState.get(normalizedSessionKey)
-  if (existing) return { ...existing }
-  const created: OpenClawWatchdogSessionState = {
-    lastAutoHeartbeatAtMs: 0,
-    lastAutoHeartbeatRunId: '',
-    lastAutoHeartbeatSource: '',
-  }
-  openClawWatchdogSessionState.set(normalizedSessionKey, created)
-  return { ...created }
-}
-
-function clearOpenClawNativeRunsBySession(sessionKey: string): number {
-  const normalizedSessionKey = sessionKey.trim()
-  if (!normalizedSessionKey) return 0
-  let removed = 0
-  for (const [runId, context] of openClawNativeRuns.entries()) {
-    if (context.sessionKey !== normalizedSessionKey) continue
-    openClawNativeRuns.delete(runId)
-    removed += 1
-  }
-  clearOpenClawWatchdogSessionState(normalizedSessionKey)
-  return removed
 }
 
 function snapshotOpenClawNativeRun(runId: string): OpenClawNativeRunContext | null {
@@ -978,34 +862,14 @@ async function monitorOpenClawNativeRun(runId: string): Promise<void> {
           return
         }
         if (latest.retryableErrors >= OPENCLAW_RUN_MONITOR_MAX_RETRYABLE_ERRORS) {
-          const probe = await probeOpenClawRunCompletionByHistory(normalizedRunId)
-          if (probe) {
-            const probeStatus = normalizeOpenClawRunStatus(probe.status)
-            const probeCompleted = probe.completed || isOpenClawRunCompletedStatus(probeStatus)
-            updateOpenClawNativeRun(
-              normalizedRunId,
-              probeStatus,
-              getErrorMessage(probe.error, ''),
-              {
-                result: probe.result ?? null,
-                source: 'history-probe',
-                retryable: true,
-                completed: probeCompleted,
-              },
-            )
-            if (probeCompleted) return
-          }
-
-          // Prevent an unbounded "active reconnecting" state that keeps watchdog
-          // heartbeats firing forever after the task is already done or lost.
           updateOpenClawNativeRun(
             normalizedRunId,
-            'failed',
-            latest.lastError || 'OpenClaw run monitor lost connectivity',
+            'reconnecting',
+            latest.lastError || 'OpenClaw run still reconnecting',
             {
               source: 'monitor.guard',
-              retryable: false,
-              completed: true,
+              retryable: true,
+              completed: false,
             },
           )
           return
@@ -1034,10 +898,6 @@ function ensureOpenClawNativeRunMonitor(runId: string): void {
   void monitorOpenClawNativeRun(context.runId)
 }
 
-function isOpenClawPrimaryRun(context: OpenClawNativeRunContext): boolean {
-  return context.kind !== 'heartbeat'
-}
-
 function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNativeRunContext | null {
   const normalizedSessionKey = typeof sessionKey === 'string' ? sessionKey.trim() : ''
 
@@ -1045,7 +905,6 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
   let latestActive: OpenClawNativeRunContext | null = null
   let latestMatchedSession: OpenClawNativeRunContext | null = null
   for (const context of openClawNativeRuns.values()) {
-    if (!isOpenClawPrimaryRun(context)) continue
     if (!latest || context.updatedAtMs > latest.updatedAtMs) {
       latest = context
     }
@@ -1062,7 +921,8 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
   }
   if (normalizedSessionKey.length > 0) {
     if (latestMatchedSession) return { ...latestMatchedSession }
-    return null
+    if (latestActive) return { ...latestActive }
+    return latest ? { ...latest } : null
   }
   if (latestActive) return { ...latestActive }
   return latest ? { ...latest } : null
@@ -1135,65 +995,6 @@ function buildOpenClawWatchdogStatus(
   }
 }
 
-async function resolveOpenClawWatchdogStatus(
-  sessionKey: string,
-  suspectAfterMs: number,
-  triggerAfterMs: number,
-): Promise<ReturnType<typeof buildOpenClawWatchdogStatus>> {
-  let status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
-  if (!status.activeRun || !status.runId) {
-    return status
-  }
-
-  const context = openClawNativeRuns.get(status.runId)
-  if (!context || context.completed || !isOpenClawPrimaryRun(context) || !context.sessionKey) {
-    return status
-  }
-
-  const nowMs = Date.now()
-  const shouldProbe = (
-    status.staleMs >= suspectAfterMs ||
-    nowMs - context.lastProbeAtMs >= OPENCLAW_RUN_MONITOR_PROBE_INTERVAL_MS ||
-    context.lastStatus === 'submitted' ||
-    context.lastStatus === 'reconnecting'
-  )
-
-  if (!shouldProbe) {
-    return status
-  }
-
-  context.lastProbeAtMs = nowMs
-  openClawNativeRuns.set(context.runId, context)
-
-  const probe = await probeOpenClawRunCompletionByHistory(context.runId)
-  if (!probe) {
-    return status
-  }
-
-  const probeStatus = normalizeOpenClawRunStatus(probe.status)
-  const probeCompleted = probe.completed || isOpenClawRunCompletedStatus(probeStatus)
-  updateOpenClawNativeRun(
-    context.runId,
-    probeStatus || context.lastStatus || 'running',
-    getErrorMessage(probe.error, ''),
-    {
-      result: probe.result ?? null,
-      source: 'watchdog.history-probe',
-      retryable: true,
-      completed: probeCompleted,
-      sessionKey: context.sessionKey,
-      kind: context.kind,
-      parentRunId: context.parentRunId,
-    },
-  )
-
-  status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
-  if (!status.activeRun && status.sessionKey) {
-    clearOpenClawWatchdogSessionState(status.sessionKey)
-  }
-  return status
-}
-
 function extractCronJobId(row: Record<string, unknown>): string {
   const candidates = [
     row.id,
@@ -1237,106 +1038,6 @@ function findHeartbeatCronJob(cronListResult: unknown): {
     }
   }
   return null
-}
-
-type OpenClawHeartbeatTriggerResult = {
-  ok: boolean
-  status: string
-  runId: string
-  source: string
-  message: string
-}
-
-async function triggerOpenClawHeartbeatInternal(params: {
-  sessionKey: string
-  parentRunId?: string
-  triggerSource?: string
-}): Promise<OpenClawHeartbeatTriggerResult> {
-  const sessionKey = params.sessionKey.trim()
-  const parentRunId = params.parentRunId?.trim() ?? ''
-  const triggerSource = params.triggerSource?.trim() || 'manual'
-
-  if (!sessionKey) {
-    throw new Error('Missing sessionKey for heartbeat trigger')
-  }
-
-  if (!(await isNativeOpenClawReady())) {
-    throw new Error('OpenClaw gateway unavailable')
-  }
-
-  try {
-    const cronList = await runOpenClawGatewayCall(
-      'cron.list',
-      {
-        includeDisabled: false,
-        limit: 200,
-        offset: 0,
-      },
-      20_000,
-    )
-    const heartbeatJob = findHeartbeatCronJob(cronList)
-    if (heartbeatJob) {
-      const cronRun = await runOpenClawGatewayCall(
-        'cron.run',
-        {
-          id: heartbeatJob.id,
-          mode: 'force',
-        },
-        30_000,
-      )
-      const cronRunRecord = asRecord(cronRun) ?? {}
-      const runId = normalizeText(cronRunRecord.runId)
-      if (runId) {
-        rememberOpenClawNativeRun(runId, sessionKey, {
-          kind: 'heartbeat',
-          parentRunId,
-          source: `${triggerSource}.cron.run`,
-        })
-        ensureOpenClawNativeRunMonitor(runId)
-        return {
-          ok: true,
-          status: 'submitted',
-          runId,
-          source: 'cron.run',
-          message: `Triggered ${heartbeatJob.name}`,
-        }
-      }
-      // Some runtimes acknowledge cron.run without runId. Fall through
-      // to chat.send fallback so callers can always track a concrete run.
-    }
-  } catch {
-    invalidateOpenClawNativeReadyCache()
-  }
-
-  const fallbackRun = await runOpenClawGatewayCall(
-    'chat.send',
-    {
-      sessionKey,
-      message: OPENCLAW_HEARTBEAT_PROMPT,
-      deliver: false,
-      timeoutMs: OPENCLAW_CHAT_SEND_TIMEOUT_MS,
-      idempotencyKey: `heartbeat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    },
-    OPENCLAW_CHAT_SEND_TIMEOUT_MS + 20_000,
-  )
-  const record = asRecord(fallbackRun) ?? {}
-  const runId = normalizeText(record.runId)
-  if (runId) {
-    rememberOpenClawNativeRun(runId, sessionKey, {
-      kind: 'heartbeat',
-      parentRunId,
-      source: `${triggerSource}.chat.send`,
-    })
-    ensureOpenClawNativeRunMonitor(runId)
-  }
-
-  return {
-    ok: true,
-    status: runId ? 'submitted' : 'running',
-    runId,
-    source: 'chat.send',
-    message: 'Heartbeat fallback message submitted',
-  }
 }
 
 function isLikelyAssistantResultContent(content: unknown): boolean {
@@ -3372,10 +3073,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
               return
             }
             rememberOpenClawNativeReady(true)
-            rememberOpenClawNativeRun(runId, sessionKey, {
-              kind: 'primary',
-              source: 'chat.send',
-            })
+            rememberOpenClawNativeRun(runId, sessionKey)
             ensureOpenClawNativeRunMonitor(runId)
             setJson(res, 200, { ok: true, runId })
             return
@@ -3434,47 +3132,18 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
           const snapshot = await waitForOpenClawRunSnapshot(runId, waitTimeoutMs)
           if (snapshot.context) {
-            let nextContext = snapshot.context
-            let status = normalizeOpenClawRunStatus(nextContext.lastStatus)
-            let completed = nextContext.completed || isOpenClawRunCompletedStatus(status)
-
-            if (!completed && (status === 'reconnecting' || status === 'unknown')) {
-              const probe = await probeOpenClawRunCompletionByHistory(runId)
-              if (probe) {
-                const probeStatus = normalizeOpenClawRunStatus(probe.status)
-                const probeCompleted = probe.completed || isOpenClawRunCompletedStatus(probeStatus)
-                const updated = updateOpenClawNativeRun(
-                  runId,
-                  probeStatus,
-                  getErrorMessage(probe.error, ''),
-                  {
-                    result: probe.result ?? null,
-                    source: 'history-probe',
-                    retryable: true,
-                    completed: probeCompleted,
-                  },
-                )
-                if (updated) {
-                  nextContext = { ...updated }
-                  status = normalizeOpenClawRunStatus(nextContext.lastStatus)
-                  completed = nextContext.completed || isOpenClawRunCompletedStatus(status)
-                } else {
-                  status = probeStatus
-                  completed = probeCompleted
-                }
-              }
-            }
-
-            if (completed !== nextContext.completed) {
+            const status = normalizeOpenClawRunStatus(snapshot.context.lastStatus)
+            const completed = snapshot.context.completed || isOpenClawRunCompletedStatus(status)
+            if (completed !== snapshot.context.completed) {
               updateOpenClawNativeRun(
                 runId,
                 status,
-                nextContext.lastError,
+                snapshot.context.lastError,
                 {
-                  rawStatus: nextContext.rawStatus,
-                  result: nextContext.lastResult,
-                  source: nextContext.source,
-                  retryable: nextContext.retryable,
+                  rawStatus: snapshot.context.rawStatus,
+                  result: snapshot.context.lastResult,
+                  source: snapshot.context.source,
+                  retryable: snapshot.context.retryable,
                   completed,
                 },
               )
@@ -3484,13 +3153,13 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
               runId,
               status,
               completed,
-              result: completed ? nextContext.lastResult ?? null : null,
-              error: nextContext.lastError || null,
-              rawStatus: nextContext.rawStatus || status,
-              source: nextContext.source || 'run-monitor',
-              retryable: nextContext.retryable,
+              result: completed ? snapshot.context.lastResult ?? null : null,
+              error: snapshot.context.lastError || null,
+              rawStatus: snapshot.context.rawStatus || status,
+              source: snapshot.context.source || 'run-monitor',
+              retryable: snapshot.context.retryable,
               waiting: snapshot.timedOut,
-              revision: nextContext.revision,
+              revision: snapshot.context.revision,
             })
             return
           }
@@ -3604,26 +3273,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           suspectAfterMs + 5_000,
         )
 
-        const status = await resolveOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
+        const status = buildOpenClawWatchdogStatus(sessionKey, suspectAfterMs, triggerAfterMs)
         if (status.activeRun && status.runId) {
           ensureOpenClawNativeRunMonitor(status.runId)
-        }
-
-        const watchdogSessionKey = status.sessionKey.trim() || sessionKey.trim()
-        if (!status.activeRun && watchdogSessionKey) {
-          clearOpenClawWatchdogSessionState(watchdogSessionKey)
         }
 
         setJson(res, 200, {
           ok: true,
           ...status,
-          autoHeartbeatTriggered: false,
-          autoHeartbeatRunId: '',
-          autoHeartbeatSource: '',
-          autoHeartbeatError: '',
-          autoHeartbeatAtMs: 0,
-          autoHeartbeatCooldownRemainingMs: 0,
-          autoHeartbeatCooldownMs: OPENCLAW_WATCHDOG_AUTO_HEARTBEAT_COOLDOWN_MS,
           suspectAfterMs,
           triggerAfterMs,
           checkedAtMs: Date.now(),
@@ -3634,14 +3291,6 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/heartbeat/trigger') {
         const payload = asRecord(await readJsonBody(req))
         const sessionKey = normalizeText(payload?.sessionKey)
-
-        if (!sessionKey) {
-          setJson(res, 400, {
-            ok: false,
-            error: 'Missing sessionKey for heartbeat trigger',
-          })
-          return
-        }
 
         if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
           setOpenClawNativeUnavailable(
@@ -3654,12 +3303,80 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         try {
-          const heartbeatResult = await triggerOpenClawHeartbeatInternal({
-            sessionKey,
-            triggerSource: 'manual',
-          })
-          setJson(res, 200, heartbeatResult)
-          return
+          if (await isNativeOpenClawReady()) {
+            try {
+              const cronList = await runOpenClawGatewayCall(
+                'cron.list',
+                {
+                  includeDisabled: false,
+                  limit: 200,
+                  offset: 0,
+                },
+                20_000,
+              )
+              const heartbeatJob = findHeartbeatCronJob(cronList)
+              if (heartbeatJob) {
+                const cronRun = await runOpenClawGatewayCall(
+                  'cron.run',
+                  {
+                    id: heartbeatJob.id,
+                    mode: 'force',
+                  },
+                  30_000,
+                )
+                const cronRunRecord = asRecord(cronRun) ?? {}
+                const runId = normalizeText(cronRunRecord.runId)
+                if (runId && sessionKey) {
+                  rememberOpenClawNativeRun(runId, sessionKey)
+                  ensureOpenClawNativeRunMonitor(runId)
+                }
+                setJson(res, 200, {
+                  ok: true,
+                  status: 'submitted',
+                  runId,
+                  source: 'cron.run',
+                  message: `Triggered ${heartbeatJob.name}`,
+                })
+                return
+              }
+            } catch {
+              invalidateOpenClawNativeReadyCache()
+            }
+
+            if (!sessionKey) {
+              setJson(res, 400, {
+                ok: false,
+                error: 'Missing sessionKey for heartbeat fallback',
+              })
+              return
+            }
+
+            const fallbackRun = await runOpenClawGatewayCall(
+              'chat.send',
+              {
+                sessionKey,
+                message: OPENCLAW_HEARTBEAT_PROMPT,
+                deliver: false,
+                timeoutMs: OPENCLAW_CHAT_SEND_TIMEOUT_MS,
+                idempotencyKey: `heartbeat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+              },
+              OPENCLAW_CHAT_SEND_TIMEOUT_MS + 20_000,
+            )
+            const record = asRecord(fallbackRun) ?? {}
+            const runId = normalizeText(record.runId)
+            if (runId) {
+              rememberOpenClawNativeRun(runId, sessionKey)
+              ensureOpenClawNativeRunMonitor(runId)
+            }
+            setJson(res, 200, {
+              ok: true,
+              status: runId ? 'submitted' : 'running',
+              runId,
+              source: 'chat.send',
+              message: 'Heartbeat fallback message submitted',
+            })
+            return
+          }
         } catch {
           invalidateOpenClawNativeReadyCache()
           setOpenClawNativeUnavailable(
@@ -3670,6 +3387,22 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           )
           return
         }
+
+        if (OPENCLAW_NATIVE_STRICT_MODE) {
+          setOpenClawNativeUnavailable(
+            res,
+            503,
+            'OpenClaw gateway unavailable',
+            'openclaw_native_unavailable',
+          )
+          return
+        }
+
+        setJson(res, 503, {
+          ok: false,
+          error: 'OpenClaw heartbeat unavailable',
+        })
+        return
       }
 
       if (req.method === 'POST' && url.pathname === '/openclaw-api/run/abort') {
@@ -3703,9 +3436,6 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             )
             if (runId) {
               clearOpenClawNativeRun(runId)
-            }
-            if (sessionKey) {
-              clearOpenClawNativeRunsBySession(sessionKey)
             }
             setJson(res, 200, {
               ok: true,

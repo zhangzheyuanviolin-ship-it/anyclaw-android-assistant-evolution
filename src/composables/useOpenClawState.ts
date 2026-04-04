@@ -2,7 +2,6 @@ import { computed, ref } from 'vue'
 import {
   abortOpenClawRun,
   createOpenClawSession,
-  getOpenClawRunWatchdogStatus,
   getOpenClawHealth,
   listOpenClawSessions,
   readOpenClawHistory,
@@ -37,7 +36,6 @@ const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
 const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
 const OPENCLAW_AUTO_HEARTBEAT_AFTER_MS = 120_000
 const OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS = 90_000
-const OPENCLAW_COMPLETED_OVERLAY_MS = 2400
 
 type OptimisticOpenClawMessage = UiMessage & {
   createdAtMs: number
@@ -187,18 +185,6 @@ function toPendingRunReasoningText(status: string, showProcess: boolean): string
   return `正在执行任务，状态 ${status}`
 }
 
-function isTerminalRunStatus(status: string): boolean {
-  const normalized = status.trim().toLowerCase()
-  return normalized === 'ok' ||
-    normalized === 'completed' ||
-    normalized === 'failed' ||
-    normalized === 'error' ||
-    normalized === 'cancelled' ||
-    normalized === 'canceled' ||
-    normalized === 'aborted' ||
-    normalized === 'idle'
-}
-
 function toUiMessages(messages: OpenClawHistoryMessage[], includeProcess: boolean): UiMessage[] {
   const output: UiMessage[] = []
 
@@ -344,7 +330,6 @@ export function useOpenClawState() {
   const abortingRun = ref(false)
   const optimisticUserMessages = ref<OptimisticOpenClawMessage[]>([])
   const awaitingReplySinceBySession = ref<Record<string, number>>({})
-  const completedRunStatus = ref('')
 
   let pollTimer: number | null = null
   let pollInFlight = false
@@ -356,7 +341,6 @@ export function useOpenClawState() {
   let lastBootstrapAttemptAtMs = 0
   let pendingRunStartedAtMs = 0
   let lastAutoHeartbeatAtMs = 0
-  let completedOverlayHideTimer: number | null = null
 
   const selectedSession = computed(() =>
     sessions.value.find((row) => row.key === selectedSessionKey.value) ?? null,
@@ -376,16 +360,6 @@ export function useOpenClawState() {
       }
     }
 
-    const completedStatus = completedRunStatus.value.trim()
-    if (completedStatus.length > 0) {
-      return {
-        activityLabel: '执行完成',
-        activityDetails: [],
-        reasoningText: showProcess.value ? `任务已完成，状态 ${completedStatus}` : '',
-        errorText: '',
-      }
-    }
-
     if (lastError.value.length > 0) {
       return {
         activityLabel: '执行异常',
@@ -400,28 +374,6 @@ export function useOpenClawState() {
 
   function setPendingRunStatus(status: string): void {
     pendingRunStatus.value = status.trim()
-  }
-
-  function clearCompletedOverlay(): void {
-    completedRunStatus.value = ''
-    if (typeof window === 'undefined') return
-    if (completedOverlayHideTimer !== null) {
-      window.clearTimeout(completedOverlayHideTimer)
-      completedOverlayHideTimer = null
-    }
-  }
-
-  function showCompletedOverlay(status: string): void {
-    const normalized = status.trim() || 'completed'
-    completedRunStatus.value = normalized
-    if (typeof window === 'undefined') return
-    if (completedOverlayHideTimer !== null) {
-      window.clearTimeout(completedOverlayHideTimer)
-    }
-    completedOverlayHideTimer = window.setTimeout(() => {
-      completedOverlayHideTimer = null
-      completedRunStatus.value = ''
-    }, OPENCLAW_COMPLETED_OVERLAY_MS)
   }
 
   function markAwaitingAssistant(
@@ -563,42 +515,15 @@ export function useOpenClawState() {
       renderMessagesFromHistory(payload.messages)
       const awaitingSince = getAwaitingAssistantSince(sessionKey)
       if (awaitingSince > 0 && hasAssistantResponseAfter(payload.messages, awaitingSince)) {
-        optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
-        let shouldFinalizePendingRun = true
-        const trackedRunId = pendingRunId.value.trim()
-        if (pendingRun.value && trackedRunId.length > 0) {
-          shouldFinalizePendingRun = false
-          try {
-            const watchdog = await getOpenClawRunWatchdogStatus({
-              sessionKey,
-              suspectAfterMs: 75_000,
-              triggerAfterMs: 120_000,
-            })
-            const watchdogRunId = watchdog.runId.trim()
-            const status = watchdog.status.trim().toLowerCase()
-            if (!watchdog.activeRun || watchdog.completed || isTerminalRunStatus(status)) {
-              shouldFinalizePendingRun = true
-            } else if (watchdogRunId.length > 0 && watchdogRunId !== trackedRunId) {
-              shouldFinalizePendingRun = true
-            }
-          } catch {
-            shouldFinalizePendingRun = false
-          }
-        }
-
-        if (shouldFinalizePendingRun) {
-          const finalStatus = pendingRunStatus.value.trim() || 'completed'
+        const hasTrackedRun = pendingRun.value && pendingRunId.value.trim().length > 0
+        if (!hasTrackedRun) {
           clearAwaitingAssistant(sessionKey)
+        }
+        optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
+        if (pendingRun.value && pendingRunId.value.trim().length === 0) {
           pendingRun.value = false
-          pendingRunId.value = ''
           setPendingRunStatus('')
           pendingRunStartedAtMs = 0
-          showCompletedOverlay(finalStatus)
-        } else {
-          keepPendingRunVisibleFromAwaiting(sessionKey)
-          if (!pendingRunStatus.value.trim()) {
-            setPendingRunStatus('running')
-          }
         }
       }
       lastError.value = ''
@@ -609,16 +534,6 @@ export function useOpenClawState() {
         isLoadingMessages.value = false
       }
     }
-  }
-
-  function clearLocalPendingRunState(sessionKey: string): void {
-    pendingRun.value = false
-    pendingRunId.value = ''
-    setPendingRunStatus('')
-    pendingRunStartedAtMs = 0
-    clearAwaitingAssistant(sessionKey)
-    lastAutoHeartbeatAtMs = Date.now()
-    clearCompletedOverlay()
   }
 
   async function selectSession(sessionKey: string, options: SessionSelectOptions = {}): Promise<void> {
@@ -632,12 +547,10 @@ export function useOpenClawState() {
 
     selectedSessionKey.value = nextSession
     messages.value = []
-    clearCompletedOverlay()
     pendingRun.value = false
     pendingRunId.value = ''
     setPendingRunStatus('')
     pendingRunStartedAtMs = 0
-    lastAutoHeartbeatAtMs = 0
     await refreshHistory()
   }
 
@@ -745,12 +658,10 @@ export function useOpenClawState() {
     if (!normalized.text && normalized.attachments.length === 0) return
 
     isSendingMessage.value = true
-    clearCompletedOverlay()
     pendingRun.value = true
     pendingRunId.value = ''
     setPendingRunStatus('queued')
     lastSendAtMs = Date.now()
-    lastAutoHeartbeatAtMs = 0
     let optimisticMessage: OptimisticOpenClawMessage | null = null
 
     try {
@@ -883,18 +794,13 @@ export function useOpenClawState() {
     try {
       const heartbeatStartedAtMs = Date.now()
       const result = await triggerOpenClawHeartbeat({ sessionKey })
-      const existingRunId = pendingRunId.value.trim()
       if (result.runId.trim()) {
         pendingRun.value = true
-        if (!existingRunId) {
-          pendingRunId.value = result.runId.trim()
-          setPendingRunStatus(result.status.trim() || 'submitted')
-          lastSendAtMs = heartbeatStartedAtMs
-          pendingRunStartedAtMs = heartbeatStartedAtMs
-          void waitPendingRun({ force: true })
-        } else if (!pendingRunStatus.value.trim()) {
-          setPendingRunStatus('running')
-        }
+        pendingRunId.value = result.runId.trim()
+        setPendingRunStatus(result.status.trim() || 'submitted')
+        lastSendAtMs = heartbeatStartedAtMs
+        pendingRunStartedAtMs = heartbeatStartedAtMs
+        void waitPendingRun({ force: true })
       } else {
         pendingRun.value = true
         if (!pendingRunStatus.value.trim()) {
@@ -903,6 +809,7 @@ export function useOpenClawState() {
         if (pendingRunStartedAtMs <= 0) {
           pendingRunStartedAtMs = heartbeatStartedAtMs
         }
+        setPendingRunStatus('heartbeat')
       }
       markAwaitingAssistant(sessionKey, pendingRunStartedAtMs || heartbeatStartedAtMs, 'keep-earliest')
       await refreshHistory({ silent: true })
@@ -922,22 +829,27 @@ export function useOpenClawState() {
 
     abortingRun.value = true
     lastError.value = ''
-    const runId = pendingRunId.value.trim()
-    clearLocalPendingRunState(sessionKey)
     try {
-      void abortOpenClawRun({
+      const runId = pendingRunId.value.trim()
+      const result = await abortOpenClawRun({
         sessionKey,
         runId: runId || undefined,
-      }).then(async (result) => {
-        if (!result.aborted) {
-          lastError.value = '终止请求已发送，但网关未确认中止'
-        }
-        await refreshHistory({ silent: true })
-        await refreshSessions(sessionKey)
-        await refreshHealth()
-      }).catch((error) => {
-        lastError.value = error instanceof Error ? `终止请求已发送，本地已解锁：${error.message}` : '终止请求已发送，本地已解锁'
       })
+      if (!result.aborted) {
+        throw new Error('终止任务失败：网关未确认中止')
+      }
+      pendingRun.value = false
+      pendingRunId.value = ''
+      setPendingRunStatus('aborted')
+      pendingRunStartedAtMs = 0
+      clearAwaitingAssistant(sessionKey)
+      await refreshHistory({ silent: true })
+      await refreshSessions(sessionKey)
+      await refreshHealth()
+      setPendingRunStatus('')
+    } catch (error) {
+      lastError.value = error instanceof Error ? error.message : '终止任务失败'
+      throw error
     } finally {
       abortingRun.value = false
     }
@@ -967,14 +879,38 @@ export function useOpenClawState() {
         : rawStatus
       setPendingRunStatus(normalizedStatus || pendingRunStatus.value || 'running')
       if (statusPayload.completed) {
-        const finalStatus = normalizedStatus || 'completed'
         pendingRun.value = false
         pendingRunId.value = ''
         setPendingRunStatus('')
         pendingRunStartedAtMs = 0
         clearAwaitingAssistant(selectedSessionKey.value.trim())
-        showCompletedOverlay(finalStatus)
         await refreshHistory({ silent: true })
+      } else {
+        const status = normalizedStatus
+        const nowMs = Date.now()
+        const fallbackWaitingSince = getAwaitingAssistantSince(selectedSessionKey.value.trim())
+        const waitingSince = pendingRunStartedAtMs > 0 ? pendingRunStartedAtMs : fallbackWaitingSince
+        const pendingAgeMs = waitingSince > 0 ? nowMs - waitingSince : 0
+        const shouldAutoHeartbeat = (
+          (
+            status === 'running' ||
+            status === 'reconnecting' ||
+            status === 'unknown' ||
+            status === 'submitted' ||
+            status === 'failed' ||
+            status === 'error'
+          ) &&
+          pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
+          nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
+          !heartbeatTriggering.value &&
+          !abortingRun.value
+        )
+        if (shouldAutoHeartbeat) {
+          lastAutoHeartbeatAtMs = nowMs
+          void triggerHeartbeatNow().catch(() => {
+            // keep pending loop running even if auto-heartbeat fails
+          })
+        }
       }
     } catch {
       setPendingRunStatus('reconnecting')
@@ -983,63 +919,27 @@ export function useOpenClawState() {
     }
   }
 
-  async function syncRunStateFromWatchdog(
-    sessionKey: string,
-    options: { triggerHeartbeat?: boolean } = {},
-  ): Promise<void> {
-    const normalizedSessionKey = sessionKey.trim()
-    if (!normalizedSessionKey) return
-    try {
-      const watchdog = await getOpenClawRunWatchdogStatus({
-        sessionKey: normalizedSessionKey,
-        suspectAfterMs: 75_000,
-        triggerAfterMs: 120_000,
-      })
-
-      const watchdogStatus = watchdog.status.trim().toLowerCase()
-      if (!watchdog.activeRun || watchdog.completed || isTerminalRunStatus(watchdogStatus)) {
-        return
-      }
-
-      if (watchdogStatus.length > 0 && watchdogStatus !== 'idle') {
-        setPendingRunStatus(watchdogStatus)
-      }
-
-      const awaitingSince = getAwaitingAssistantSince(normalizedSessionKey)
-      const pendingAgeMs = awaitingSince > 0 ? Date.now() - awaitingSince : 0
-      const shouldAutoHeartbeat = (
-        options.triggerHeartbeat === true &&
-        pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
-        watchdog.recommendAction === 'trigger_heartbeat' &&
-        !heartbeatTriggering.value &&
-        !abortingRun.value &&
-        Date.now() - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS
-      )
-
-      if (!shouldAutoHeartbeat) return
-      lastAutoHeartbeatAtMs = Date.now()
-      void triggerHeartbeatNow().catch(() => {
-        // keep polling alive even if the auto-heartbeat attempt fails
-      })
-    } catch {
-      // Leave the current UI state intact; run/wait will continue polling.
-    }
-  }
-
   async function enforceReplyWatchdog(): Promise<void> {
     const sessionKey = selectedSessionKey.value.trim()
     if (!sessionKey) return
-
-    if (!pendingRun.value && pendingRunId.value.trim().length === 0) {
-      clearAwaitingAssistant(sessionKey)
-      return
-    }
-
     const awaitingSince = getAwaitingAssistantSince(sessionKey)
     if (awaitingSince <= 0) return
 
     keepPendingRunVisibleFromAwaiting(sessionKey)
-    await syncRunStateFromWatchdog(sessionKey, { triggerHeartbeat: true })
+
+    const nowMs = Date.now()
+    const pendingAgeMs = nowMs - awaitingSince
+    const shouldAutoHeartbeat = (
+      pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
+      nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
+      !heartbeatTriggering.value &&
+      !abortingRun.value
+    )
+    if (!shouldAutoHeartbeat) return
+    lastAutoHeartbeatAtMs = nowMs
+    void triggerHeartbeatNow().catch(() => {
+      // Keep polling loop alive even when heartbeat trigger fails.
+    })
   }
 
   async function pollOnce(): Promise<void> {
