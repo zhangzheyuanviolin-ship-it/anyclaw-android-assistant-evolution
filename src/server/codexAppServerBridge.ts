@@ -292,6 +292,18 @@ async function writeOpenClawConfigRoot(root: Record<string, unknown>): Promise<v
   await writeFile(OPENCLAW_CONFIG_PATH, `${JSON.stringify(root, null, 2)}\n`, 'utf8')
 }
 
+function resolveGatewayCliAuthArgs(configRoot: Record<string, unknown>): {
+  token: string
+  url: string
+} {
+  const gateway = asRecord(configRoot.gateway) ?? {}
+  const auth = asRecord(gateway.auth) ?? {}
+  const remote = asRecord(gateway.remote) ?? {}
+  const token = normalizeText(auth.token) || normalizeText(remote.token)
+  const url = normalizeText(remote.url)
+  return { token, url }
+}
+
 async function readHeartbeatDocumentFromDisk(): Promise<string> {
   try {
     const raw = await readFile(OPENCLAW_HEARTBEAT_DOC_PATH, 'utf8')
@@ -579,12 +591,19 @@ async function runOpenClawGatewayCall(
   }
 
   const serializedParams = JSON.stringify(params ?? {})
+  const configRoot = await readOpenClawConfigRoot()
+  const authArgs = resolveGatewayCliAuthArgs(configRoot)
+  const tokenArg = authArgs.token ? ` --token ${shellQuote(authArgs.token)}` : ''
+  const urlArg = authArgs.url ? ` --url ${shellQuote(authArgs.url)}` : ''
   const command =
-    `openclaw gateway call ${normalizedMethod} --json --params ${shellQuote(serializedParams)}`
+    `openclaw gateway call ${normalizedMethod}${urlArg}${tokenArg} --json --params ${shellQuote(serializedParams)}`
 
   const runCommandOnce = () =>
     new Promise<string>((resolve, reject) => {
       const env = { ...process.env }
+      if (authArgs.token && !env.OPENCLAW_GATEWAY_TOKEN) {
+        env.OPENCLAW_GATEWAY_TOKEN = authArgs.token
+      }
       if (prefixBin) {
         const currentPath = typeof env.PATH === 'string' ? env.PATH : ''
         if (!currentPath.split(':').includes(prefixBin)) {
