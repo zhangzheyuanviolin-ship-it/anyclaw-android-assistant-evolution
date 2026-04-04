@@ -5,6 +5,7 @@ import {
   getOpenClawHealth,
   listOpenClawSessions,
   readOpenClawHistory,
+  readOpenClawWatchdogStatus,
   renameOpenClawSession,
   resetOpenClawSession,
   sendOpenClawMessage,
@@ -36,6 +37,8 @@ const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 5_000
 const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
 const OPENCLAW_AUTO_HEARTBEAT_AFTER_MS = 120_000
 const OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS = 90_000
+const OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS = 75_000
+const OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS = 120_000
 
 type OptimisticOpenClawMessage = UiMessage & {
   createdAtMs: number
@@ -425,6 +428,28 @@ export function useOpenClawState() {
     }
   }
 
+  async function clearPendingRunIfWatchdogIdle(sessionKey: string): Promise<boolean> {
+    const normalizedSessionKey = sessionKey.trim()
+    if (!normalizedSessionKey || !pendingRun.value) return false
+    try {
+      const watchdog = await readOpenClawWatchdogStatus({
+        sessionKey: normalizedSessionKey,
+        suspectAfterMs: OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS,
+        triggerAfterMs: OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS,
+      })
+      if (watchdog.activeRun) return false
+      pendingRun.value = false
+      pendingRunId.value = ''
+      setPendingRunStatus('')
+      pendingRunStartedAtMs = 0
+      clearAwaitingAssistant(normalizedSessionKey)
+      lastAutoHeartbeatAtMs = 0
+      return true
+    } catch {
+      return false
+    }
+  }
+
   function pruneOptimisticMessages(sessionKey: string, historyMessages: OpenClawHistoryMessage[]): void {
     const now = Date.now()
     const historyTextSet = collectUserTextSet(historyMessages)
@@ -489,7 +514,7 @@ export function useOpenClawState() {
   async function refreshHealth(): Promise<void> {
     try {
       const health = await getOpenClawHealth()
-      healthOk.value = health.ok
+      healthOk.value = health.ok && health.gatewayConnected
     } catch {
       healthOk.value = false
     }
@@ -515,15 +540,18 @@ export function useOpenClawState() {
       renderMessagesFromHistory(payload.messages)
       const awaitingSince = getAwaitingAssistantSince(sessionKey)
       if (awaitingSince > 0 && hasAssistantResponseAfter(payload.messages, awaitingSince)) {
-        const hasTrackedRun = pendingRun.value && pendingRunId.value.trim().length > 0
-        if (!hasTrackedRun) {
-          clearAwaitingAssistant(sessionKey)
+        if (pendingRun.value && pendingRunId.value.trim().length > 0) {
+          await clearPendingRunIfWatchdogIdle(sessionKey)
         }
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
         if (pendingRun.value && pendingRunId.value.trim().length === 0) {
           pendingRun.value = false
           setPendingRunStatus('')
           pendingRunStartedAtMs = 0
+          clearAwaitingAssistant(sessionKey)
+        }
+        if (!pendingRun.value) {
+          clearAwaitingAssistant(sessionKey)
         }
       }
       lastError.value = ''
@@ -848,7 +876,22 @@ export function useOpenClawState() {
       await refreshHealth()
       setPendingRunStatus('')
     } catch (error) {
-      lastError.value = error instanceof Error ? error.message : '终止任务失败'
+      const message = error instanceof Error ? error.message : '终止任务失败'
+      const transientFailure = /failed to fetch|request timeout|openclaw.*unavailable|network/i.test(message.toLowerCase())
+      if (transientFailure) {
+        pendingRun.value = false
+        pendingRunId.value = ''
+        setPendingRunStatus('')
+        pendingRunStartedAtMs = 0
+        clearAwaitingAssistant(sessionKey)
+        lastAutoHeartbeatAtMs = 0
+        lastError.value = '终止请求超时，已本地终止任务状态，请继续发送下一条指令'
+        await refreshHistory({ silent: true })
+        await refreshSessions(sessionKey)
+        await refreshHealth()
+        return
+      }
+      lastError.value = message
       throw error
     } finally {
       abortingRun.value = false
@@ -914,6 +957,7 @@ export function useOpenClawState() {
       }
     } catch {
       setPendingRunStatus('reconnecting')
+      await clearPendingRunIfWatchdogIdle(selectedSessionKey.value.trim())
     } finally {
       runWaitInFlight = false
     }

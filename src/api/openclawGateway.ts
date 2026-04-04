@@ -119,10 +119,39 @@ function normalizeSessionRow(value: unknown): OpenClawSessionSummary | null {
   }
 }
 
-export async function getOpenClawHealth(): Promise<{ ok: boolean }> {
-  const payload = await requestOpenClaw<{ ok?: boolean }>('/openclaw-api/health', undefined, 'OpenClaw health check failed')
-  return {
-    ok: payload?.ok === true,
+export async function getOpenClawHealth(): Promise<{
+  ok: boolean
+  gatewayConnected: boolean
+  source: string
+}> {
+  try {
+    const payload = await requestOpenClaw<{
+      ok?: boolean
+      gatewayConnected?: boolean
+      source?: string
+    }>(
+      '/openclaw-api/gateway/status',
+      undefined,
+      'OpenClaw gateway status check failed',
+      20_000,
+    )
+    return {
+      ok: payload?.ok === true,
+      gatewayConnected: readBoolean(payload?.gatewayConnected),
+      source: readString(payload?.source).trim() || 'gateway-status',
+    }
+  } catch {
+    const payload = await requestOpenClaw<{ ok?: boolean }>(
+      '/openclaw-api/health',
+      undefined,
+      'OpenClaw health check failed',
+      25_000,
+    )
+    return {
+      ok: payload?.ok === true,
+      gatewayConnected: payload?.ok === true,
+      source: 'health-fallback',
+    }
   }
 }
 
@@ -131,7 +160,7 @@ export async function listOpenClawSessions(limit = 200): Promise<OpenClawSession
     `/openclaw-api/sessions?limit=${encodeURIComponent(String(limit))}`,
     undefined,
     'Failed to load OpenClaw sessions',
-    20_000,
+    45_000,
   )
 
   const rows = Array.isArray(payload.sessions) ? payload.sessions : []
@@ -305,7 +334,7 @@ export async function waitOpenClawRun(request: OpenClawRunWaitRequest): Promise<
       }),
     },
     'Failed to wait OpenClaw run',
-    timeoutMs + 20_000,
+    timeoutMs + 35_000,
   )
 
   return {
@@ -385,7 +414,7 @@ export async function abortOpenClawRun(request: {
       }),
     },
     'Failed to abort OpenClaw run',
-    25_000,
+    40_000,
   )
 
   return {
@@ -393,6 +422,56 @@ export async function abortOpenClawRun(request: {
     aborted: readBoolean(payload?.aborted),
     status: readString(payload?.status).trim() || 'aborted',
     source: readString(payload?.source).trim() || 'unknown',
+  }
+}
+
+export async function readOpenClawWatchdogStatus(request: {
+  sessionKey?: string
+  suspectAfterMs?: number
+  triggerAfterMs?: number
+}): Promise<{
+  ok: boolean
+  activeRun: boolean
+  runId: string
+  status: string
+  completed: boolean
+  recommendAction: string
+  staleMs: number
+  sessionKey: string
+}> {
+  const payload = await requestOpenClaw<{
+    ok?: boolean
+    activeRun?: boolean
+    runId?: string
+    status?: string
+    completed?: boolean
+    recommendAction?: string
+    staleMs?: number
+    sessionKey?: string
+  }>(
+    '/openclaw-api/watchdog/status',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionKey: request.sessionKey?.trim() || '',
+        suspectAfterMs: request.suspectAfterMs,
+        triggerAfterMs: request.triggerAfterMs,
+      }),
+    },
+    'Failed to read OpenClaw watchdog status',
+    25_000,
+  )
+
+  return {
+    ok: readBoolean(payload?.ok),
+    activeRun: readBoolean(payload?.activeRun),
+    runId: readString(payload?.runId).trim(),
+    status: readString(payload?.status).trim(),
+    completed: readBoolean(payload?.completed),
+    recommendAction: readString(payload?.recommendAction).trim(),
+    staleMs: readNumber(payload?.staleMs),
+    sessionKey: readString(payload?.sessionKey).trim(),
   }
 }
 

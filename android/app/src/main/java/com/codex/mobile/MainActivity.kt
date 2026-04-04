@@ -1174,7 +1174,18 @@ class MainActivity : AppCompatActivity() {
         if (gatewayStatusChecking) return
         gatewayStatusChecking = true
         Thread {
-            val connected = serverManager.isOpenClawGatewayResponsive()
+            val connected = try {
+                val payload = LocalBridgeClients.callOpenClawApi(
+                    path = "/openclaw-api/gateway/status",
+                    method = "GET",
+                    connectTimeoutMs = 8_000,
+                    readTimeoutMs = 18_000,
+                )
+                payload.optBoolean("gatewayConnected", false)
+            } catch (error: Exception) {
+                Log.w(TAG, "Gateway status API check failed: ${error.message}")
+                false
+            }
             runOnUiThread {
                 gatewayStatusChecking = false
                 applyGatewayConnectedState(connected, announce)
