@@ -28,6 +28,9 @@
       "webBridgeUrl": {
         "type": "string"
       },
+      "enableTavilySearch": {
+        "type": "boolean"
+      },
       "tavilyApiKey": {
         "type": "string"
       },

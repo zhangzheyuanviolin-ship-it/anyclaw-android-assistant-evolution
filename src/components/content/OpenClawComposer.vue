@@ -17,9 +17,13 @@
         <button
           class="openclaw-composer-action"
           type="button"
-          :aria-label="heartbeatLabel"
+          :aria-label="heartbeatLongPressHint || heartbeatLabel"
           :disabled="!sessionKey || heartbeatDisabled"
-          @click="onTriggerHeartbeat"
+          @pointerdown="onHeartbeatPressStart"
+          @pointerup="onHeartbeatPressEnd"
+          @pointerleave="onHeartbeatPressEnd"
+          @pointercancel="onHeartbeatPressEnd"
+          @click="onHeartbeatButtonClick"
         >
           {{ heartbeatLabel }}
         </button>
@@ -147,6 +151,7 @@ const props = defineProps<{
   sendLabel: string
   attachLabel: string
   heartbeatLabel: string
+  heartbeatLongPressHint?: string
   abortLabel: string
   heartbeatDisabled?: boolean
   abortDisabled?: boolean
@@ -160,6 +165,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   submit: [payload: OpenClawComposerSubmitPayload]
+  'open-heartbeat-manager': []
   'trigger-heartbeat': []
   'abort-run': []
 }>()
@@ -172,6 +178,10 @@ const galleryPickerRef = ref<HTMLInputElement | null>(null)
 const filesPickerRef = ref<HTMLInputElement | null>(null)
 const isAttachmentMenuOpen = ref(false)
 const attachments = ref<OpenClawComposerAttachment[]>([])
+const heartbeatLongPressTriggered = ref(false)
+let heartbeatPressTimer: number | null = null
+
+const HEARTBEAT_LONG_PRESS_MS = 620
 
 function moveCursorToEnd(): void {
   const input = composerInputRef.value
@@ -328,9 +338,36 @@ function onSelectGenericFiles(event: Event): void {
   void onFilesSelected(target?.files ?? null, 'files', target)
 }
 
-function onTriggerHeartbeat(): void {
+function clearHeartbeatPressTimer(): void {
+  if (heartbeatPressTimer === null || typeof window === 'undefined') return
+  window.clearTimeout(heartbeatPressTimer)
+  heartbeatPressTimer = null
+}
+
+function onHeartbeatPressStart(): void {
   if (!props.sessionKey || props.heartbeatDisabled) return
-  emit('trigger-heartbeat')
+  clearHeartbeatPressTimer()
+  heartbeatLongPressTriggered.value = false
+  if (typeof window === 'undefined') return
+  heartbeatPressTimer = window.setTimeout(() => {
+    heartbeatPressTimer = null
+    heartbeatLongPressTriggered.value = true
+    emit('trigger-heartbeat')
+  }, HEARTBEAT_LONG_PRESS_MS)
+}
+
+function onHeartbeatPressEnd(): void {
+  clearHeartbeatPressTimer()
+}
+
+function onHeartbeatButtonClick(event: MouseEvent): void {
+  if (!props.sessionKey || props.heartbeatDisabled) return
+  if (heartbeatLongPressTriggered.value) {
+    heartbeatLongPressTriggered.value = false
+    event.preventDefault()
+    return
+  }
+  emit('open-heartbeat-manager')
 }
 
 function onAbortRun(): void {
@@ -376,6 +413,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('pointerdown', onWindowPointerDown)
+  clearHeartbeatPressTimer()
 })
 </script>
 

@@ -204,81 +204,89 @@
         <section class="content-body">
           <template v-if="isOpenClawRoute">
             <div class="content-grid">
-              <div class="openclaw-toolbar">
-                <button
-                  type="button"
-                  class="openclaw-toolbar-button"
-                  :aria-label="openClawProcessToggleLabel"
-                  @click="toggleOpenClawProcessView"
-                >
-                  {{ openClawProcessToggleLabel }}
-                </button>
-                <button
-                  type="button"
-                  class="openclaw-toolbar-button"
-                  :aria-label="t('openclaw_load_older')"
-                  @click="loadOlderOpenClawHistory"
-                >
-                  {{ t('openclaw_load_older') }}
-                </button>
-                <button
-                  type="button"
-                  class="openclaw-toolbar-button"
-                  :aria-label="t('openclaw_reset_lite')"
-                  @click="resetOpenClawHistoryToLite"
-                >
-                  {{ t('openclaw_reset_lite') }}
-                </button>
-                <span class="openclaw-toolbar-tip">
-                  {{ t('openclaw_history_window', { count: String(openClawHistoryLimit) }) }}
-                </span>
-              </div>
+              <template v-if="isOpenClawChatRoute">
+                <div class="openclaw-toolbar">
+                  <button
+                    type="button"
+                    class="openclaw-toolbar-button"
+                    :aria-label="openClawProcessToggleLabel"
+                    @click="toggleOpenClawProcessView"
+                  >
+                    {{ openClawProcessToggleLabel }}
+                  </button>
+                  <button
+                    type="button"
+                    class="openclaw-toolbar-button"
+                    :aria-label="t('openclaw_load_older')"
+                    @click="loadOlderOpenClawHistory"
+                  >
+                    {{ t('openclaw_load_older') }}
+                  </button>
+                  <button
+                    type="button"
+                    class="openclaw-toolbar-button"
+                    :aria-label="t('openclaw_reset_lite')"
+                    @click="resetOpenClawHistoryToLite"
+                  >
+                    {{ t('openclaw_reset_lite') }}
+                  </button>
+                  <span class="openclaw-toolbar-tip">
+                    {{ t('openclaw_history_window', { count: String(openClawHistoryLimit) }) }}
+                  </span>
+                </div>
 
-              <p v-if="openClawLastError.length > 0" class="content-error">
-                {{ openClawLastError }}
-              </p>
+                <p v-if="openClawLastError.length > 0" class="content-error">
+                  {{ openClawLastError }}
+                </p>
 
-              <div class="content-thread">
-                <ThreadConversation
-                  :messages="openClawMessages"
-                  :is-loading="isOpenClawLoadingMessages && openClawMessages.length === 0"
-                  :active-thread-id="openClawSelectedSessionKey || '__openclaw__'"
-                  :scroll-state="null"
-                  :live-overlay="openClawLiveOverlay"
-                  :pending-requests="openClawPendingRequests"
-                  :message-actions-enabled="false"
-                  @update-scroll-state="onIgnoreThreadScrollState"
-                  @respond-server-request="onIgnoreServerRequest"
-                  @copy-message="onCopyMessage"
-                  @delete-from-message="onIgnoreMessageAction"
-                  @branch-from-message="onIgnoreMessageAction"
+                <div class="content-thread">
+                  <ThreadConversation
+                    :messages="openClawMessages"
+                    :is-loading="isOpenClawLoadingMessages && openClawMessages.length === 0"
+                    :active-thread-id="openClawSelectedSessionKey || '__openclaw__'"
+                    :scroll-state="null"
+                    :live-overlay="openClawLiveOverlay"
+                    :pending-requests="openClawPendingRequests"
+                    :message-actions-enabled="false"
+                    @update-scroll-state="onIgnoreThreadScrollState"
+                    @respond-server-request="onIgnoreServerRequest"
+                    @copy-message="onCopyMessage"
+                    @delete-from-message="onIgnoreMessageAction"
+                    @branch-from-message="onIgnoreMessageAction"
+                  />
+                </div>
+
+                <p v-if="!openClawSelectedSessionKey" class="conversation-empty">
+                  {{ t('openclaw_no_session_selected') }}
+                </p>
+
+                <OpenClawComposer
+                  :session-key="openClawSelectedSessionKey"
+                  :disabled="isOpenClawSendingMessage"
+                  :placeholder="t('openclaw_send_placeholder')"
+                  :send-label="t('openclaw_send_button')"
+                  :heartbeat-label="t('openclaw_heartbeat_manage_button')"
+                  :heartbeat-long-press-hint="t('openclaw_heartbeat_manage_hint')"
+                  :abort-label="t('openclaw_abort_task')"
+                  :heartbeat-disabled="!openClawSelectedSessionKey || isOpenClawHeartbeatTriggering"
+                  :abort-disabled="!openClawSelectedSessionKey || isOpenClawAbortingRun"
+                  :attach-label="t('openclaw_attach_button')"
+                  :attach-camera-label="t('openclaw_attach_camera')"
+                  :attach-gallery-label="t('openclaw_attach_gallery')"
+                  :attach-files-label="t('openclaw_attach_files')"
+                  :remove-attachment-label="t('openclaw_attach_remove')"
+                  :image-tag-label="t('openclaw_attach_image_tag')"
+                  :file-tag-label="t('openclaw_attach_file_tag')"
+                  @submit="onSubmitOpenClawMessage"
+                  @open-heartbeat-manager="onOpenHeartbeatManager"
+                  @trigger-heartbeat="onTriggerOpenClawHeartbeat"
+                  @abort-run="onAbortOpenClawRun"
                 />
-              </div>
+              </template>
 
-              <p v-if="!openClawSelectedSessionKey" class="conversation-empty">
-                {{ t('openclaw_no_session_selected') }}
-              </p>
-
-              <OpenClawComposer
-                :session-key="openClawSelectedSessionKey"
-                :disabled="isOpenClawSendingMessage"
-                :placeholder="t('openclaw_send_placeholder')"
-                :send-label="t('openclaw_send_button')"
-                :heartbeat-label="t('openclaw_trigger_heartbeat')"
-                :abort-label="t('openclaw_abort_task')"
-                :heartbeat-disabled="!openClawSelectedSessionKey || isOpenClawHeartbeatTriggering"
-                :abort-disabled="!openClawSelectedSessionKey || isOpenClawAbortingRun"
-                :attach-label="t('openclaw_attach_button')"
-                :attach-camera-label="t('openclaw_attach_camera')"
-                :attach-gallery-label="t('openclaw_attach_gallery')"
-                :attach-files-label="t('openclaw_attach_files')"
-                :remove-attachment-label="t('openclaw_attach_remove')"
-                :image-tag-label="t('openclaw_attach_image_tag')"
-                :file-tag-label="t('openclaw_attach_file_tag')"
-                @submit="onSubmitOpenClawMessage"
-                @trigger-heartbeat="onTriggerOpenClawHeartbeat"
-                @abort-run="onAbortOpenClawRun"
-              />
+              <template v-else>
+                <OpenClawHeartbeatManager @back-chat="onBackToOpenClawChat" />
+              </template>
             </div>
           </template>
 
@@ -336,6 +344,7 @@ import ContentHeader from './components/content/ContentHeader.vue'
 import ThreadConversation from './components/content/ThreadConversation.vue'
 import ThreadComposer from './components/content/ThreadComposer.vue'
 import OpenClawComposer from './components/content/OpenClawComposer.vue'
+import OpenClawHeartbeatManager from './components/content/OpenClawHeartbeatManager.vue'
 import ComposerDropdown from './components/content/ComposerDropdown.vue'
 import SidebarThreadControls from './components/sidebar/SidebarThreadControls.vue'
 import IconTablerSearch from './components/icons/IconTablerSearch.vue'
@@ -466,10 +475,15 @@ const knownThreadIdSet = computed(() => {
 
 const isHomeRoute = computed(() => route.name === 'home')
 const isThreadRoute = computed(() => route.name === 'thread')
-const isOpenClawRoute = computed(() => route.name === 'openclaw-chat')
+const isOpenClawChatRoute = computed(() => route.name === 'openclaw-chat')
+const isOpenClawHeartbeatManagerRoute = computed(() => route.name === 'openclaw-heartbeat-manager')
+const isOpenClawRoute = computed(() => isOpenClawChatRoute.value || isOpenClawHeartbeatManagerRoute.value)
 const isCodexRoute = computed(() => isHomeRoute.value || isThreadRoute.value)
 const contentTitle = computed(() => {
-  if (isOpenClawRoute.value) {
+  if (isOpenClawHeartbeatManagerRoute.value) {
+    return t('openclaw_heartbeat_manage_title')
+  }
+  if (isOpenClawChatRoute.value) {
     return openClawSelectedSessionTitle.value || t('openclaw_chat_title')
   }
   if (isHomeRoute.value) return t('content_new_thread')
@@ -703,6 +717,20 @@ function formatOpenClawTime(updatedAtMs: number): string {
 }
 
 function onOpenOpenClawChat(): void {
+  const query = openClawSelectedSessionKey.value
+    ? { session: openClawSelectedSessionKey.value }
+    : undefined
+  void router.push({ name: 'openclaw-chat', query })
+}
+
+function onOpenHeartbeatManager(): void {
+  const query = openClawSelectedSessionKey.value
+    ? { session: openClawSelectedSessionKey.value }
+    : undefined
+  void router.push({ name: 'openclaw-heartbeat-manager', query })
+}
+
+function onBackToOpenClawChat(): void {
   const query = openClawSelectedSessionKey.value
     ? { session: openClawSelectedSessionKey.value }
     : undefined
@@ -945,7 +973,7 @@ watch(
           await ensureOpenClawSessionReady(routeOpenClawSessionKey.value)
           if (routeOpenClawSessionKey.value) {
             await selectOpenClawSession(routeOpenClawSessionKey.value)
-          } else if (openClawSelectedSessionKey.value) {
+          } else if (openClawSelectedSessionKey.value && isOpenClawChatRoute.value) {
             await router.replace({ name: 'openclaw-chat', query: { session: openClawSelectedSessionKey.value } })
           }
         } catch {
@@ -973,7 +1001,7 @@ watch(
   () => openClawSelectedSessionKey.value,
   (sessionKey) => {
     if (!hasInitialized.value) return
-    if (!isOpenClawRoute.value) return
+    if (!isOpenClawChatRoute.value) return
     if (!sessionKey) return
     if (routeOpenClawSessionKey.value === sessionKey) return
     void router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })

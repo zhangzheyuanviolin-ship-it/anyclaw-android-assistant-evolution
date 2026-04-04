@@ -26,6 +26,12 @@ const OPENCLAW_CONFIG_PATH = homeDir
 const OPENCLAW_WORKSPACE_DIR = homeDir
   ? join(homeDir, '.openclaw', 'workspace')
   : join(process.cwd(), '.openclaw', 'workspace')
+const OPENCLAW_HEARTBEAT_DOC_PATH = homeDir
+  ? join(homeDir, '.openclaw', 'workspace', 'HEARTBEAT.md')
+  : join(process.cwd(), '.openclaw', 'workspace', 'HEARTBEAT.md')
+const OPENCLAW_HEARTBEAT_STATE_PATH = homeDir
+  ? join(homeDir, '.openclaw-android', 'state', 'heartbeat-manager.json')
+  : join(process.cwd(), '.openclaw-android', 'state', 'heartbeat-manager.json')
 const LIGHTWEIGHT_STATE_PATH = homeDir
   ? join(homeDir, '.openclaw-android', 'state', 'lightweight-openclaw-sessions.json')
   : join(process.cwd(), '.openclaw-android', 'state', 'lightweight-openclaw-sessions.json')
@@ -46,7 +52,8 @@ const OPENCLAW_NATIVE_STRICT_MODE = true
 const OPENCLAW_RUN_CONTEXT_TTL_MS = 6 * 60 * 60_000
 const OPENCLAW_RUN_CONTEXT_MAX = 400
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
-const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
+const OPENCLAW_HEARTBEAT_DEFAULT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
+const OPENCLAW_HEARTBEAT_ALLOWED_EVERY = new Set(['1m', '2m', '5m', '10m', '20m', '30m', '1h', '2h'])
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -133,6 +140,22 @@ type OpenClawNativeRunContext = {
   updatedAtMs: number
 }
 
+type HeartbeatManagerProfile = {
+  id: string
+  name: string
+  prompt: string
+  document: string
+  updatedAtMs: number
+}
+
+type HeartbeatManagerState = {
+  enabled: boolean
+  every: string
+  activeProfileId: string
+  profiles: HeartbeatManagerProfile[]
+  updatedAtMs: number
+}
+
 let openClawNativeReadyCacheValue: boolean | null = null
 let openClawNativeReadyCacheAtMs = 0
 const openClawNativeRuns = new Map<string, OpenClawNativeRunContext>()
@@ -196,6 +219,212 @@ async function readJsonFile(path: string): Promise<Record<string, unknown> | nul
 
 function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
+}
+
+function ensureRecord(parent: Record<string, unknown>, key: string): Record<string, unknown> {
+  const existing = asRecord(parent[key])
+  if (existing) return existing
+  const created: Record<string, unknown> = {}
+  parent[key] = created
+  return created
+}
+
+function normalizeHeartbeatEvery(value: unknown): string {
+  const normalized = normalizeText(value).toLowerCase()
+  if (OPENCLAW_HEARTBEAT_ALLOWED_EVERY.has(normalized)) {
+    return normalized
+  }
+  return '20m'
+}
+
+function defaultHeartbeatDocument(): string {
+  return [
+    '# HEARTBEAT.md',
+    '1) 检查当前任务是否仍需继续。',
+    '2) 若无阻塞任务，回复 HEARTBEAT_OK。',
+    '3) 若存在阻塞，简要说明根因并继续执行。',
+  ].join('\n')
+}
+
+function normalizeHeartbeatProfileRow(value: unknown): HeartbeatManagerProfile | null {
+  const row = asRecord(value)
+  if (!row) return null
+  const id = normalizeText(row.id)
+  if (!id) return null
+  const name = normalizeText(row.name) || id
+  const prompt = normalizeText(row.prompt) || OPENCLAW_HEARTBEAT_DEFAULT_PROMPT
+  const document = normalizeText(row.document) || defaultHeartbeatDocument()
+  const updatedAtRaw = typeof row.updatedAtMs === 'number' && Number.isFinite(row.updatedAtMs)
+    ? Math.floor(row.updatedAtMs)
+    : Date.now()
+  return {
+    id,
+    name,
+    prompt,
+    document,
+    updatedAtMs: updatedAtRaw > 0 ? updatedAtRaw : Date.now(),
+  }
+}
+
+function createHeartbeatDefaultProfile(prompt: string, document: string): HeartbeatManagerProfile {
+  const now = Date.now()
+  return {
+    id: `default_${now.toString(36)}`,
+    name: '默认心跳模板',
+    prompt: normalizeText(prompt) || OPENCLAW_HEARTBEAT_DEFAULT_PROMPT,
+    document: normalizeText(document) || defaultHeartbeatDocument(),
+    updatedAtMs: now,
+  }
+}
+
+async function readOpenClawConfigRoot(): Promise<Record<string, unknown>> {
+  try {
+    const raw = await readFile(OPENCLAW_CONFIG_PATH, 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    return asRecord(parsed) ?? {}
+  } catch {
+    return {}
+  }
+}
+
+async function writeOpenClawConfigRoot(root: Record<string, unknown>): Promise<void> {
+  await mkdir(dirname(OPENCLAW_CONFIG_PATH), { recursive: true })
+  await writeFile(OPENCLAW_CONFIG_PATH, `${JSON.stringify(root, null, 2)}\n`, 'utf8')
+}
+
+async function readHeartbeatDocumentFromDisk(): Promise<string> {
+  try {
+    const raw = await readFile(OPENCLAW_HEARTBEAT_DOC_PATH, 'utf8')
+    const text = raw.trim()
+    return text || defaultHeartbeatDocument()
+  } catch {
+    return defaultHeartbeatDocument()
+  }
+}
+
+async function writeHeartbeatDocumentToDisk(text: string): Promise<void> {
+  await mkdir(dirname(OPENCLAW_HEARTBEAT_DOC_PATH), { recursive: true })
+  await writeFile(OPENCLAW_HEARTBEAT_DOC_PATH, `${text.trim() || defaultHeartbeatDocument()}\n`, 'utf8')
+}
+
+async function readHeartbeatStateFromDisk(): Promise<HeartbeatManagerState | null> {
+  try {
+    const raw = await readFile(OPENCLAW_HEARTBEAT_STATE_PATH, 'utf8')
+    const parsed = asRecord(JSON.parse(raw) as unknown)
+    if (!parsed) return null
+    const rawProfiles = Array.isArray(parsed.profiles) ? parsed.profiles : []
+    const profiles: HeartbeatManagerProfile[] = []
+    const seen = new Set<string>()
+    for (const row of rawProfiles) {
+      const normalized = normalizeHeartbeatProfileRow(row)
+      if (!normalized || seen.has(normalized.id)) continue
+      seen.add(normalized.id)
+      profiles.push(normalized)
+    }
+    const activeProfileId = normalizeText(parsed.activeProfileId)
+    const enabled = parsed.enabled === true
+    const every = normalizeHeartbeatEvery(parsed.every)
+    const updatedAtMs = typeof parsed.updatedAtMs === 'number' && Number.isFinite(parsed.updatedAtMs)
+      ? Math.floor(parsed.updatedAtMs)
+      : Date.now()
+    return {
+      enabled,
+      every,
+      activeProfileId,
+      profiles,
+      updatedAtMs: updatedAtMs > 0 ? updatedAtMs : Date.now(),
+    }
+  } catch {
+    return null
+  }
+}
+
+async function writeHeartbeatStateToDisk(state: HeartbeatManagerState): Promise<void> {
+  await mkdir(dirname(OPENCLAW_HEARTBEAT_STATE_PATH), { recursive: true })
+  await writeFile(
+    OPENCLAW_HEARTBEAT_STATE_PATH,
+    `${JSON.stringify(state, null, 2)}\n`,
+    'utf8',
+  )
+}
+
+function extractHeartbeatCronEnabledStatus(cronListResult: unknown): boolean | null {
+  const record = asRecord(cronListResult) ?? {}
+  const rows = Array.isArray(record.jobs) ? record.jobs : []
+  for (const row of rows) {
+    const item = asRecord(row)
+    if (!item) continue
+    const name = normalizeText(item.name)
+    if (name !== OPENCLAW_HEARTBEAT_JOB_NAME) continue
+    if (typeof item.enabled === 'boolean') {
+      return item.enabled
+    }
+    return null
+  }
+  return null
+}
+
+async function readHeartbeatManagerConfig(): Promise<{
+  state: HeartbeatManagerState
+  statusSource: string
+}> {
+  const root = await readOpenClawConfigRoot()
+  const agents = ensureRecord(root, 'agents')
+  const defaults = ensureRecord(agents, 'defaults')
+  const heartbeat = ensureRecord(defaults, 'heartbeat')
+  const every = normalizeHeartbeatEvery(heartbeat.every)
+  const prompt = normalizeText(heartbeat.prompt) || OPENCLAW_HEARTBEAT_DEFAULT_PROMPT
+  const documentText = await readHeartbeatDocumentFromDisk()
+
+  let state = await readHeartbeatStateFromDisk()
+  if (!state) {
+    const fallback = createHeartbeatDefaultProfile(prompt, documentText)
+    state = {
+      enabled: true,
+      every,
+      activeProfileId: fallback.id,
+      profiles: [fallback],
+      updatedAtMs: Date.now(),
+    }
+  }
+
+  const normalizedProfiles = state.profiles
+    .map((row) => normalizeHeartbeatProfileRow(row))
+    .filter((row): row is HeartbeatManagerProfile => row !== null)
+  if (normalizedProfiles.length === 0) {
+    normalizedProfiles.push(createHeartbeatDefaultProfile(prompt, documentText))
+  }
+  state.profiles = normalizedProfiles
+  state.every = every
+
+  if (!state.activeProfileId || !state.profiles.some((row) => row.id === state.activeProfileId)) {
+    state.activeProfileId = state.profiles[0].id
+  }
+
+  const activeIndex = state.profiles.findIndex((row) => row.id === state.activeProfileId)
+  if (activeIndex >= 0) {
+    state.profiles[activeIndex] = {
+      ...state.profiles[activeIndex],
+      prompt,
+      document: documentText,
+      updatedAtMs: Date.now(),
+    }
+  }
+
+  let statusSource = 'state'
+  const cronList = await tryRunOpenClawGatewayCall(
+    'cron.list',
+    { includeDisabled: true, limit: 200, offset: 0 },
+  )
+  const cronEnabled = cronList ? extractHeartbeatCronEnabledStatus(cronList) : null
+  if (cronEnabled !== null) {
+    state.enabled = cronEnabled
+    statusSource = 'cron'
+  }
+
+  state.updatedAtMs = Date.now()
+  await writeHeartbeatStateToDisk(state)
+  return { state, statusSource }
 }
 
 function shellQuote(value: string): string {
@@ -564,6 +793,13 @@ function findHeartbeatCronJob(cronListResult: unknown): {
     }
   }
   return null
+}
+
+async function resolveHeartbeatPromptForTrigger(): Promise<string> {
+  const config = await readHeartbeatManagerConfig()
+  const active = config.state.profiles.find((row) => row.id === config.state.activeProfileId)
+  const prompt = normalizeText(active?.prompt)
+  return prompt || OPENCLAW_HEARTBEAT_DEFAULT_PROMPT
 }
 
 function isLikelyAssistantResultContent(content: unknown): boolean {
@@ -2743,6 +2979,155 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         return
       }
 
+      if (req.method === 'GET' && url.pathname === '/openclaw-api/heartbeat/config') {
+        try {
+          const { state, statusSource } = await readHeartbeatManagerConfig()
+          setJson(res, 200, {
+            ok: true,
+            enabled: state.enabled,
+            every: state.every,
+            activeProfileId: state.activeProfileId,
+            profiles: state.profiles,
+            statusSource,
+            restartRequired: false,
+            lastSavedAtMs: state.updatedAtMs,
+          })
+          return
+        } catch (error) {
+          setJson(res, 500, {
+            ok: false,
+            error: getErrorMessage(error, 'Failed to read heartbeat config'),
+          })
+          return
+        }
+      }
+
+      if (req.method === 'POST' && url.pathname === '/openclaw-api/heartbeat/config') {
+        const payload = asRecord(await readJsonBody(req))
+        const enabled = payload?.enabled === true
+        const every = normalizeHeartbeatEvery(payload?.every)
+        const restartGateway = payload?.restartGateway === true
+        const requestedActiveProfileId = normalizeText(payload?.activeProfileId)
+        const rawProfiles = Array.isArray(payload?.profiles) ? payload.profiles : []
+        const parsedProfiles: HeartbeatManagerProfile[] = []
+        const seenIds = new Set<string>()
+        for (const row of rawProfiles) {
+          const normalized = normalizeHeartbeatProfileRow(row)
+          if (!normalized || seenIds.has(normalized.id)) continue
+          seenIds.add(normalized.id)
+          parsedProfiles.push(normalized)
+        }
+        if (parsedProfiles.length === 0) {
+          setJson(res, 400, { ok: false, error: 'Missing heartbeat profiles' })
+          return
+        }
+        const activeProfile = parsedProfiles.find((row) => row.id === requestedActiveProfileId) ?? parsedProfiles[0]
+
+        const nextState: HeartbeatManagerState = {
+          enabled,
+          every,
+          activeProfileId: activeProfile.id,
+          profiles: parsedProfiles,
+          updatedAtMs: Date.now(),
+        }
+
+        try {
+          const root = await readOpenClawConfigRoot()
+          const agents = ensureRecord(root, 'agents')
+          const defaults = ensureRecord(agents, 'defaults')
+          const heartbeat = ensureRecord(defaults, 'heartbeat')
+          if (Object.prototype.hasOwnProperty.call(heartbeat, 'enabled')) {
+            delete heartbeat.enabled
+          }
+          heartbeat.every = every
+          heartbeat.target = normalizeText(heartbeat.target) || 'none'
+          heartbeat.prompt = normalizeText(activeProfile.prompt) || OPENCLAW_HEARTBEAT_DEFAULT_PROMPT
+
+          await writeOpenClawConfigRoot(root)
+          await writeHeartbeatDocumentToDisk(activeProfile.document)
+          await writeHeartbeatStateToDisk(nextState)
+
+          let runtimeApplyError = ''
+          try {
+            if (await isNativeOpenClawReady()) {
+              const cronList = await runOpenClawGatewayCall(
+                'cron.list',
+                {
+                  includeDisabled: true,
+                  limit: 200,
+                  offset: 0,
+                },
+                20_000,
+              )
+              const heartbeatJob = findHeartbeatCronJob(cronList)
+              if (enabled) {
+                if (heartbeatJob) {
+                  await runOpenClawGatewayCall(
+                    'cron.edit',
+                    {
+                      id: heartbeatJob.id,
+                      every,
+                      systemEvent: heartbeat.prompt,
+                      enable: true,
+                    },
+                    30_000,
+                  )
+                } else {
+                  await runOpenClawGatewayCall(
+                    'cron.add',
+                    {
+                      name: OPENCLAW_HEARTBEAT_JOB_NAME,
+                      every,
+                      systemEvent: heartbeat.prompt,
+                      wake: 'now',
+                    },
+                    30_000,
+                  )
+                }
+                await runShellCommand('openclaw system heartbeat enable --json')
+              } else {
+                if (heartbeatJob) {
+                  await runOpenClawGatewayCall(
+                    'cron.disable',
+                    { id: heartbeatJob.id },
+                    20_000,
+                  )
+                }
+                await runShellCommand('openclaw system heartbeat disable --json')
+              }
+            }
+          } catch (error) {
+            runtimeApplyError = getErrorMessage(error, 'runtime_apply_failed')
+          }
+
+          let restartTriggered = false
+          let restartOutput = ''
+          if (restartGateway) {
+            const restartResult = await runShellCommand('openclaw gateway restart 2>&1')
+            restartTriggered = restartResult.exitCode === 0
+            restartOutput = restartResult.output
+          }
+
+          setJson(res, 200, {
+            ok: true,
+            enabled: nextState.enabled,
+            every: nextState.every,
+            activeProfileId: nextState.activeProfileId,
+            restartTriggered,
+            restartOutput,
+            restartRequired: restartGateway ? !restartTriggered : true,
+            runtimeApplyError,
+          })
+          return
+        } catch (error) {
+          setJson(res, 500, {
+            ok: false,
+            error: getErrorMessage(error, 'Failed to save heartbeat config'),
+          })
+          return
+        }
+      }
+
       if (req.method === 'POST' && url.pathname === '/openclaw-api/heartbeat/trigger') {
         const payload = asRecord(await readJsonBody(req))
         const sessionKey = normalizeText(payload?.sessionKey)
@@ -2809,7 +3194,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
               'chat.send',
               {
                 sessionKey,
-                message: OPENCLAW_HEARTBEAT_PROMPT,
+                message: await resolveHeartbeatPromptForTrigger(),
                 deliver: false,
                 timeoutMs: OPENCLAW_CHAT_SEND_TIMEOUT_MS,
                 idempotencyKey: `heartbeat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,

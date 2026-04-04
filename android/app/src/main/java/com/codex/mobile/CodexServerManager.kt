@@ -1423,7 +1423,9 @@ EOF
         if (heartbeat.has("enabled")) {
             heartbeat.remove("enabled")
         }
-        heartbeat.put("every", "20m")
+        if (heartbeat.optString("every", "").isBlank()) {
+            heartbeat.put("every", "20m")
+        }
         if (heartbeat.optString("target", "").isBlank()) {
             heartbeat.put("target", "none")
         }
@@ -1470,6 +1472,7 @@ EOF
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
         if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
+        if (!searchSuiteConfig.has("enableTavilySearch")) searchSuiteConfig.put("enableTavilySearch", false)
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {
@@ -2091,7 +2094,6 @@ EOF
             DEFAULT_PROMPT="Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."
             STATE_DIR="${'$'}HOME/.openclaw-android/state"
             JOB_NAME="anyclaw-heartbeat-main"
-            EVERY="20m"
 
             if [ ! -f "${'$'}HB_FILE" ] || [ -z "${'$'}(grep -Ev '^[[:space:]]*(#|$)' "${'$'}HB_FILE" 2>/dev/null)" ]; then
               cat > "${'$'}HB_FILE" <<'EOF'
@@ -2127,9 +2129,35 @@ EOF
             fs.mkdirSync(stateDir, { recursive: true });
             const configPath = path.join(process.env.HOME || '', '.openclaw', 'openclaw.json');
             const NAME = 'anyclaw-heartbeat-main';
-            const EVERY = '20m';
-            const EVERY_MS = 20 * 60 * 1000;
-            const PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.';
+            const DEFAULT_EVERY = '20m';
+            const DEFAULT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.';
+            function resolveEveryMs(value) {
+              const text = String(value || '').trim().toLowerCase();
+              const m = text.match(/^(\d+)([mh])$/);
+              if (!m) return 20 * 60 * 1000;
+              const n = Number(m[1] || 0);
+              if (!Number.isFinite(n) || n <= 0) return 20 * 60 * 1000;
+              return m[2] === 'h' ? n * 60 * 60 * 1000 : n * 60 * 1000;
+            }
+            function resolveHeartbeatFromConfig() {
+              try {
+                if (!fs.existsSync(configPath)) {
+                  return { every: DEFAULT_EVERY, prompt: DEFAULT_PROMPT };
+                }
+                const raw = fs.readFileSync(configPath, 'utf8');
+                const parsed = JSON.parse(raw || '{}');
+                const hb = (((parsed || {}).agents || {}).defaults || {}).heartbeat;
+                const every = hb && typeof hb.every === 'string' && hb.every.trim() ? hb.every.trim() : DEFAULT_EVERY;
+                const prompt = hb && typeof hb.prompt === 'string' && hb.prompt.trim() ? hb.prompt.trim() : DEFAULT_PROMPT;
+                return { every, prompt };
+              } catch {
+                return { every: DEFAULT_EVERY, prompt: DEFAULT_PROMPT };
+              }
+            }
+            const heartbeatConfig = resolveHeartbeatFromConfig();
+            const EVERY = heartbeatConfig.every;
+            const EVERY_MS = resolveEveryMs(heartbeatConfig.every);
+            const PROMPT = heartbeatConfig.prompt;
             const summary = {
               name: NAME,
               every: EVERY,
@@ -2267,7 +2295,7 @@ EOF
                 if (job.optString("name") != "anyclaw-heartbeat-main") continue
                 val enabled = job.optBoolean("enabled", false)
                 val everyMs = job.optJSONObject("schedule")?.optLong("everyMs", 0L) ?: 0L
-                found = enabled && everyMs == 20L * 60L * 1000L
+                found = enabled && everyMs > 0L
                 if (found) break
             }
             found

@@ -19,6 +19,7 @@ type RuntimeConfig = {
   maxChars: number;
   userAgent: string;
   webBridgeUrl: string;
+  enableTavilySearch: boolean;
   tavilyApiKey?: string;
   tavilyBaseUrl: string;
 };
@@ -1766,6 +1767,8 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     ? cfg.tavilyApiKey.trim()
     : undefined;
 
+  const enableTavilySearch = cfg.enableTavilySearch === true;
+
   const tavilyBaseUrl = typeof cfg.tavilyBaseUrl === "string" && cfg.tavilyBaseUrl.trim()
     ? cfg.tavilyBaseUrl.trim()
     : DEFAULT_TAVILY_BASE_URL;
@@ -1776,6 +1779,7 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     maxChars,
     userAgent,
     webBridgeUrl,
+    enableTavilySearch,
     tavilyApiKey,
     tavilyBaseUrl
   };
@@ -1928,6 +1932,8 @@ export default {
         ["session_id", "include_links", "include_images", "max_chars"]
       )
     );
-    api.registerTool(createTavilySearchTool(runtime, runtimeMeta));
+    if (runtime.enableTavilySearch) {
+      api.registerTool(createTavilySearchTool(runtime, runtimeMeta));
+    }
   }
 };
