@@ -26,11 +26,6 @@ const router = createRouter({
       name: 'openclaw-chat',
       component: EmptyRouteView,
     },
-    {
-      path: '/openclaw/heartbeat-manager',
-      name: 'openclaw-heartbeat-manager',
-      component: EmptyRouteView,
-    },
     { path: '/:pathMatch(.*)*', redirect: { name: 'home' } },
   ],
 })

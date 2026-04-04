@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 193
-        versionName = "1.0.27-openclaw-heartbeat-manager-rollback"
+        versionCode = 194
+        versionName = "1.0.7-openclaw-upload-path-hardening"
     }
 
     flavorDimensions += "channel"

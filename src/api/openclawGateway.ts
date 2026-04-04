@@ -9,24 +9,6 @@ import type {
   OpenClawRunWaitResponse,
 } from '../types/openclaw'
 
-export type OpenClawHeartbeatProfile = {
-  id: string
-  name: string
-  prompt: string
-  document: string
-  updatedAtMs: number
-}
-
-export type OpenClawHeartbeatConfig = {
-  enabled: boolean
-  every: string
-  activeProfileId: string
-  profiles: OpenClawHeartbeatProfile[]
-  statusSource: string
-  restartRequired: boolean
-  lastSavedAtMs: number
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as Record<string, unknown>
@@ -42,24 +24,6 @@ function readNumber(value: unknown): number {
 
 function readBoolean(value: unknown): boolean {
   return value === true
-}
-
-function readHeartbeatProfile(value: unknown): OpenClawHeartbeatProfile | null {
-  const row = asRecord(value)
-  if (!row) return null
-  const id = readString(row.id).trim()
-  if (!id) return null
-  const name = readString(row.name).trim() || id
-  const prompt = readString(row.prompt)
-  const document = readString(row.document)
-  const updatedAtRaw = readNumber(row.updatedAtMs)
-  return {
-    id,
-    name,
-    prompt,
-    document,
-    updatedAtMs: updatedAtRaw > 0 ? updatedAtRaw : Date.now(),
-  }
 }
 
 async function requestOpenClaw<T>(
@@ -423,94 +387,6 @@ export async function abortOpenClawRun(request: {
     aborted: readBoolean(payload?.aborted),
     status: readString(payload?.status).trim() || 'aborted',
     source: readString(payload?.source).trim() || 'unknown',
-  }
-}
-
-export async function getOpenClawHeartbeatConfig(): Promise<OpenClawHeartbeatConfig> {
-  const payload = await requestOpenClaw<{
-    ok?: boolean
-    enabled?: boolean
-    every?: string
-    activeProfileId?: string
-    profiles?: unknown[]
-    statusSource?: string
-    restartRequired?: boolean
-    lastSavedAtMs?: number
-  }>(
-    '/openclaw-api/heartbeat/config',
-    {
-      method: 'GET',
-    },
-    'Failed to load heartbeat configuration',
-    20_000,
-  )
-
-  const rows = Array.isArray(payload?.profiles) ? payload.profiles : []
-  const profiles: OpenClawHeartbeatProfile[] = []
-  for (const row of rows) {
-    const parsed = readHeartbeatProfile(row)
-    if (parsed) profiles.push(parsed)
-  }
-
-  return {
-    enabled: readBoolean(payload?.enabled),
-    every: readString(payload?.every).trim() || '20m',
-    activeProfileId: readString(payload?.activeProfileId).trim(),
-    profiles,
-    statusSource: readString(payload?.statusSource).trim() || 'unknown',
-    restartRequired: readBoolean(payload?.restartRequired),
-    lastSavedAtMs: readNumber(payload?.lastSavedAtMs),
-  }
-}
-
-export async function saveOpenClawHeartbeatConfig(request: {
-  enabled: boolean
-  every: string
-  activeProfileId: string
-  profiles: OpenClawHeartbeatProfile[]
-  restartGateway?: boolean
-}): Promise<{
-  ok: boolean
-  restartTriggered: boolean
-  restartOutput: string
-  enabled: boolean
-  every: string
-  activeProfileId: string
-  restartRequired: boolean
-}> {
-  const payload = await requestOpenClaw<{
-    ok?: boolean
-    restartTriggered?: boolean
-    restartOutput?: string
-    enabled?: boolean
-    every?: string
-    activeProfileId?: string
-    restartRequired?: boolean
-  }>(
-    '/openclaw-api/heartbeat/config',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        enabled: request.enabled === true,
-        every: request.every.trim(),
-        activeProfileId: request.activeProfileId.trim(),
-        profiles: request.profiles,
-        restartGateway: request.restartGateway === true,
-      }),
-    },
-    'Failed to save heartbeat configuration',
-    30_000,
-  )
-
-  return {
-    ok: readBoolean(payload?.ok),
-    restartTriggered: readBoolean(payload?.restartTriggered),
-    restartOutput: readString(payload?.restartOutput),
-    enabled: readBoolean(payload?.enabled),
-    every: readString(payload?.every).trim() || request.every.trim(),
-    activeProfileId: readString(payload?.activeProfileId).trim() || request.activeProfileId.trim(),
-    restartRequired: readBoolean(payload?.restartRequired),
   }
 }
 

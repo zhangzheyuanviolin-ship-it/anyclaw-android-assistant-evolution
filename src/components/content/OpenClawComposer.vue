@@ -17,14 +17,9 @@
         <button
           class="openclaw-composer-action"
           type="button"
-          :aria-label="heartbeatLongPressHint || heartbeatLabel"
+          :aria-label="heartbeatLabel"
           :disabled="!sessionKey || heartbeatDisabled"
-          @contextmenu.prevent
-          @pointerdown="onHeartbeatPressStart"
-          @pointerup="onHeartbeatPressEnd"
-          @pointerleave="onHeartbeatPressEnd"
-          @pointercancel="onHeartbeatPressEnd"
-          @click="onHeartbeatButtonClick"
+          @click="onTriggerHeartbeat"
         >
           {{ heartbeatLabel }}
         </button>
@@ -152,7 +147,6 @@ const props = defineProps<{
   sendLabel: string
   attachLabel: string
   heartbeatLabel: string
-  heartbeatLongPressHint?: string
   abortLabel: string
   heartbeatDisabled?: boolean
   abortDisabled?: boolean
@@ -166,7 +160,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   submit: [payload: OpenClawComposerSubmitPayload]
-  'open-heartbeat-manager': []
   'trigger-heartbeat': []
   'abort-run': []
 }>()
@@ -179,15 +172,6 @@ const galleryPickerRef = ref<HTMLInputElement | null>(null)
 const filesPickerRef = ref<HTMLInputElement | null>(null)
 const isAttachmentMenuOpen = ref(false)
 const attachments = ref<OpenClawComposerAttachment[]>([])
-const heartbeatLongPressTriggered = ref(false)
-let heartbeatPressTimer: number | null = null
-
-const HEARTBEAT_LONG_PRESS_MS = 620
-
-function triggerHapticFeedback(): void {
-  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') return
-  navigator.vibrate(12)
-}
 
 function moveCursorToEnd(): void {
   const input = composerInputRef.value
@@ -344,39 +328,9 @@ function onSelectGenericFiles(event: Event): void {
   void onFilesSelected(target?.files ?? null, 'files', target)
 }
 
-function clearHeartbeatPressTimer(): void {
-  if (heartbeatPressTimer === null || typeof window === 'undefined') return
-  window.clearTimeout(heartbeatPressTimer)
-  heartbeatPressTimer = null
-}
-
-function onHeartbeatPressStart(event: PointerEvent): void {
+function onTriggerHeartbeat(): void {
   if (!props.sessionKey || props.heartbeatDisabled) return
-  event.preventDefault()
-  clearHeartbeatPressTimer()
-  heartbeatLongPressTriggered.value = false
-  if (typeof window === 'undefined') return
-  heartbeatPressTimer = window.setTimeout(() => {
-    heartbeatPressTimer = null
-    heartbeatLongPressTriggered.value = true
-    triggerHapticFeedback()
-    emit('trigger-heartbeat')
-  }, HEARTBEAT_LONG_PRESS_MS)
-}
-
-function onHeartbeatPressEnd(): void {
-  clearHeartbeatPressTimer()
-}
-
-function onHeartbeatButtonClick(event: MouseEvent): void {
-  if (!props.sessionKey || props.heartbeatDisabled) return
-  if (heartbeatLongPressTriggered.value) {
-    heartbeatLongPressTriggered.value = false
-    event.preventDefault()
-    return
-  }
-  triggerHapticFeedback()
-  emit('open-heartbeat-manager')
+  emit('trigger-heartbeat')
 }
 
 function onAbortRun(): void {
@@ -422,7 +376,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('pointerdown', onWindowPointerDown)
-  clearHeartbeatPressTimer()
 })
 </script>
 
@@ -455,10 +408,6 @@ onBeforeUnmount(() => {
 
 .openclaw-composer-action {
   @apply shrink-0 inline-flex h-9 items-center justify-center rounded-full border border-zinc-300 bg-white px-3 text-xs text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-touch-callout: none;
-  touch-action: manipulation;
 }
 
 .openclaw-composer-attach-wrap {
