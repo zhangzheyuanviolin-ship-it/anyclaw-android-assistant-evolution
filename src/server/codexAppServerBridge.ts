@@ -44,6 +44,7 @@ const OPENCLAW_GATEWAY_CALL_MAX_RETRIES = 4
 const OPENCLAW_GATEWAY_RETRY_BACKOFF_MS = [300, 700, 1200, 1800]
 const OPENCLAW_GATEWAY_STATUS_PROBE_TIMEOUT_MS = 8_000
 const OPENCLAW_NATIVE_STRICT_MODE = true
+const OPENCLAW_NATIVE_READY_NEGATIVE_REPROBE_MS = 1_500
 const OPENCLAW_RUN_CONTEXT_TTL_MS = 6 * 60 * 60_000
 const OPENCLAW_RUN_CONTEXT_MAX = 400
 const OPENCLAW_RUN_MONITOR_WAIT_TIMEOUT_MS = 85_000
@@ -160,6 +161,7 @@ type OpenClawGatewayCallOptions = {
 
 let openClawNativeReadyCacheValue: boolean | null = null
 let openClawNativeReadyCacheAtMs = 0
+let openClawNativeReadyNegativeProbeAtMs = 0
 const openClawNativeRuns = new Map<string, OpenClawNativeRunContext>()
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -255,6 +257,9 @@ function sleepMs(delayMs: number): Promise<void> {
 function rememberOpenClawNativeReady(value: boolean): void {
   openClawNativeReadyCacheValue = value
   openClawNativeReadyCacheAtMs = Date.now()
+  if (!value) {
+    openClawNativeReadyNegativeProbeAtMs = openClawNativeReadyCacheAtMs
+  }
 }
 
 function invalidateOpenClawNativeReadyCache(): void {
@@ -501,15 +506,25 @@ async function isNativeOpenClawReady(
   probeOnCacheMiss = true,
 ): Promise<boolean> {
   const now = Date.now()
+  const cacheKnown = openClawNativeReadyCacheValue !== null
+  const cacheAgeMs = cacheKnown ? now - openClawNativeReadyCacheAtMs : Number.MAX_SAFE_INTEGER
   if (
     !forceRefresh &&
-    openClawNativeReadyCacheValue !== null &&
-    now - openClawNativeReadyCacheAtMs < OPENCLAW_NATIVE_READY_CACHE_MS
+    cacheKnown &&
+    cacheAgeMs < OPENCLAW_NATIVE_READY_CACHE_MS
   ) {
-    return openClawNativeReadyCacheValue
+    if (openClawNativeReadyCacheValue === true) {
+      return true
+    }
+    if (!probeOnCacheMiss) {
+      return false
+    }
+    if (now - openClawNativeReadyNegativeProbeAtMs < OPENCLAW_NATIVE_READY_NEGATIVE_REPROBE_MS) {
+      return false
+    }
   }
 
-  if (!probeOnCacheMiss && openClawNativeReadyCacheValue === null) {
+  if (!probeOnCacheMiss && !cacheKnown) {
     return true
   }
 
@@ -962,12 +977,113 @@ function findLatestOpenClawNativeRunBySession(sessionKey?: string): OpenClawNati
     }
   }
   if (normalizedSessionKey.length > 0) {
-    if (latestMatchedSession) return { ...latestMatchedSession }
-    if (latestActive) return { ...latestActive }
-    return latest ? { ...latest } : null
+    return latestMatchedSession ? { ...latestMatchedSession } : null
   }
   if (latestActive) return { ...latestActive }
   return latest ? { ...latest } : null
+}
+
+function reconcileOpenClawNativeRunsByHistory(
+  sessionKey: string,
+  messages: unknown[],
+): void {
+  const normalizedSessionKey = sessionKey.trim()
+  if (!normalizedSessionKey || !Array.isArray(messages) || messages.length === 0) return
+
+  let latestAssistantTimestampMs = 0
+  let latestToolErrorTimestampMs = 0
+
+  for (const row of messages) {
+    const item = asRecord(row) ?? {}
+    const timestamp = typeof item.timestamp === 'number' && Number.isFinite(item.timestamp)
+      ? item.timestamp
+      : 0
+    if (timestamp <= 0) continue
+    const role = normalizeText(item.role).toLowerCase()
+    if (role === 'assistant' && isLikelyAssistantResultContent(item.content)) {
+      latestAssistantTimestampMs = Math.max(latestAssistantTimestampMs, timestamp)
+      continue
+    }
+    if (role === 'toolresult' && item.isError === true) {
+      latestToolErrorTimestampMs = Math.max(latestToolErrorTimestampMs, timestamp)
+    }
+  }
+
+  if (latestAssistantTimestampMs <= 0 && latestToolErrorTimestampMs <= 0) {
+    return
+  }
+
+  for (const context of openClawNativeRuns.values()) {
+    if (context.completed) continue
+    if (context.sessionKey !== normalizedSessionKey) continue
+
+    if (latestAssistantTimestampMs > 0 && context.sentAtMs <= latestAssistantTimestampMs) {
+      updateOpenClawNativeRun(
+        context.runId,
+        'completed',
+        '',
+        {
+          source: 'history-reconcile',
+          retryable: true,
+          completed: true,
+          result: {
+            source: 'history-reconcile',
+            assistantTimestampMs: latestAssistantTimestampMs,
+          },
+        },
+      )
+      continue
+    }
+
+    if (latestToolErrorTimestampMs > 0 && context.sentAtMs <= latestToolErrorTimestampMs) {
+      updateOpenClawNativeRun(
+        context.runId,
+        'failed',
+        'Tool returned error after run submission',
+        {
+          source: 'history-reconcile',
+          retryable: false,
+          completed: true,
+          result: null,
+        },
+      )
+    }
+  }
+}
+
+function markOpenClawRunsAborted(sessionKey: string, runId: string): void {
+  const normalizedSessionKey = sessionKey.trim()
+  const normalizedRunId = runId.trim()
+
+  if (normalizedRunId) {
+    updateOpenClawNativeRun(
+      normalizedRunId,
+      'aborted',
+      '',
+      {
+        source: 'chat.abort',
+        retryable: false,
+        completed: true,
+      },
+    )
+  }
+
+  if (!normalizedSessionKey) return
+
+  for (const context of openClawNativeRuns.values()) {
+    if (context.sessionKey !== normalizedSessionKey) continue
+    if (context.completed) continue
+    updateOpenClawNativeRun(
+      context.runId,
+      'aborted',
+      '',
+      {
+        source: 'chat.abort',
+        retryable: false,
+        completed: true,
+      },
+    )
+  }
 }
 
 function buildOpenClawWatchdogStatus(
@@ -2986,24 +3102,17 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const cacheAgeMs = cacheKnown
           ? Math.max(0, nowMs - openClawNativeReadyCacheAtMs)
           : -1
-        let source = 'cache'
+        let source = 'cache-true'
+        let gatewayConnected = cacheKnown && openClawNativeReadyCacheValue === true && cacheAgeMs <= OPENCLAW_NATIVE_READY_CACHE_MS
 
-        if (!cacheKnown || cacheAgeMs > OPENCLAW_NATIVE_READY_CACHE_MS) {
-          const probeReady = (await tryRunOpenClawGatewayCall(
-            'health',
-            {},
-            {
-              timeoutMs: OPENCLAW_GATEWAY_STATUS_PROBE_TIMEOUT_MS,
-              maxRetries: 1,
-            },
-          )) !== null
-          rememberOpenClawNativeReady(probeReady)
+        if (!gatewayConnected) {
+          gatewayConnected = await isNativeOpenClawReady(true, true)
           source = 'probe'
         }
 
         setJson(res, 200, {
           ok: true,
-          gatewayConnected: openClawNativeReadyCacheValue === true,
+          gatewayConnected,
           source,
           cacheKnown: openClawNativeReadyCacheValue !== null,
           cacheAgeMs: openClawNativeReadyCacheValue === null
@@ -3016,7 +3125,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
       if (req.method === 'GET' && url.pathname === '/openclaw-api/sessions') {
         const limit = readPositiveInt(url.searchParams.get('limit'), 200)
-        if (await isNativeOpenClawReady(false, false)) {
+        if (await isNativeOpenClawReady(false, true)) {
           try {
             const nativeSessions = await runOpenClawGatewayCall(
               'sessions.list',
@@ -3076,7 +3185,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
         const limit = readPositiveInt(String(payload?.limit ?? ''), 60)
-        if (await isNativeOpenClawReady(false, false)) {
+        if (await isNativeOpenClawReady(false, true)) {
           try {
             const nativeHistory = await runOpenClawGatewayCall(
               'chat.history',
@@ -3090,9 +3199,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
               },
             )
             const record = asRecord(nativeHistory) ?? {}
+            const messages = Array.isArray(record.messages) ? record.messages : []
+            reconcileOpenClawNativeRunsByHistory(sessionKey, messages)
             setJson(res, 200, {
               sessionKey: normalizeText(record.sessionKey) || sessionKey,
-              messages: Array.isArray(record.messages) ? record.messages : [],
+              messages,
               thinkingLevel: normalizeText(record.thinkingLevel) || 'medium',
             })
             return
@@ -3141,7 +3252,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           240_000,
         )
 
-        if (await isNativeOpenClawReady(false, false)) {
+        if (await isNativeOpenClawReady(false, true)) {
           try {
             const nativeRun = await runOpenClawGatewayCall(
               'chat.send',
@@ -3218,7 +3329,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           120_000,
         )
 
-        if (await isNativeOpenClawReady(false, false)) {
+        if (await isNativeOpenClawReady(false, true)) {
           rememberOpenClawNativeRun(runId, sessionKey)
           ensureOpenClawNativeRunMonitor(runId)
 
@@ -3351,6 +3462,27 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/watchdog/status') {
         const payload = asRecord(await readJsonBody(req))
         const sessionKey = normalizeText(payload?.sessionKey)
+        if (!sessionKey) {
+          setJson(res, 200, {
+            ok: true,
+            sessionKey: '',
+            activeRun: false,
+            runId: '',
+            status: 'idle',
+            rawStatus: '',
+            completed: true,
+            waiting: false,
+            staleMs: 0,
+            revision: 0,
+            source: 'watchdog',
+            retryable: true,
+            recommendAction: 'idle',
+            suspectAfterMs: OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS,
+            triggerAfterMs: OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS,
+            checkedAtMs: Date.now(),
+          })
+          return
+        }
 
         const suspectAfterMs = normalizeTimeoutMs(
           payload?.suspectAfterMs,
@@ -3387,7 +3519,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const sessionKey = normalizeText(payload?.sessionKey)
 
-        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, false))) {
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, true))) {
           setOpenClawNativeUnavailable(
             res,
             503,
@@ -3398,7 +3530,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         try {
-          if (await isNativeOpenClawReady(false, false)) {
+          if (await isNativeOpenClawReady(false, true)) {
             try {
               const cronList = await runOpenClawGatewayCall(
                 'cron.list',
@@ -3427,10 +3559,6 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
                 )
                 const cronRunRecord = asRecord(cronRun) ?? {}
                 const runId = normalizeText(cronRunRecord.runId)
-                if (runId && sessionKey) {
-                  rememberOpenClawNativeRun(runId, sessionKey)
-                  ensureOpenClawNativeRunMonitor(runId)
-                }
                 setJson(res, 200, {
                   ok: true,
                   status: 'submitted',
@@ -3468,10 +3596,6 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             )
             const record = asRecord(fallbackRun) ?? {}
             const runId = normalizeText(record.runId)
-            if (runId) {
-              rememberOpenClawNativeRun(runId, sessionKey)
-              ensureOpenClawNativeRunMonitor(runId)
-            }
             setJson(res, 200, {
               ok: true,
               status: runId ? 'submitted' : 'running',
@@ -3518,7 +3642,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
 
-        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, false))) {
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, true))) {
           setOpenClawNativeUnavailable(
             res,
             503,
@@ -3529,7 +3653,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         try {
-          if (await isNativeOpenClawReady(false, false)) {
+          if (await isNativeOpenClawReady(false, true)) {
             const params: Record<string, unknown> = {}
             if (sessionKey) params.sessionKey = sessionKey
             if (runId) params.runId = runId
@@ -3541,9 +3665,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
                 maxRetries: 1,
               },
             )
-            if (runId) {
-              clearOpenClawNativeRun(runId)
-            }
+            markOpenClawRunsAborted(sessionKey, runId)
             setJson(res, 200, {
               ok: true,
               aborted: true,
@@ -3659,7 +3781,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const label = normalizeText(payload?.label) || '新会话'
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
-        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, false))) {
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, true))) {
           setOpenClawNativeUnavailable(
             res,
             503,
@@ -3668,7 +3790,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           )
           return
         }
-        const sessionKey = await (await isNativeOpenClawReady(false, false)
+        const sessionKey = await (await isNativeOpenClawReady(false, true)
           ? createIndependentOpenClawSession(currentSessionKey, label)
           : createLightweightSession(label, currentSessionKey))
         setJson(res, 200, { sessionKey })
@@ -3678,7 +3800,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/reset') {
         const payload = asRecord(await readJsonBody(req))
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
-        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, false))) {
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, true))) {
           setOpenClawNativeUnavailable(
             res,
             503,
@@ -3687,7 +3809,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           )
           return
         }
-        const sessionKey = await (await isNativeOpenClawReady(false, false)
+        const sessionKey = await (await isNativeOpenClawReady(false, true)
           ? resetCurrentOpenClawSession(currentSessionKey)
           : resetLightweightSession(currentSessionKey))
         setJson(res, 200, { sessionKey })
@@ -3702,7 +3824,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey or label' })
           return
         }
-        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, false))) {
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, true))) {
           setOpenClawNativeUnavailable(
             res,
             503,
@@ -3711,7 +3833,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           )
           return
         }
-        if (await isNativeOpenClawReady(false, false)) {
+        if (await isNativeOpenClawReady(false, true)) {
           await runOpenClawGatewayCall('sessions.patch', {
             key: sessionKey,
             label,
@@ -3730,7 +3852,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Missing sessionKey' })
           return
         }
-        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, false))) {
+        if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady(false, true))) {
           setOpenClawNativeUnavailable(
             res,
             503,
@@ -3739,7 +3861,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           )
           return
         }
-        if (await isNativeOpenClawReady(false, false)) {
+        if (await isNativeOpenClawReady(false, true)) {
           await runOpenClawGatewayCall('sessions.delete', {
             key: sessionKey,
             deleteTranscript: true,

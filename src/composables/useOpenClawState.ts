@@ -39,6 +39,7 @@ const OPENCLAW_AUTO_HEARTBEAT_AFTER_MS = 120_000
 const OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS = 90_000
 const OPENCLAW_WATCHDOG_SUSPECT_AFTER_MS = 75_000
 const OPENCLAW_WATCHDOG_TRIGGER_AFTER_MS = 120_000
+const OPENCLAW_FRONTEND_AUTO_HEARTBEAT_ENABLED = false
 
 type OptimisticOpenClawMessage = UiMessage & {
   createdAtMs: number
@@ -871,6 +872,7 @@ export function useOpenClawState() {
       setPendingRunStatus('aborted')
       pendingRunStartedAtMs = 0
       clearAwaitingAssistant(sessionKey)
+      lastAutoHeartbeatAtMs = 0
       await refreshHistory({ silent: true })
       await refreshSessions(sessionKey)
       await refreshHealth()
@@ -927,6 +929,7 @@ export function useOpenClawState() {
         setPendingRunStatus('')
         pendingRunStartedAtMs = 0
         clearAwaitingAssistant(selectedSessionKey.value.trim())
+        lastAutoHeartbeatAtMs = 0
         await refreshHistory({ silent: true })
       } else {
         const status = normalizedStatus
@@ -934,20 +937,21 @@ export function useOpenClawState() {
         const fallbackWaitingSince = getAwaitingAssistantSince(selectedSessionKey.value.trim())
         const waitingSince = pendingRunStartedAtMs > 0 ? pendingRunStartedAtMs : fallbackWaitingSince
         const pendingAgeMs = waitingSince > 0 ? nowMs - waitingSince : 0
-        const shouldAutoHeartbeat = (
+        const shouldAutoHeartbeat = OPENCLAW_FRONTEND_AUTO_HEARTBEAT_ENABLED &&
           (
-            status === 'running' ||
-            status === 'reconnecting' ||
-            status === 'unknown' ||
-            status === 'submitted' ||
-            status === 'failed' ||
-            status === 'error'
-          ) &&
-          pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
-          nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
-          !heartbeatTriggering.value &&
-          !abortingRun.value
-        )
+            (
+              status === 'running' ||
+              status === 'reconnecting' ||
+              status === 'unknown' ||
+              status === 'submitted' ||
+              status === 'failed' ||
+              status === 'error'
+            ) &&
+            pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
+            nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
+            !heartbeatTriggering.value &&
+            !abortingRun.value
+          )
         if (shouldAutoHeartbeat) {
           lastAutoHeartbeatAtMs = nowMs
           void triggerHeartbeatNow().catch(() => {
@@ -973,12 +977,13 @@ export function useOpenClawState() {
 
     const nowMs = Date.now()
     const pendingAgeMs = nowMs - awaitingSince
-    const shouldAutoHeartbeat = (
-      pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
-      nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
-      !heartbeatTriggering.value &&
-      !abortingRun.value
-    )
+    const shouldAutoHeartbeat = OPENCLAW_FRONTEND_AUTO_HEARTBEAT_ENABLED &&
+      (
+        pendingAgeMs >= OPENCLAW_AUTO_HEARTBEAT_AFTER_MS &&
+        nowMs - lastAutoHeartbeatAtMs >= OPENCLAW_AUTO_HEARTBEAT_COOLDOWN_MS &&
+        !heartbeatTriggering.value &&
+        !abortingRun.value
+      )
     if (!shouldAutoHeartbeat) return
     lastAutoHeartbeatAtMs = nowMs
     void triggerHeartbeatNow().catch(() => {

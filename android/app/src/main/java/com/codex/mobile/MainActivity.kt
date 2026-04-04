@@ -73,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     private val gatewayStatusHandler = Handler(Looper.getMainLooper())
     private var gatewayStatusMonitorStarted = false
     private var gatewayConnected = false
+    private var gatewayStatusNegativeStreak = 0
     private var gatewayStatusChecking = false
     private var pendingLaunchUrl: String? = null
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
@@ -1102,6 +1103,7 @@ class MainActivity : AppCompatActivity() {
         if (!isOpenClawNewChatUrl(currentUrl)) return
 
         val sessionKey = extractSessionFromCurrentUrl()?.trim().orEmpty()
+        if (sessionKey.isEmpty()) return
 
         if (System.currentTimeMillis() < openClawRunWatchdogSuppressUntilMs) return
 
@@ -1125,6 +1127,7 @@ class MainActivity : AppCompatActivity() {
                 val runId = statusPayload.optString("runId", "").trim()
                 val resolvedSessionKey = statusPayload.optString("sessionKey", "").trim()
                 val runStatus = statusPayload.optString("status", "").trim().lowercase()
+                val runCompleted = statusPayload.optBoolean("completed", false)
                 val staleMs = statusPayload.optLong("staleMs", -1L)
                 val recommendAction = statusPayload.optString("recommendAction", "").trim()
 
@@ -1132,7 +1135,7 @@ class MainActivity : AppCompatActivity() {
                     openClawRunWatchdogLastRunId = runId
                     openClawRunWatchdogSuppressUntilMs = 0L
                 }
-                if (!activeRun) {
+                if (!activeRun || runCompleted) {
                     if (runStatus == "aborted") {
                         openClawRunWatchdogSuppressUntilMs =
                             System.currentTimeMillis() + OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS
@@ -1173,8 +1176,9 @@ class MainActivity : AppCompatActivity() {
     private fun refreshGatewayStatusAsync(announce: Boolean) {
         if (gatewayStatusChecking) return
         gatewayStatusChecking = true
+        val previousConnected = gatewayConnected
         Thread {
-            val connected = try {
+            var connected = try {
                 val payload = LocalBridgeClients.callOpenClawApi(
                     path = "/openclaw-api/gateway/status",
                     method = "GET",
@@ -1186,9 +1190,29 @@ class MainActivity : AppCompatActivity() {
                 Log.w(TAG, "Gateway status API check failed: ${error.message}")
                 false
             }
+            if (!connected) {
+                try {
+                    if (serverManager.isOpenClawGatewayResponsive()) {
+                        connected = true
+                    }
+                } catch (error: Exception) {
+                    Log.w(TAG, "Direct gateway responsiveness check failed: ${error.message}")
+                }
+            }
             runOnUiThread {
                 gatewayStatusChecking = false
-                applyGatewayConnectedState(connected, announce)
+                if (connected) {
+                    gatewayStatusNegativeStreak = 0
+                    applyGatewayConnectedState(true, announce)
+                    return@runOnUiThread
+                }
+                gatewayStatusNegativeStreak += 1
+                val allowNegativeUpdate = previousConnected || gatewayStatusNegativeStreak >= 2
+                if (allowNegativeUpdate) {
+                    applyGatewayConnectedState(false, announce)
+                } else {
+                    Log.d(TAG, "Suppressing first transient gateway-disconnected state during startup")
+                }
             }
         }.start()
     }
