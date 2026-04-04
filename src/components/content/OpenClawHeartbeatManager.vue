@@ -22,7 +22,7 @@
             type="button"
             class="heartbeat-manager-button"
             :disabled="saving"
-            @click="enabled = !enabled"
+            @click="toggleEnabled"
           >
             {{ enabled ? '关闭心跳' : '开启心跳' }}
           </button>
@@ -44,29 +44,13 @@
             class="heartbeat-manager-button"
             :class="{ 'is-active': every === item }"
             :disabled="saving"
-            @click="every = item"
+            @click="applyInterval(item)"
           >
             {{ item }}
           </button>
         </div>
 
         <div class="heartbeat-manager-row">
-          <button
-            type="button"
-            class="heartbeat-manager-button"
-            :disabled="saving"
-            @click="saveAll(false)"
-          >
-            {{ saving ? '保存中…' : '保存设置' }}
-          </button>
-          <button
-            type="button"
-            class="heartbeat-manager-button"
-            :disabled="saving"
-            @click="saveAll(true)"
-          >
-            {{ saving ? '处理中…' : '保存并重启网关' }}
-          </button>
           <button
             type="button"
             class="heartbeat-manager-button"
@@ -155,17 +139,9 @@
               type="button"
               class="heartbeat-manager-button"
               :disabled="saving"
-              @click="saveProfileForm"
+              @click="onSaveProfileForm"
             >
               保存模板
-            </button>
-            <button
-              type="button"
-              class="heartbeat-manager-button"
-              :disabled="saving"
-              @click="saveAll(false)"
-            >
-              保存全部
             </button>
           </div>
         </div>
@@ -271,6 +247,7 @@ async function loadConfig(): Promise<void> {
 
 function openEditor(): void {
   editorOpen.value = true
+  triggerHapticFeedback()
   if (!activeProfileId.value && profiles.value[0]) {
     activeProfileId.value = profiles.value[0].id
   }
@@ -296,28 +273,39 @@ function startEdit(profileId: string): void {
   editingDocument.value = row.document
 }
 
-function selectProfile(profileId: string): void {
-  if (!profiles.value.some((row) => row.id === profileId)) return
-  activeProfileId.value = profileId
-  startEdit(profileId)
-  noticeText.value = '已切换当前模板，请记得保存设置。'
+function triggerHapticFeedback(): void {
+  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') return
+  navigator.vibrate(12)
 }
 
-function saveProfileForm(): void {
+function cloneProfiles(rows: OpenClawHeartbeatProfile[]): OpenClawHeartbeatProfile[] {
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    prompt: row.prompt,
+    document: row.document,
+    updatedAtMs: row.updatedAtMs,
+  }))
+}
+
+function buildEditedProfilePayload(): {
+  profiles: OpenClawHeartbeatProfile[]
+  activeProfileId: string
+} | null {
   const name = editingName.value.trim()
   const prompt = editingPrompt.value.trim()
   const documentText = editingDocument.value.trim()
   if (!name) {
     errorText.value = '模板名称不能为空'
-    return
+    return null
   }
   if (!prompt) {
     errorText.value = '心跳提示词内容不能为空'
-    return
+    return null
   }
   if (!documentText) {
     errorText.value = 'HEARTBEAT.md 内容不能为空'
-    return
+    return null
   }
 
   const now = Date.now()
@@ -330,74 +318,143 @@ function saveProfileForm(): void {
     updatedAtMs: now,
   }
 
-  const index = profiles.value.findIndex((row) => row.id === profileId)
+  const nextProfiles = cloneProfiles(profiles.value)
+  const index = nextProfiles.findIndex((row) => row.id === profileId)
   if (index >= 0) {
-    const rows = [...profiles.value]
-    rows[index] = next
-    profiles.value = rows
+    nextProfiles[index] = next
   } else {
-    profiles.value = [...profiles.value, next]
+    nextProfiles.push(next)
   }
-  activeProfileId.value = profileId
-  editingProfileId.value = profileId
-  errorText.value = ''
-  noticeText.value = '模板已更新，请点击保存设置生效。'
+  return {
+    profiles: nextProfiles,
+    activeProfileId: profileId,
+  }
 }
 
-function removeProfile(profileId: string): void {
-  if (profiles.value.length <= 1) {
-    errorText.value = '至少需要保留一个模板'
-    return
-  }
-  profiles.value = profiles.value.filter((row) => row.id !== profileId)
-  if (!profiles.value.some((row) => row.id === activeProfileId.value)) {
-    activeProfileId.value = profiles.value[0]?.id || ''
-  }
-  startEdit(activeProfileId.value)
-  noticeText.value = '模板已删除，请点击保存设置生效。'
-}
-
-async function saveAll(restartGateway: boolean): Promise<void> {
-  if (saving.value) return
+async function applyConfig(
+  next: {
+    enabled?: boolean
+    every?: string
+    activeProfileId?: string
+    profiles?: OpenClawHeartbeatProfile[]
+  },
+  successNotice: string,
+): Promise<boolean> {
+  if (saving.value) return false
   errorText.value = ''
   noticeText.value = ''
-  ensureAtLeastOneProfile()
-  if (!intervalOptions.includes(every.value)) {
-    errorText.value = '请选择有效的心跳间隔'
-    return
+  const nextProfiles = normalizeProfiles(next.profiles ? cloneProfiles(next.profiles) : cloneProfiles(profiles.value))
+  if (nextProfiles.length === 0) {
+    errorText.value = '心跳模板为空，请至少保留一个模板'
+    return false
   }
-  if (!profiles.value.some((row) => row.id === activeProfileId.value)) {
+  const nextEnabled = next.enabled ?? enabled.value
+  const nextEvery = next.every ?? every.value
+  if (!intervalOptions.includes(nextEvery)) {
+    errorText.value = '请选择有效的心跳间隔'
+    return false
+  }
+  let nextActiveProfileId = (next.activeProfileId ?? activeProfileId.value).trim()
+  if (!nextActiveProfileId || !nextProfiles.some((row) => row.id === nextActiveProfileId)) {
+    nextActiveProfileId = nextProfiles[0].id
+  }
+  if (!nextActiveProfileId) {
     errorText.value = '请先选择有效模板'
-    return
+    return false
   }
 
   saving.value = true
   try {
     const response = await saveOpenClawHeartbeatConfig({
-      enabled: enabled.value,
-      every: every.value,
-      activeProfileId: activeProfileId.value,
-      profiles: profiles.value,
-      restartGateway,
+      enabled: nextEnabled,
+      every: nextEvery,
+      activeProfileId: nextActiveProfileId,
+      profiles: nextProfiles,
     })
     if (!response.ok) {
-      throw new Error('保存失败：网关未确认配置更新')
+      throw new Error(response.applyDetail || '心跳配置保存失败：网关未确认配置更新')
     }
     enabled.value = response.enabled
     every.value = response.every
-    activeProfileId.value = response.activeProfileId
-    noticeText.value = restartGateway
-      ? (response.restartTriggered ? '已保存并请求重启网关。' : `已保存，但网关重启未确认成功：${response.restartOutput || '请手动重启网关'}`)
-      : '已保存心跳设置，若需立即生效请点击“保存并重启网关”。'
-    await loadConfig()
+    profiles.value = nextProfiles
+    activeProfileId.value = response.activeProfileId || nextActiveProfileId
+    editingProfileId.value = activeProfileId.value
+    startEdit(activeProfileId.value)
+    noticeText.value = successNotice
+    return true
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '保存心跳配置失败'
+    errorText.value = error instanceof Error ? error.message : '应用心跳配置失败'
+    await loadConfig()
+    return false
   } finally {
     saving.value = false
   }
 }
 
+async function toggleEnabled(): Promise<void> {
+  const nextEnabled = !enabled.value
+  const ok = await applyConfig(
+    { enabled: nextEnabled },
+    nextEnabled ? '心跳已开启并立即生效。' : '心跳已关闭并立即生效。',
+  )
+  if (ok) triggerHapticFeedback()
+}
+
+async function applyInterval(interval: string): Promise<void> {
+  if (!intervalOptions.includes(interval)) return
+  const ok = await applyConfig(
+    { every: interval },
+    `心跳间隔已切换为 ${interval} 并立即生效。`,
+  )
+  if (ok) triggerHapticFeedback()
+}
+
+async function selectProfile(profileId: string): Promise<void> {
+  if (!profiles.value.some((row) => row.id === profileId)) return
+  const ok = await applyConfig(
+    { activeProfileId: profileId },
+    '心跳模板已切换并立即生效。',
+  )
+  if (ok) triggerHapticFeedback()
+}
+
+async function onSaveProfileForm(): Promise<void> {
+  const payload = buildEditedProfilePayload()
+  if (!payload) return
+  const ok = await applyConfig(
+    {
+      profiles: payload.profiles,
+      activeProfileId: payload.activeProfileId,
+    },
+    '模板已保存并立即应用。',
+  )
+  if (!ok) return
+  editingProfileId.value = payload.activeProfileId
+  startEdit(payload.activeProfileId)
+  triggerHapticFeedback()
+}
+
+async function removeProfile(profileId: string): Promise<void> {
+  if (profiles.value.length <= 1) {
+    errorText.value = '至少需要保留一个模板'
+    return
+  }
+  const nextProfiles = profiles.value.filter((row) => row.id !== profileId)
+  const nextActive = nextProfiles.some((row) => row.id === activeProfileId.value)
+    ? activeProfileId.value
+    : (nextProfiles[0]?.id || '')
+  const ok = await applyConfig(
+    {
+      profiles: nextProfiles,
+      activeProfileId: nextActive,
+    },
+    '模板已删除并立即生效。',
+  )
+  if (ok) triggerHapticFeedback()
+}
+
 onMounted(() => {
+  triggerHapticFeedback()
   void loadConfig()
 })
 </script>

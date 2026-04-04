@@ -19,6 +19,7 @@
           type="button"
           :aria-label="heartbeatLongPressHint || heartbeatLabel"
           :disabled="!sessionKey || heartbeatDisabled"
+          @contextmenu.prevent
           @pointerdown="onHeartbeatPressStart"
           @pointerup="onHeartbeatPressEnd"
           @pointerleave="onHeartbeatPressEnd"
@@ -183,6 +184,11 @@ let heartbeatPressTimer: number | null = null
 
 const HEARTBEAT_LONG_PRESS_MS = 620
 
+function triggerHapticFeedback(): void {
+  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') return
+  navigator.vibrate(12)
+}
+
 function moveCursorToEnd(): void {
   const input = composerInputRef.value
   if (!input) return
@@ -344,14 +350,16 @@ function clearHeartbeatPressTimer(): void {
   heartbeatPressTimer = null
 }
 
-function onHeartbeatPressStart(): void {
+function onHeartbeatPressStart(event: PointerEvent): void {
   if (!props.sessionKey || props.heartbeatDisabled) return
+  event.preventDefault()
   clearHeartbeatPressTimer()
   heartbeatLongPressTriggered.value = false
   if (typeof window === 'undefined') return
   heartbeatPressTimer = window.setTimeout(() => {
     heartbeatPressTimer = null
     heartbeatLongPressTriggered.value = true
+    triggerHapticFeedback()
     emit('trigger-heartbeat')
   }, HEARTBEAT_LONG_PRESS_MS)
 }
@@ -367,6 +375,7 @@ function onHeartbeatButtonClick(event: MouseEvent): void {
     event.preventDefault()
     return
   }
+  triggerHapticFeedback()
   emit('open-heartbeat-manager')
 }
 
@@ -446,6 +455,10 @@ onBeforeUnmount(() => {
 
 .openclaw-composer-action {
   @apply shrink-0 inline-flex h-9 items-center justify-center rounded-full border border-zinc-300 bg-white px-3 text-xs text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
 }
 
 .openclaw-composer-attach-wrap {

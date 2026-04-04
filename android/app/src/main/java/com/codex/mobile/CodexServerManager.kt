@@ -1456,6 +1456,10 @@ EOF
         if (vector.has("extensionPath")) {
             vector.remove("extensionPath")
         }
+        val tools = ensureObject(root, "tools")
+        val webTools = ensureObject(tools, "web")
+        val webSearch = ensureObject(webTools, "search")
+        webSearch.put("enabled", false)
 
         ensureAnyClawSearchPlugin(paths.homeDir)
         ensureAnyClawGithubPlugin(paths.homeDir)
@@ -1472,7 +1476,6 @@ EOF
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
         if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
-        if (!searchSuiteConfig.has("enableTavilySearch")) searchSuiteConfig.put("enableTavilySearch", false)
         if (!searchSuiteConfig.has("tavilyBaseUrl")) searchSuiteConfig.put("tavilyBaseUrl", "https://api.tavily.com/search")
         val configuredUa = searchSuiteConfig.optString("userAgent", "").trim()
         if (configuredUa.isEmpty() || configuredUa.startsWith("AnyClawSearchSuite/1.")) {

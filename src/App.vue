@@ -1050,6 +1050,13 @@ async function submitFirstMessageForNewThread(text: string): Promise<void> {
   @apply h-full min-h-0 w-full flex flex-col overflow-y-hidden overflow-x-visible bg-white;
 }
 
+.content-root button {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+
 .sidebar-thread-controls-host {
   @apply mt-1 -translate-y-px px-2 pb-1;
 }
