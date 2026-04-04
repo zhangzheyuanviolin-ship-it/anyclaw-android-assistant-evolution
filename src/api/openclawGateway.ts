@@ -468,23 +468,24 @@ export async function saveOpenClawHeartbeatConfig(request: {
   every: string
   activeProfileId: string
   profiles: OpenClawHeartbeatProfile[]
+  restartGateway?: boolean
 }): Promise<{
   ok: boolean
+  restartTriggered: boolean
+  restartOutput: string
   enabled: boolean
   every: string
   activeProfileId: string
-  statusSource: string
-  applyAttempts: number
-  applyDetail: string
+  restartRequired: boolean
 }> {
   const payload = await requestOpenClaw<{
     ok?: boolean
+    restartTriggered?: boolean
+    restartOutput?: string
     enabled?: boolean
     every?: string
     activeProfileId?: string
-    statusSource?: string
-    applyAttempts?: number
-    applyDetail?: string
+    restartRequired?: boolean
   }>(
     '/openclaw-api/heartbeat/config',
     {
@@ -495,20 +496,21 @@ export async function saveOpenClawHeartbeatConfig(request: {
         every: request.every.trim(),
         activeProfileId: request.activeProfileId.trim(),
         profiles: request.profiles,
+        restartGateway: request.restartGateway === true,
       }),
     },
     'Failed to save heartbeat configuration',
-    45_000,
+    30_000,
   )
 
   return {
     ok: readBoolean(payload?.ok),
+    restartTriggered: readBoolean(payload?.restartTriggered),
+    restartOutput: readString(payload?.restartOutput),
     enabled: readBoolean(payload?.enabled),
     every: readString(payload?.every).trim() || request.every.trim(),
     activeProfileId: readString(payload?.activeProfileId).trim() || request.activeProfileId.trim(),
-    statusSource: readString(payload?.statusSource).trim() || 'unknown',
-    applyAttempts: readNumber(payload?.applyAttempts),
-    applyDetail: readString(payload?.applyDetail),
+    restartRequired: readBoolean(payload?.restartRequired),
   }
 }
 

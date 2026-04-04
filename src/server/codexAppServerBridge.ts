@@ -292,18 +292,6 @@ async function writeOpenClawConfigRoot(root: Record<string, unknown>): Promise<v
   await writeFile(OPENCLAW_CONFIG_PATH, `${JSON.stringify(root, null, 2)}\n`, 'utf8')
 }
 
-function resolveGatewayCliAuthArgs(configRoot: Record<string, unknown>): {
-  token: string
-  url: string
-} {
-  const gateway = asRecord(configRoot.gateway) ?? {}
-  const auth = asRecord(gateway.auth) ?? {}
-  const remote = asRecord(gateway.remote) ?? {}
-  const token = normalizeText(auth.token) || normalizeText(remote.token)
-  const url = normalizeText(remote.url)
-  return { token, url }
-}
-
 async function readHeartbeatDocumentFromDisk(): Promise<string> {
   try {
     const raw = await readFile(OPENCLAW_HEARTBEAT_DOC_PATH, 'utf8')
@@ -591,19 +579,12 @@ async function runOpenClawGatewayCall(
   }
 
   const serializedParams = JSON.stringify(params ?? {})
-  const configRoot = await readOpenClawConfigRoot()
-  const authArgs = resolveGatewayCliAuthArgs(configRoot)
-  const tokenArg = authArgs.token ? ` --token ${shellQuote(authArgs.token)}` : ''
-  const urlArg = authArgs.url ? ` --url ${shellQuote(authArgs.url)}` : ''
   const command =
-    `openclaw gateway call ${normalizedMethod}${urlArg}${tokenArg} --json --params ${shellQuote(serializedParams)}`
+    `openclaw gateway call ${normalizedMethod} --json --params ${shellQuote(serializedParams)}`
 
   const runCommandOnce = () =>
     new Promise<string>((resolve, reject) => {
       const env = { ...process.env }
-      if (authArgs.token && !env.OPENCLAW_GATEWAY_TOKEN) {
-        env.OPENCLAW_GATEWAY_TOKEN = authArgs.token
-      }
       if (prefixBin) {
         const currentPath = typeof env.PATH === 'string' ? env.PATH : ''
         if (!currentPath.split(':').includes(prefixBin)) {
@@ -812,170 +793,6 @@ function findHeartbeatCronJob(cronListResult: unknown): {
     }
   }
   return null
-}
-
-function heartbeatEveryToMs(every: string): number {
-  const normalized = normalizeHeartbeatEvery(every)
-  const match = normalized.match(/^(\d+)([mh])$/u)
-  if (!match) return 20 * 60_000
-  const value = Number(match[1] || 0)
-  if (!Number.isFinite(value) || value <= 0) return 20 * 60_000
-  return match[2] === 'h' ? value * 60 * 60_000 : value * 60_000
-}
-
-type HeartbeatCronSnapshot = {
-  id: string
-  name: string
-  enabled: boolean
-  everyMs: number
-  prompt: string
-}
-
-function readHeartbeatCronSnapshot(cronListResult: unknown): HeartbeatCronSnapshot | null {
-  const record = asRecord(cronListResult) ?? {}
-  const rows = Array.isArray(record.jobs) ? record.jobs : []
-  let candidate: HeartbeatCronSnapshot | null = null
-  for (const row of rows) {
-    const item = asRecord(row)
-    if (!item) continue
-    const id = extractCronJobId(item)
-    if (!id) continue
-    const name = normalizeText(item.name)
-    const enabled = item.enabled === true
-    const schedule = asRecord(item.schedule)
-    const payload = asRecord(item.payload)
-    const everyMs = typeof schedule?.everyMs === 'number' && Number.isFinite(schedule.everyMs)
-      ? Math.max(0, Math.floor(schedule.everyMs))
-      : 0
-    const prompt = normalizeText(payload?.text)
-    const snapshot: HeartbeatCronSnapshot = {
-      id,
-      name: name || OPENCLAW_HEARTBEAT_JOB_NAME,
-      enabled,
-      everyMs,
-      prompt,
-    }
-    if (name === OPENCLAW_HEARTBEAT_JOB_NAME) {
-      return snapshot
-    }
-    if (!candidate && name.toLowerCase().includes('heartbeat')) {
-      candidate = snapshot
-    }
-  }
-  return candidate
-}
-
-async function applyHeartbeatRuntimeState(
-  state: HeartbeatManagerState,
-  prompt: string,
-): Promise<{
-  ok: boolean
-  attempts: number
-  detail: string
-}> {
-  const expectedEveryMs = heartbeatEveryToMs(state.every)
-  let lastError = ''
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const gatewayReady = await isNativeOpenClawReady(attempt > 1)
-      if (!gatewayReady) {
-        throw new Error('OpenClaw gateway unavailable')
-      }
-
-      const beforeCron = await runOpenClawGatewayCall(
-        'cron.list',
-        { includeDisabled: true, limit: 200, offset: 0 },
-        20_000,
-      )
-      const beforeSnapshot = readHeartbeatCronSnapshot(beforeCron)
-
-      if (state.enabled) {
-        if (beforeSnapshot) {
-          await runOpenClawGatewayCall(
-            'cron.edit',
-            {
-              id: beforeSnapshot.id,
-              every: state.every,
-              systemEvent: prompt,
-              enable: true,
-            },
-            22_000,
-          )
-        } else {
-          await runOpenClawGatewayCall(
-            'cron.add',
-            {
-              name: OPENCLAW_HEARTBEAT_JOB_NAME,
-              every: state.every,
-              systemEvent: prompt,
-              wake: 'now',
-            },
-            22_000,
-          )
-        }
-        const hbEnable = await runShellCommand('openclaw system heartbeat enable --json')
-        if (hbEnable.exitCode !== 0) {
-          throw new Error(`heartbeat_enable_failed: ${hbEnable.output}`)
-        }
-      } else {
-        if (beforeSnapshot) {
-          await runOpenClawGatewayCall(
-            'cron.disable',
-            { id: beforeSnapshot.id },
-            20_000,
-          )
-        }
-        const hbDisable = await runShellCommand('openclaw system heartbeat disable --json')
-        if (hbDisable.exitCode !== 0) {
-          throw new Error(`heartbeat_disable_failed: ${hbDisable.output}`)
-        }
-      }
-
-      const afterCron = await runOpenClawGatewayCall(
-        'cron.list',
-        { includeDisabled: true, limit: 200, offset: 0 },
-        20_000,
-      )
-      const afterSnapshot = readHeartbeatCronSnapshot(afterCron)
-
-      if (state.enabled) {
-        if (!afterSnapshot) {
-          throw new Error('heartbeat_job_missing_after_apply')
-        }
-        if (!afterSnapshot.enabled) {
-          throw new Error('heartbeat_job_not_enabled_after_apply')
-        }
-        if (afterSnapshot.everyMs > 0 && afterSnapshot.everyMs !== expectedEveryMs) {
-          throw new Error(`heartbeat_interval_mismatch:${afterSnapshot.everyMs}`)
-        }
-        const expectedPrompt = normalizeText(prompt)
-        const actualPrompt = normalizeText(afterSnapshot.prompt)
-        if (expectedPrompt.length > 0 && actualPrompt.length > 0 && actualPrompt !== expectedPrompt) {
-          throw new Error('heartbeat_prompt_mismatch_after_apply')
-        }
-      } else if (afterSnapshot && afterSnapshot.enabled) {
-        throw new Error('heartbeat_job_still_enabled_after_disable')
-      }
-
-      return {
-        ok: true,
-        attempts: attempt,
-        detail: '',
-      }
-    } catch (error) {
-      lastError = getErrorMessage(error, 'runtime_apply_failed')
-      invalidateOpenClawNativeReadyCache()
-      if (attempt < 3) {
-        await sleepMs(300 + attempt * 500)
-      }
-    }
-  }
-
-  return {
-    ok: false,
-    attempts: 3,
-    detail: lastError || 'runtime_apply_failed',
-  }
 }
 
 async function resolveHeartbeatPromptForTrigger(): Promise<string> {
@@ -3189,6 +3006,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const enabled = payload?.enabled === true
         const every = normalizeHeartbeatEvery(payload?.every)
+        const restartGateway = payload?.restartGateway === true
         const requestedActiveProfileId = normalizeText(payload?.activeProfileId)
         const rawProfiles = Array.isArray(payload?.profiles) ? payload.profiles : []
         const parsedProfiles: HeartbeatManagerProfile[] = []
@@ -3218,31 +3036,76 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           const agents = ensureRecord(root, 'agents')
           const defaults = ensureRecord(agents, 'defaults')
           const heartbeat = ensureRecord(defaults, 'heartbeat')
-          const heartbeatPrompt = normalizeText(activeProfile.prompt) || OPENCLAW_HEARTBEAT_DEFAULT_PROMPT
           if (Object.prototype.hasOwnProperty.call(heartbeat, 'enabled')) {
             delete heartbeat.enabled
           }
           heartbeat.every = every
           heartbeat.target = normalizeText(heartbeat.target) || 'none'
-          heartbeat.prompt = heartbeatPrompt
+          heartbeat.prompt = normalizeText(activeProfile.prompt) || OPENCLAW_HEARTBEAT_DEFAULT_PROMPT
 
           await writeOpenClawConfigRoot(root)
           await writeHeartbeatDocumentToDisk(activeProfile.document)
           await writeHeartbeatStateToDisk(nextState)
 
-          const applyResult = await applyHeartbeatRuntimeState(nextState, heartbeatPrompt)
-          if (!applyResult.ok) {
-            setJson(res, 502, {
-              ok: false,
-              error: `Heartbeat apply failed: ${applyResult.detail}`,
-              enabled: nextState.enabled,
-              every: nextState.every,
-              activeProfileId: nextState.activeProfileId,
-              statusSource: 'runtime-apply-failed',
-              applyAttempts: applyResult.attempts,
-              applyDetail: applyResult.detail,
-            })
-            return
+          let runtimeApplyError = ''
+          try {
+            if (await isNativeOpenClawReady()) {
+              const cronList = await runOpenClawGatewayCall(
+                'cron.list',
+                {
+                  includeDisabled: true,
+                  limit: 200,
+                  offset: 0,
+                },
+                20_000,
+              )
+              const heartbeatJob = findHeartbeatCronJob(cronList)
+              if (enabled) {
+                if (heartbeatJob) {
+                  await runOpenClawGatewayCall(
+                    'cron.edit',
+                    {
+                      id: heartbeatJob.id,
+                      every,
+                      systemEvent: heartbeat.prompt,
+                      enable: true,
+                    },
+                    30_000,
+                  )
+                } else {
+                  await runOpenClawGatewayCall(
+                    'cron.add',
+                    {
+                      name: OPENCLAW_HEARTBEAT_JOB_NAME,
+                      every,
+                      systemEvent: heartbeat.prompt,
+                      wake: 'now',
+                    },
+                    30_000,
+                  )
+                }
+                await runShellCommand('openclaw system heartbeat enable --json')
+              } else {
+                if (heartbeatJob) {
+                  await runOpenClawGatewayCall(
+                    'cron.disable',
+                    { id: heartbeatJob.id },
+                    20_000,
+                  )
+                }
+                await runShellCommand('openclaw system heartbeat disable --json')
+              }
+            }
+          } catch (error) {
+            runtimeApplyError = getErrorMessage(error, 'runtime_apply_failed')
+          }
+
+          let restartTriggered = false
+          let restartOutput = ''
+          if (restartGateway) {
+            const restartResult = await runShellCommand('openclaw gateway restart 2>&1')
+            restartTriggered = restartResult.exitCode === 0
+            restartOutput = restartResult.output
           }
 
           setJson(res, 200, {
@@ -3250,9 +3113,10 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             enabled: nextState.enabled,
             every: nextState.every,
             activeProfileId: nextState.activeProfileId,
-            statusSource: 'runtime-verified',
-            applyAttempts: applyResult.attempts,
-            applyDetail: '',
+            restartTriggered,
+            restartOutput,
+            restartRequired: restartGateway ? !restartTriggered : true,
+            runtimeApplyError,
           })
           return
         } catch (error) {
