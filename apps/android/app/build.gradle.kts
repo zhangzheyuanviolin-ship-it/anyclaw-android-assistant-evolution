@@ -62,7 +62,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.codex.mobile.pocketlobster.test"
+        applicationId = "com.codex.mobile.pocketlobster.beta"
         minSdk = 31
         targetSdk = 36
         versionCode = 2026040801
