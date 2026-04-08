@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 187
-        versionName = "1.0.23-openclaw-watchdog-state-machine-fix"
+        versionCode = 172
+        versionName = "1.0.8-multi-agent-hub-v1"
     }
 
     flavorDimensions += "channel"
@@ -55,11 +55,6 @@ android {
         create("prod") {
             dimension = "channel"
             applicationId = "com.codex.mobile.pocketlobster"
-            resValue("string", "app_name", "\"口袋大龙虾\"")
-        }
-        create("contact") {
-            dimension = "channel"
-            applicationId = "com.codex.mobile.pocketlobster.test"
             resValue("string", "app_name", "\"口袋大龙虾\"")
         }
         create("beta") {

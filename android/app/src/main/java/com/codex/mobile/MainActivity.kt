@@ -33,23 +33,18 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
-import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "CodexMainActivity"
-        private const val OPENCLAW_CHAT_PAGE_PATH = "/openclaw/chat"
-        private const val OPENCLAW_RUN_WATCHDOG_POLL_MS = 7_000L
-        private const val OPENCLAW_RUN_WATCHDOG_SUSPECT_AFTER_MS = 75_000
-        private const val OPENCLAW_RUN_WATCHDOG_TRIGGER_AFTER_MS = 120_000
-        private const val OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS = 90_000L
-        private const val OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS = 60_000L
         const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
         const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.SESSION_KEY"
         const val OPEN_TARGET_CODEX_THREAD = "codex_thread"
         const val OPEN_TARGET_OPENCLAW_SESSION = "openclaw_session"
+        const val OPEN_TARGET_CLAUDE_SESSION = "claude_session"
+        const val OPEN_TARGET_OPENCODE_SESSION = "opencode_session"
     }
 
     private lateinit var webView: WebView
@@ -73,25 +68,11 @@ class MainActivity : AppCompatActivity() {
     private val gatewayStatusHandler = Handler(Looper.getMainLooper())
     private var gatewayStatusMonitorStarted = false
     private var gatewayConnected = false
-    private var gatewayStatusNegativeStreak = 0
     private var gatewayStatusChecking = false
     private var pendingLaunchUrl: String? = null
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
-    private val openClawRunWatchdogHandler = Handler(Looper.getMainLooper())
-    private var openClawRunWatchdogStarted = false
-    private var openClawRunWatchdogInFlight = false
-    private var openClawRunWatchdogInFlightSinceMs = 0L
-    private var openClawRunWatchdogLastHeartbeatAtMs = 0L
-    private var openClawRunWatchdogSuppressUntilMs = 0L
-    private var openClawRunWatchdogLastRunId = ""
-    private val openClawRunWatchdogPollRunnable = object : Runnable {
-        override fun run() {
-            pollOpenClawRunWatchdogAsync()
-            openClawRunWatchdogHandler.postDelayed(this, OPENCLAW_RUN_WATCHDOG_POLL_MS)
-        }
-    }
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var pendingCameraImageUri: Uri? = null
     private val gatewayStatusPollRunnable = object : Runnable {
@@ -214,7 +195,6 @@ class MainActivity : AppCompatActivity() {
         }
         if (setupStarted) {
             startGatewayStatusMonitor()
-            startOpenClawRunWatchdogMonitor()
             val targetUrl = pendingLaunchUrl
             if (targetUrl != null && webView.visibility == View.VISIBLE) {
                 webView.loadUrl(targetUrl)
@@ -226,7 +206,6 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cancelOpenClawWatchdog()
-        stopOpenClawRunWatchdogMonitor()
         stopGatewayStatusMonitor()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
@@ -294,8 +273,6 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 if (!isOpenClawChatUrl(url)) {
                     openClawRecoveryAttempts = 0
-                    openClawRunWatchdogLastRunId = ""
-                    openClawRunWatchdogSuppressUntilMs = 0L
                 }
                 cancelOpenClawWatchdog()
             }
@@ -472,14 +449,10 @@ class MainActivity : AppCompatActivity() {
     private fun isOpenClawChatUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
         val isLegacyControlUi = isLegacyOpenClawControlUiUrl(url)
-        val isNewChatPage = isOpenClawNewChatUrl(url)
+        val isNewChatPage =
+            url.contains(":${CodexServerManager.SERVER_PORT}") &&
+                url.contains("/openclaw/chat")
         return isLegacyControlUi || isNewChatPage
-    }
-
-    private fun isOpenClawNewChatUrl(url: String?): Boolean {
-        if (url.isNullOrBlank()) return false
-        return url.contains(":${CodexServerManager.SERVER_PORT}") &&
-            url.contains(OPENCLAW_CHAT_PAGE_PATH)
     }
 
     private fun isLegacyOpenClawControlUiUrl(url: String?): Boolean {
@@ -752,7 +725,6 @@ class MainActivity : AppCompatActivity() {
             openClawNewChatButton.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
             startGatewayStatusMonitor()
-            startOpenClawRunWatchdogMonitor()
             webView.loadUrl(consumeLaunchUrlOrDefault())
         }
     }
@@ -815,9 +787,13 @@ class MainActivity : AppCompatActivity() {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
                 buildOpenClawChatPageUrl(sessionKey)
             }
+            OPEN_TARGET_CLAUDE_SESSION -> buildOpenClawChatPageUrl(resolveAgentSessionKey("claude-code"))
+            OPEN_TARGET_OPENCODE_SESSION -> buildOpenClawChatPageUrl(resolveAgentSessionKey("opencode"))
             else -> null
         }
     }
+
+    private fun resolveAgentSessionKey(agentId: String): String = "agent:$agentId:node-main"
 
     private fun extractSessionFromCurrentUrl(): String? {
         val current = webView.url ?: return null
@@ -1075,144 +1051,14 @@ class MainActivity : AppCompatActivity() {
         gatewayStatusHandler.removeCallbacks(gatewayStatusPollRunnable)
     }
 
-    private fun startOpenClawRunWatchdogMonitor() {
-        if (openClawRunWatchdogStarted) return
-        openClawRunWatchdogStarted = true
-        openClawRunWatchdogHandler.post(openClawRunWatchdogPollRunnable)
-    }
-
-    private fun stopOpenClawRunWatchdogMonitor() {
-        openClawRunWatchdogStarted = false
-        openClawRunWatchdogInFlight = false
-        openClawRunWatchdogInFlightSinceMs = 0L
-        openClawRunWatchdogHandler.removeCallbacks(openClawRunWatchdogPollRunnable)
-    }
-
-    private fun pollOpenClawRunWatchdogAsync() {
-        if (openClawRunWatchdogInFlight) {
-            val inFlightAgeMs = System.currentTimeMillis() - openClawRunWatchdogInFlightSinceMs
-            if (inFlightAgeMs < OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS) {
-                return
-            }
-            Log.w(TAG, "OpenClaw run watchdog in-flight lock exceeded ${OPENCLAW_RUN_WATCHDOG_IN_FLIGHT_MAX_MS}ms, forcing unlock")
-            openClawRunWatchdogInFlight = false
-            openClawRunWatchdogInFlightSinceMs = 0L
-        }
-
-        val currentUrl = webView.url
-        if (!isOpenClawNewChatUrl(currentUrl)) return
-
-        val sessionKey = extractSessionFromCurrentUrl()?.trim().orEmpty()
-        if (sessionKey.isEmpty()) return
-
-        if (System.currentTimeMillis() < openClawRunWatchdogSuppressUntilMs) return
-
-        openClawRunWatchdogInFlight = true
-        openClawRunWatchdogInFlightSinceMs = System.currentTimeMillis()
-        Thread {
-            try {
-                val statusPayload = LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/watchdog/status",
-                    method = "POST",
-                    body = JSONObject().apply {
-                        put("sessionKey", sessionKey)
-                        put("suspectAfterMs", OPENCLAW_RUN_WATCHDOG_SUSPECT_AFTER_MS)
-                        put("triggerAfterMs", OPENCLAW_RUN_WATCHDOG_TRIGGER_AFTER_MS)
-                    },
-                    connectTimeoutMs = 8_000,
-                    readTimeoutMs = 20_000,
-                )
-
-                val activeRun = statusPayload.optBoolean("activeRun", false)
-                val runId = statusPayload.optString("runId", "").trim()
-                val resolvedSessionKey = statusPayload.optString("sessionKey", "").trim()
-                val runStatus = statusPayload.optString("status", "").trim().lowercase()
-                val runCompleted = statusPayload.optBoolean("completed", false)
-                val staleMs = statusPayload.optLong("staleMs", -1L)
-                val recommendAction = statusPayload.optString("recommendAction", "").trim()
-
-                if (runId.isNotEmpty() && runId != openClawRunWatchdogLastRunId) {
-                    openClawRunWatchdogLastRunId = runId
-                    openClawRunWatchdogSuppressUntilMs = 0L
-                }
-                if (!activeRun || runCompleted) {
-                    if (runStatus == "aborted") {
-                        openClawRunWatchdogSuppressUntilMs =
-                            System.currentTimeMillis() + OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS
-                    }
-                    return@Thread
-                }
-
-                val shouldTriggerHeartbeat =
-                    recommendAction == "trigger_heartbeat" &&
-                        (System.currentTimeMillis() - openClawRunWatchdogLastHeartbeatAtMs >=
-                            OPENCLAW_RUN_WATCHDOG_HEARTBEAT_COOLDOWN_MS)
-                if (!shouldTriggerHeartbeat) return@Thread
-                val heartbeatSessionKey = if (resolvedSessionKey.isNotEmpty()) resolvedSessionKey else sessionKey
-
-                LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/heartbeat/trigger",
-                    method = "POST",
-                    body = JSONObject().apply {
-                        put("sessionKey", heartbeatSessionKey)
-                    },
-                    connectTimeoutMs = 8_000,
-                    readTimeoutMs = 35_000,
-                )
-                openClawRunWatchdogLastHeartbeatAtMs = System.currentTimeMillis()
-                Log.i(
-                    TAG,
-                    "Native run watchdog triggered heartbeat for session=$heartbeatSessionKey runId=$runId staleMs=$staleMs",
-                )
-            } catch (error: Exception) {
-                Log.w(TAG, "OpenClaw native run watchdog poll failed: ${error.message}")
-            } finally {
-                openClawRunWatchdogInFlight = false
-                openClawRunWatchdogInFlightSinceMs = 0L
-            }
-        }.start()
-    }
-
     private fun refreshGatewayStatusAsync(announce: Boolean) {
         if (gatewayStatusChecking) return
         gatewayStatusChecking = true
-        val previousConnected = gatewayConnected
         Thread {
-            var connected = try {
-                val payload = LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/gateway/status",
-                    method = "GET",
-                    connectTimeoutMs = 8_000,
-                    readTimeoutMs = 18_000,
-                )
-                payload.optBoolean("gatewayConnected", false)
-            } catch (error: Exception) {
-                Log.w(TAG, "Gateway status API check failed: ${error.message}")
-                false
-            }
-            if (!connected) {
-                try {
-                    if (serverManager.isOpenClawGatewayResponsive()) {
-                        connected = true
-                    }
-                } catch (error: Exception) {
-                    Log.w(TAG, "Direct gateway responsiveness check failed: ${error.message}")
-                }
-            }
+            val connected = serverManager.isOpenClawGatewayResponsive()
             runOnUiThread {
                 gatewayStatusChecking = false
-                if (connected) {
-                    gatewayStatusNegativeStreak = 0
-                    applyGatewayConnectedState(true, announce)
-                    return@runOnUiThread
-                }
-                gatewayStatusNegativeStreak += 1
-                val allowNegativeUpdate = previousConnected || gatewayStatusNegativeStreak >= 2
-                if (allowNegativeUpdate) {
-                    applyGatewayConnectedState(false, announce)
-                } else {
-                    Log.d(TAG, "Suppressing first transient gateway-disconnected state during startup")
-                }
+                applyGatewayConnectedState(connected, announce)
             }
         }.start()
     }
