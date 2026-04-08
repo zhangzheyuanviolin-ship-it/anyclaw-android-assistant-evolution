@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AnyClaw — OpenClaw + Codex + Claude Code on Android</title>
+<meta name="description" content="OpenClaw + Codex CLI + Claude Code (via Claw Code / OpenClaude) in a single Android APK. Three AI agents, one app, your pocket. No root. No Termux." />
+<meta property="og:title" content="AnyClaw — Claude Code on Android" />
+<meta property="og:description" content="OpenClaw + Codex + Claude Code running natively on Android. Three agents, one APK, zero dependencies." />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://friuns2.github.io/openclaw-android-assistant/" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #08080c;
+    --surface: #0f0f15;
+    --surface-raised: #151520;
+    --border: #1c1c2a;
+    --border-glow: #2a1a10;
+    --text: #e8e4df;
+    --text-dim: #8a8680;
+    --amber: #e8941a;
+    --amber-soft: #c4782a;
+    --crimson: #c93535;
+    --crimson-deep: #8a1f1f;
+    --cream: #f0e6d6;
+    --mono: 'DM Mono', 'SF Mono', monospace;
+    --display: 'Instrument Serif', Georgia, serif;
+    --body: 'Syne', sans-serif;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: var(--body);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--amber); text-decoration: none; transition: color .2s; }
+  a:hover { color: var(--cream); }
+
+  .grain {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: .035;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* ─── HERO ─── */
+  .hero {
+    position: relative;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 4rem 1.5rem;
+    overflow: hidden;
+  }
+
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -30%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 140%;
+    height: 80%;
+    background: radial-gradient(ellipse at center, rgba(232, 148, 26, .06) 0%, rgba(201, 53, 53, .03) 40%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .hero::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--border-glow) 30%, var(--amber-soft) 50%, var(--border-glow) 70%, transparent 100%);
+  }
+
+  .hero-claw {
+    font-size: clamp(4rem, 12vw, 8rem);
+    line-height: 1;
+    margin-bottom: 1rem;
+    animation: float 6s ease-in-out infinite;
+    filter: drop-shadow(0 0 40px rgba(232, 148, 26, .15));
+  }
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-12px); }
+  }
+
+  .hero h1 {
+    font-family: var(--display);
+    font-size: clamp(3.5rem, 10vw, 7rem);
+    font-weight: 400;
+    letter-spacing: -.03em;
+    line-height: .9;
+    color: var(--cream);
+    margin-bottom: .75rem;
+  }
+
+  .hero h1 em {
+    font-style: italic;
+    color: var(--amber);
+  }
+
+  .hero-sub {
+    font-family: var(--mono);
+    font-size: clamp(.75rem, 1.4vw, .9rem);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .2em;
+    margin-bottom: 2.5rem;
+  }
+
+  .hero-desc {
+    max-width: 560px;
+    font-size: clamp(1rem, 2vw, 1.15rem);
+    color: var(--text-dim);
+    margin-bottom: 3rem;
+    line-height: 1.75;
+  }
+
+  .hero-desc strong { color: var(--text); font-weight: 600; }
+
+  .cta-group { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .85rem 2rem;
+    border-radius: 4px;
+    font-family: var(--body);
+    font-weight: 600;
+    font-size: .95rem;
+    letter-spacing: .02em;
+    transition: all .25s ease;
+    cursor: pointer;
+    border: none;
+  }
+
+  .btn-primary {
+    background: var(--amber);
+    color: #080808;
+  }
+  .btn-primary:hover {
+    background: var(--cream);
+    color: #080808;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(232, 148, 26, .25);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover {
+    border-color: var(--amber-soft);
+    color: var(--amber);
+    transform: translateY(-2px);
+  }
+
+  /* ─── SECTION ─── */
+  .section {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 6rem 1.5rem;
+  }
+
+  .section-label {
+    font-family: var(--mono);
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .25em;
+    color: var(--amber-soft);
+    margin-bottom: .75rem;
+  }
+
+  .section h2 {
+    font-family: var(--display);
+    font-size: clamp(2rem, 5vw, 3.2rem);
+    font-weight: 400;
+    color: var(--cream);
+    margin-bottom: 1.5rem;
+    line-height: 1.1;
+  }
+
+  .section h2 em { font-style: italic; color: var(--amber); }
+
+  .section-intro {
+    max-width: 640px;
+    color: var(--text-dim);
+    font-size: 1.05rem;
+    line-height: 1.75;
+    margin-bottom: 3rem;
+  }
+
+  /* ─── FEATURE GRID ─── */
+  .feat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .feat {
+    background: var(--surface);
+    padding: 2rem;
+    transition: background .3s;
+  }
+
+  .feat:hover {
+    background: var(--surface-raised);
+  }
+
+  .feat-icon {
+    font-size: 1.6rem;
+    margin-bottom: .75rem;
+    display: block;
+  }
+
+  .feat h3 {
+    font-family: var(--body);
+    font-size: .95rem;
+    font-weight: 700;
+    margin-bottom: .5rem;
+    color: var(--cream);
+  }
+
+  .feat p {
+    font-size: .85rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  /* ─── ARCH ─── */
+  .arch-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .arch-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+
+  .arch-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+  .arch-dot:nth-child(1) { background: var(--crimson); }
+  .arch-dot:nth-child(2) { background: var(--amber); }
+  .arch-dot:nth-child(3) { background: #22c55e; }
+
+  .arch-body {
+    padding: 1.5rem;
+    overflow-x: auto;
+  }
+
+  .arch-body pre {
+    font-family: var(--mono);
+    font-size: .78rem;
+    line-height: 1.7;
+    color: var(--amber-soft);
+    white-space: pre;
+    margin: 0;
+  }
+
+  .arch-body .hl { color: var(--amber); }
+  .arch-body .dim { color: var(--text-dim); }
+  .arch-body .grn { color: #22c55e; }
+
+  /* ─── STEPS ─── */
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    counter-reset: step;
+  }
+
+  .step {
+    background: var(--surface);
+    padding: 2rem;
+    counter-increment: step;
+    position: relative;
+    transition: background .3s;
+  }
+
+  .step:hover { background: var(--surface-raised); }
+
+  .step::before {
+    content: counter(step, decimal-leading-zero);
+    font-family: var(--mono);
+    font-size: .7rem;
+    color: var(--amber-soft);
+    letter-spacing: .1em;
+    display: block;
+    margin-bottom: .75rem;
+  }
+
+  .step h3 {
+    font-size: .95rem;
+    font-weight: 700;
+    margin-bottom: .4rem;
+    color: var(--cream);
+  }
+
+  .step p {
+    font-size: .85rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  /* ─── QUICK START CODE ─── */
+  .code-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .code-tab {
+    padding: .75rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: .75rem;
+    color: var(--text-dim);
+    letter-spacing: .05em;
+  }
+
+  .code-body {
+    padding: 1.5rem;
+    overflow-x: auto;
+  }
+
+  .code-body code {
+    font-family: var(--mono);
+    font-size: .82rem;
+    line-height: 1.8;
+    color: #22c55e;
+    white-space: pre;
+  }
+  .code-body .cmt { color: var(--text-dim); }
+
+  /* ─── STACK TABLE ─── */
+  .stack-table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .stack-table th,
+  .stack-table td {
+    padding: .85rem 1.25rem;
+    text-align: left;
+    font-size: .88rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .stack-table th {
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: .7rem;
+    text-transform: uppercase;
+    letter-spacing: .15em;
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+
+  .stack-table td { background: var(--surface); }
+  .stack-table tr:hover td { background: var(--surface-raised); }
+  .stack-table td:first-child { font-weight: 600; color: var(--cream); }
+
+  /* ─── RELEASE NOTES ─── */
+  .release-body h3 {
+    font-family: var(--body);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--amber);
+    margin: 1.5rem 0 .5rem;
+  }
+
+  .release-body ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .release-body li {
+    position: relative;
+    padding-left: 1.2em;
+    margin-bottom: .4rem;
+  }
+
+  .release-body li::before {
+    content: '›';
+    position: absolute;
+    left: 0;
+    color: var(--amber-soft);
+    font-weight: 700;
+  }
+
+  .release-body code {
+    font-family: var(--mono);
+    font-size: .82em;
+    color: var(--amber);
+    background: var(--surface);
+    padding: .1em .4em;
+    border-radius: 3px;
+  }
+
+  .release-body a { color: var(--amber); }
+  .release-body a:hover { color: var(--cream); }
+
+  /* ─── DIVIDER ─── */
+  .divider {
+    max-width: 1000px;
+    margin: 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--border) 20%, var(--border-glow) 50%, var(--border) 80%, transparent 100%);
+  }
+
+  /* ─── FOOTER ─── */
+  footer {
+    text-align: center;
+    padding: 5rem 1.5rem 4rem;
+    color: var(--text-dim);
+    font-size: .9rem;
+  }
+
+  footer .tagline {
+    font-family: var(--display);
+    font-size: 1.5rem;
+    font-style: italic;
+    color: var(--amber-soft);
+    margin-bottom: .75rem;
+  }
+
+  footer .sub { font-family: var(--mono); font-size: .75rem; letter-spacing: .1em; }
+
+  footer .links {
+    margin-top: 2rem;
+    display: flex;
+    gap: 2rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  footer .links a {
+    font-family: var(--mono);
+    font-size: .8rem;
+    color: var(--text-dim);
+    letter-spacing: .05em;
+    transition: color .2s;
+  }
+  footer .links a:hover { color: var(--amber); }
+
+  /* ─── ANIMATIONS ─── */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(24px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .fade-in {
+    opacity: 0;
+    animation: fadeUp .7s ease forwards;
+  }
+  .d1 { animation-delay: .1s; }
+  .d2 { animation-delay: .2s; }
+  .d3 { animation-delay: .35s; }
+  .d4 { animation-delay: .5s; }
+  .d5 { animation-delay: .65s; }
+
+  /* ─── RESPONSIVE ─── */
+  @media (max-width: 768px) {
+    .feat-grid { grid-template-columns: 1fr; }
+    .steps { grid-template-columns: 1fr; }
+    .hero { min-height: auto; padding: 6rem 1rem 4rem; }
+    .section { padding: 4rem 1rem; }
+  }
+
+  @media (max-width: 480px) {
+    .cta-group { flex-direction: column; align-items: stretch; }
+    .btn { justify-content: center; }
+  }
+</style>
+</head>
+<body>
+
+<div class="grain"></div>
+
+<!-- ═══════════════ HERO ═══════════════ -->
+<div class="hero">
+  <div class="hero-claw fade-in d1">🦞</div>
+  <h1 class="fade-in d2">Any<em>Claw</em></h1>
+  <p class="hero-sub fade-in d3">OpenClaw + Codex + Claude Code &middot; Android</p>
+  <p class="hero-desc fade-in d4">
+    Three AI coding agents in <strong>one APK</strong>. OpenClaw gateway, Codex CLI,
+    and <strong>Claude Code</strong> (via Claw Code / OpenClaude) &mdash; all running
+    in a full Linux environment on your phone. <strong>No root. No server. No PC.</strong>
+  </p>
+  <div class="cta-group fade-in d5">
+    <a href="https://github.com/friuns2/openclaw-android-assistant/releases/latest/download/app-prod-release.apk" class="btn btn-primary">Download APK</a>
+    <a href="https://play.google.com/store/apps/details?id=gptos.intelligence.assistant&hl=en" class="btn btn-primary" style="background:var(--crimson)">Google Play</a>
+    <a href="https://github.com/friuns2/openclaw-android-assistant" class="btn btn-ghost">GitHub</a>
+    <a href="https://github.com/friuns2/openclaw-android-assistant#quick-start" class="btn btn-ghost">Quick Start</a>
+  </div>
+</div>
+
+<!-- ═══════════════ SCREENSHOTS ═══════════════ -->
+<div class="section" style="text-align:center">
+  <p class="section-label">In action</p>
+  <h2>See it <em>running</em></h2>
+  <div style="display:flex;gap:2rem;justify-content:center;flex-wrap:wrap;margin-top:2rem">
+    <img src="https://raw.githubusercontent.com/friuns2/openclaw-android-assistant/main/screenshots/screenshot.png" alt="OpenClaw Dashboard" style="width:260px;border-radius:12px;border:1px solid var(--border);box-shadow:0 8px 40px rgba(0,0,0,.5)" />
+    <img src="https://raw.githubusercontent.com/friuns2/openclaw-android-assistant/main/screenshots/screenshot2.png" alt="Codex Coding Agent" style="width:260px;border-radius:12px;border:1px solid var(--border);box-shadow:0 8px 40px rgba(0,0,0,.5)" />
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ FEATURES ═══════════════ -->
+<div class="section">
+  <p class="section-label">Capabilities</p>
+  <h2>Three agents, <em>one pocket</em></h2>
+  <p class="section-intro">
+    AnyClaw bundles OpenClaw (personal AI gateway), OpenAI Codex CLI (terminal coding agent),
+    and <strong>Claude Code</strong> (via Claw Code / OpenClaude &mdash; the leaked Claude Code architecture, 48K+ stars)
+    inside a self-contained Android app.
+  </p>
+
+  <div class="feat-grid">
+    <div class="feat">
+      <span class="feat-icon">🦞</span>
+      <h3>OpenClaw Dashboard</h3>
+      <p>Full Control UI &mdash; chat, agents, sessions, skills, Canvas. Runs locally on your device.</p>
+    </div>
+    <div class="feat">
+      <span class="feat-icon">💬</span>
+      <h3>Codex Chat</h3>
+      <p>Conversational coding agent with streaming, reasoning visibility, and multi-thread sessions.</p>
+    </div>
+    <div class="feat">
+      <span class="feat-icon">🦀</span>
+      <h3>Claude Code (OpenClaude)</h3>
+      <p>Full Claw Code agent &mdash; 19 tools, query engine, MCP integration, multi-agent swarms. Claude Code architecture on your phone.</p>
+    </div>
+    <div class="feat">
+      <span class="feat-icon">🐧</span>
+      <h3>Embedded Linux</h3>
+      <p>Complete Termux-derived userland &mdash; sh, apt, Node.js 24, Python, SSL certs. Extracted from APK.</p>
+    </div>
+    <div class="feat">
+      <span class="feat-icon">🔓</span>
+      <h3>Full Auto-Approval</h3>
+      <p>No permission popups. <code style="color:var(--amber);font-family:var(--mono);font-size:.8rem">danger-full-access</code> sandbox mode by default.</p>
+    </div>
+    <div class="feat">
+      <span class="feat-icon">🔋</span>
+      <h3>Background Execution</h3>
+      <p>Foreground service + battery exemption. Keeps running when you switch apps.</p>
+    </div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ ARCHITECTURE ═══════════════ -->
+<div class="section">
+  <p class="section-label">Under the hood</p>
+  <h2>Four layers, <em>one device</em></h2>
+
+  <div class="arch-wrap">
+    <div class="arch-header">
+      <span class="arch-dot"></span>
+      <span class="arch-dot"></span>
+      <span class="arch-dot"></span>
+    </div>
+    <div class="arch-body">
+<pre>
+<span class="dim">┌────────────────────────────────────────────────────────┐</span>
+<span class="dim">│</span>                    <span class="hl">Android APK</span>                         <span class="dim">│</span>
+<span class="dim">│</span>                                                        <span class="dim">│</span>
+<span class="dim">│</span>  <span class="grn">WebView (Vue.js)</span>  ←→  <span class="hl">CodexServerManager</span>              <span class="dim">│</span>
+<span class="dim">│</span>                                                        <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">┌──────────────────────────────────────────────────┐</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>  <span class="grn">codex-web-local</span>   → :18923  (HTTP + Vue UI)    <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>    └─ codex app-server  (Rust/musl, JSON-RPC)    <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>                                                  <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>  <span class="hl">openclaw gateway</span>  → :18789  (WebSocket)         <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>  <span class="hl">openclaw ctrl UI</span>  → :19001  (Static files)      <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>                                                  <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>                                                  <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>  <span class="grn">claw-code agent</span>   → Claude Code (OpenClaude)    <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>                                                  <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">│</span>  proxy.js          → :18924  (CONNECT, DNS/TLS)  <span class="dim">│</span>  <span class="dim">│</span>
+<span class="dim">│</span>  <span class="dim">└──────────────────────────────────────────────────┘</span>  <span class="dim">│</span>
+<span class="dim">└────────────────────────────────────────────────────────┘</span>
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ STARTUP ═══════════════ -->
+<div class="section">
+  <p class="section-label">Boot sequence</p>
+  <h2>From cold start to <em>ready</em></h2>
+
+  <div class="steps">
+    <div class="step">
+      <h3>Battery &amp; Service</h3>
+      <p>Request Doze exemption. Start foreground service with persistent notification.</p>
+    </div>
+    <div class="step">
+      <h3>Bootstrap Extraction</h3>
+      <p>Extract Termux bootstrap zip into app&rsquo;s private storage. Fix hardcoded paths.</p>
+    </div>
+    <div class="step">
+      <h3>Node.js &amp; Toolchain</h3>
+      <p>Install Node.js 24, Python, clang/cmake/make/lld for native module builds.</p>
+    </div>
+    <div class="step">
+      <h3>OpenClaw + koffi</h3>
+      <p>Install OpenClaw globally. Build koffi FFI module from source with Termux toolchain.</p>
+    </div>
+    <div class="step">
+      <h3>Claw Code / OpenClaude</h3>
+      <p>Install Claude Code agent (Claw Code). 19 tools, query engine, MCP, multi-agent swarms.</p>
+    </div>
+    <div class="step">
+      <h3>Codex CLI + Binary</h3>
+      <p>Extract server bundle. Download native Rust binary from npm registry.</p>
+    </div>
+    <div class="step">
+      <h3>Proxy + Auth + Launch</h3>
+      <p>Start CONNECT proxy, OAuth login, gateway, Control UI server, then load WebView.</p>
+    </div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ QUICK START ═══════════════ -->
+<div class="section">
+  <p class="section-label">Get started</p>
+  <h2>Build from <em>source</em></h2>
+
+  <div class="code-card">
+    <div class="code-tab">terminal</div>
+    <div class="code-body">
+<code><span class="cmt"># clone</span>
+git clone https://github.com/friuns2/openclaw-android-assistant.git
+cd openclaw-android-assistant
+
+<span class="cmt"># build frontend</span>
+npm install && npm run build
+
+<span class="cmt"># prepare android</span>
+cd android && bash scripts/download-bootstrap.sh
+
+<span class="cmt"># build + install + launch</span>
+bash scripts/build-server-bundle.sh && ./gradlew assembleDebug \
+  && adb install -r app/build/outputs/apk/debug/app-debug.apk \
+  && adb shell am start -n com.codex.mobile/.MainActivity</code>
+    </div>
+  </div>
+  <p style="margin-top:1.5rem;color:var(--text-dim);font-size:.9rem">
+    Or just <a href="https://github.com/friuns2/openclaw-android-assistant/releases/latest/download/app-prod-release.apk">download the latest APK</a> directly.
+  </p>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ TECH STACK ═══════════════ -->
+<div class="section">
+  <p class="section-label">Stack</p>
+  <h2>What&rsquo;s <em>inside</em></h2>
+
+  <table class="stack-table">
+    <thead><tr><th>Layer</th><th>Technology</th><th>Version</th></tr></thead>
+    <tbody>
+      <tr><td>AI Gateway</td><td>OpenClaw</td><td>2026.2.21</td></tr>
+      <tr><td>AI Agent</td><td>OpenAI Codex CLI</td><td>0.104.0</td></tr>
+      <tr><td>AI Agent</td><td>Claw Code / OpenClaude (Claude Code)</td><td>latest</td></tr>
+      <tr><td>Model</td><td>gpt-5.3-codex (via Codex OAuth)</td><td>&mdash;</td></tr>
+      <tr><td>Runtime</td><td>Node.js (Termux)</td><td>24.13.0</td></tr>
+      <tr><td>Native</td><td>Rust (musl, aarch64)</td><td>&mdash;</td></tr>
+      <tr><td>Frontend</td><td>Vue.js 3 + Vite + Tailwind</td><td>3.x</td></tr>
+      <tr><td>Android</td><td>Kotlin + WebView</td><td>2.1.0</td></tr>
+      <tr><td>Linux</td><td>Termux bootstrap (aarch64)</td><td>&mdash;</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══════════════ RELEASE NOTES ═══════════════ -->
+<div class="section" id="release">
+  <p class="section-label">Latest upstream release</p>
+  <!-- RELEASE_START -->
+  <h2><em>openclaw 2026.4.7</em></h2>
+  <p class="release-date" style="font-family:var(--mono);font-size:.8rem;color:var(--text-dim);margin-bottom:2rem">Released Apr 08, 2026</p>
+  <div class="release-body" style="color:var(--text-dim);font-size:.92rem;line-height:1.75;max-width:800px">
+  <h3>Changes</h3>
+    <ul>
+    <li>CLI/infer: add a first-class `openclaw infer ...` hub for provider-backed inference workflows across model, media, web, and embedding tasks</li>
+    <li>Tools/media generation: auto-fallback across auth-backed image, music, and video providers by default, preserve intent during provider switches, remap size/aspect/resolution/duration hints to the closest supported option, and surface provider capabilities plus mode-aware video-to-video support</li>
+    <li>Memory/wiki: restore the bundled `memory-wiki` stack with plugin, CLI, sync/query/apply tooling, memory-host integration, structured claim/evidence fields, compiled digest retrieval, claim-health linting, contradiction clustering, staleness dashboards, and freshness-weighted search</li>
+    <li>Plugins/webhooks: add a bundled webhook ingress plugin so external automation can create and drive bound TaskFlows through per-route shared-secret endpoints</li>
+    <li>Gateway/sessions: add persisted compaction checkpoints plus Sessions UI branch/restore actions so operators can inspect and recover pre-compaction session state</li>
+    <li>Compaction: add pluggable compaction provider registry so plugins can replace the built-in summarization pipeline. Configure via `agents.defaults.compaction.provider`; falls back to LLM summarization on provider failure</li>
+    <li>Agents/system prompt: add `agents.defaults.systemPromptOverride` for controlled prompt experiments plus heartbeat prompt-section controls so heartbeat runtime behavior can stay enabled without injecting heartbeat instructions every turn</li>
+    <li>Providers/Google: add Gemma 4 model support and keep Google fallback resolution on the requested provider path so native Google Gemma routes work again</li>
+    <li>Providers/Google: preserve explicit thinking-off semantics for Gemma 4 while still enabling Gemma reasoning support in compatibility wrappers</li>
+    <li>Providers/Arcee AI: add a bundled Arcee AI provider plugin with Trinity catalog entries, OpenRouter support, and updated onboarding/auth guidance</li>
+    <li>Providers/Anthropic: restore Claude CLI as the preferred local Anthropic path in onboarding, model-auth guidance, doctor flows, and Docker Claude CLI live lanes again</li>
+    <li>Providers/Ollama: detect vision capability from the `/api/show` response and set image input on models that support it so Ollama vision models accept image attachments</li>
+    <li>Memory/dreaming: ingest redacted session transcripts into the dreaming corpus with per-day session-corpus notes, cursor checkpointing, and promotion/doctor support</li>
+    <li>Providers/inferrs: add string-content compatibility for stricter OpenAI-compatible chat backends, document `inferrs` setup with a full config example, and add troubleshooting guidance for local backends that pass direct probes but fail on full agent-runtime prompts</li>
+    <li>Agents/context engine: expose prompt-cache runtime context to context engines and keep current-turn prompt-cache usage aligned with the active attempt instead of stale prior-turn assistant state</li>
+    <li>Plugin SDK/context engines: pass `availableTools` and `citationsMode` into `assemble()`, and expose memory-artifact and memory-prompt seams so companion plugins and non-legacy context engines can consume active memory state without reaching into internals</li>
+    <li>ACP/ACPX plugin: bump the bundled `acpx` pin to `0.5.1` so plugin-local installs and strict version checks pick up the latest published runtime release</li>
+    <li>Discord/events: allow `event-create` to accept a cover image URL or local file path, load and validate PNG/JPG/GIF event cover media, and pass the encoded image payload through Discord admin action/runtime paths</li>
+    </ul>
+    <h3>Fixes</h3>
+    <ul>
+    <li>CLI/infer: keep provider-backed infer behavior aligned with actual runtime execution by fixing explicit TTS override handling, profile-aware gateway TTS prefs resolution, per-request transcription `prompt`/`language` overrides, image output MIME/extension mismatches, configured web-search fallback behavior, and agent-vs-CLI web-search execution drift</li>
+    <li>Plugins/media: when `plugins.allow` is set, capability fallback now merges bundled capability plugin ids into the allowlist (not only `plugins.entries`), so media understanding providers such as OpenAI-compatible STT load for voice transcription without requiring `openai` in `plugins.allow`</li>
+    <li>Agents/history and replies: buffer phaseless OpenAI WS text until a real assistant phase arrives, keep replay and SSE history sequence tracking aligned, hide commentary and leaked tool XML from user-visible history, and keep history-based follow-up replies on `final_answer` text only. (#61729, #61747, #61829, #61855, #61954) and contributors</li>
+    <li>Control UI: show `/tts` audio replies in webchat, detect mistaken `?token=` auth links with the correct `#token=` hint, and keep Copy, Canvas, and mobile exec-approval UI from covering chat content on narrow screens. (#54842, #61514, #61598)</li>
+    <li>iOS/gateway: replace string-matched connection error UI with structured gateway connection problems, preserve actionable pairing/auth failures over later generic disconnect noise, and surface reusable problem banners and details across onboarding, settings, and root status surfaces</li>
+    <li>TUI: route `/status` through the shared session-status command, keep commentary hidden in history, strip raw envelope metadata from async command notices, preserve fallback streaming before per-attempt failures finalize, and restore Kitty keyboard state on exit or fatal crashes. (#49130, #59985, #60043, #61463) and contributors</li>
+    <li>iOS/Watch exec approvals: keep Apple Watch review and approval recovery working while the iPhone is locked or backgrounded, including reconnect recovery, pending approval persistence, notification cleanup, and APNs-backed watch refresh recovery</li>
+    <li>Agents/context overflow: combine oversized and aggregate tool-result recovery in one pass and restore a total-context overflow backstop so recoverable sessions retry instead of failing early</li>
+    <li>Auth/OpenAI Codex OAuth: reload fresh on-disk credentials inside the locked refresh path and retry once after `refresh_token_reused` rotates only the stored refresh token, so relogin/restart recovery stops getting stuck on stale cached auth state</li>
+    <li>Auth/OpenAI Codex OAuth: keep native `/model ...@profile` selections on the target session and honor explicit user-locked auth profiles even when per-agent auth order excludes them</li>
+    <li>Providers/Anthropic: preserve thinking blocks for Claude Opus 4.5+, Sonnet 4.5+, and newer Claude 4-family models so prompt-cache prefixes keep matching, and skip `service_tier` injection on OAuth-authenticated stream wrapper requests so Claude OAuth streaming stops failing with HTTP 401. (#60356, #61793)</li>
+    <li>Agents/Claude CLI: surface nested API error messages from structured CLI output so billing/auth/provider failures show the real provider error instead of an opaque CLI failure</li>
+    <li>Agents/exec: preserve explicit `host=node` routing under elevated defaults when `tools.exec.host=auto`, fail loud on invalid elevated cross-host overrides, and keep `strictInlineEval` commands blocked after approval timeouts instead of falling through to automatic execution</li>
+    <li>Nodes/exec approvals: keep `host=node` POSIX transport shell wrappers (`/bin/sh -lc ...`) aligned with inner-command allowlist analysis so allowlisted scripts stop prompting unnecessarily, while Windows `cmd.exe` wrapper runs stay approval-gated</li>
+    <li>Nodes/exec approvals: keep Windows `cmd.exe /c` wrapper runs approval-gated even when `env` carriers, including env-assignment carriers, wrap the shell invocation</li>
+    <li>Gateway tool/exec config: block model-facing `gateway config.apply` and `config.patch` writes from changing exec approval paths such as `safeBins`, `safeBinProfiles`, `safeBinTrustedDirs`, and `strictInlineEval`, while still allowing unchanged structured values through</li>
+    <li>Host exec/env sanitization: block dangerous Java, Rust, Cargo, Git, Kubernetes, cloud credential, config-path, and Helm env overrides so host-run tools cannot be redirected to attacker-chosen code, config, credentials, or repository state. (#59119, #62002, #62291) and contributors</li>
+    <li>Commands/allowlist: require owner authorization for `/allowlist add` and `/allowlist remove` before channel resolution, so non-owner but command-authorized senders can no longer persistently rewrite allowlist policy state</li>
+    <li>Feishu/docx uploads: honor `tools.fs.workspaceOnly` for local `upload_file` and `upload_image` paths by forwarding workspace-constrained `localRoots` into the media loader, so docx uploads can no longer read host-local files outside the workspace when workspace-only mode is active</li>
+    <li>Network/fetch guard: drop request bodies and body-describing headers on cross-origin `307` and `308` redirects by default, so attacker-controlled redirect hops cannot receive secret-bearing POST payloads from SSRF-guarded fetch flows unless a caller explicitly opts in</li>
+    <li>Browser/SSRF: treat main-frame `document` redirect hops as navigations even when Playwright does not flag them as `isNavigationRequest()`, so strict private-network blocking still stops forbidden redirect pivots before the browser reaches the internal target</li>
+    <li>Browser/node invoke: block persistent browser profile create, reset, and delete mutations through `browser.proxy` on both gateway-forwarded `node.invoke` and the node-host proxy path, even when no profile allowlist is configured</li>
+    <li>Gateway/node pairing: require a fresh pairing request when a previously paired node reconnects with additional declared commands, and keep the live session pinned to the earlier approved command set until the upgrade is approved</li>
+    <li>Gateway/auth: invalidate existing shared-token and password WebSocket sessions when the configured secret rotates, so stale authenticated sockets cannot stay attached after token or password changes</li>
+    <li>MS Teams/security: validate file-consent upload URLs against HTTPS, Microsoft/SharePoint host allowlists, and private-IP DNS checks before uploading attachments, blocking SSRF-style consent-upload abuse</li>
+    <li>Media/base64 decode guards: enforce byte limits before decoding missed base64-backed Teams, Signal, QQ Bot, and image-tool payloads so oversized inbound media and data URLs no longer bypass pre-decode size checks</li>
+    <li>Runtime event trust: mark background `notifyOnExit` summaries, ACP parent-stream relays, and wake-hook payloads as untrusted system events so lower-trust runtime output no longer re-enters later turns as trusted `System:` text</li>
+    <li>Auto-reply/media: allow managed generated-media `MEDIA:` paths from normal reply text again while still blocking arbitrary host-local media and document paths, so generated media keep delivering without reopening host-path injection holes</li>
+    <li>Gateway/status and containers: auto-bind to `0.0.0.0` inside Docker and Podman environments, and probe local TLS gateways over `wss://` with self-signed fingerprint forwarding so container startup and loopback TLS status checks work again. (#61818, #61935) and contributors</li>
+    <li>Gateway/OpenAI-compatible HTTP: abort in-flight `/v1/chat/completions` and `/v1/responses` turns when clients disconnect so abandoned HTTP requests stop wasting agent runtime</li>
+    <li>macOS/gateway version: strip trailing commit metadata from CLI version output before semver parsing so the Mac app recognizes installed gateway versions like `OpenClaw 2026.4.2 (d74a122)` again</li>
+    <li>Sessions/model selection: resolve the explicitly selected session model separately from runtime fallback resolution so session status and live model switching stay aligned with the chosen model</li>
+    <li>Discord/ACP bindings: canonicalize DM conversation identity across inbound messages, component interactions, native commands, and current-conversation binding resolution so `--bind here` in Discord DMs keeps routing follow-up replies to the bound agent instead of falling back to the default agent</li>
+    <li>Discord: recover forwarded referenced message text and attachments when snapshots are missing, use `ws://` again for gateway monitor sockets, stop forcing a hardcoded temperature for Codex-backed auto-thread titles, and harden voice receive recovery so rapid speaker restarts keep their next utterance. (#41536, #61670) and contributors</li>
+    <li>Slack/thread mentions: add `channels.slack.thread.requireExplicitMention` so Slack channels that already require mentions can also require explicit `@bot` mentions inside bot-participated threads</li>
+    <li>Slack/threading: keep legacy thread stickiness for real replies when older callers omit `isThreadReply`, while still honoring `replyToMode` for Slack&#x27;s auto-created top-level `thread_ts`</li>
+    <li>Slack/media: keep attachment downloads on the SSRF-guarded dispatcher path so Slack media fetching works on Node 22 without dropping pinned transport enforcement</li>
+    <li>Matrix/onboarding: add an invite auto-join setup step with explicit off warnings and strict stable-target validation so new Matrix accounts stop silently ignoring invited rooms and fresh DM-style invites unless operators opt in</li>
+    <li>Matrix/formatting: preserve multi-paragraph and loose-list rendering in Element so numbered and bulleted Markdown keeps their content attached to the correct list item</li>
+    <li>Telegram/doctor: keep top-level access-control fallback in place during multi-account normalization while still promoting legacy default auth into `accounts.default`, so existing named bots keep inherited allowlists without dropping the legacy default bot</li>
+    <li>Plugins/loaders: centralize bundled `dist/**` Jiti native-load policy and keep channel, public-surface, facade, and config-metadata loader seams off native Jiti on Windows so onboarding and configure flows stop tripping `ERR_UNSUPPORTED_ESM_URL_SCHEME`</li>
+    <li>Plugins/channels: keep bundled channel artifact and secret-contract loading stable under lazy loading, preserve plugin-schema defaults during install, and fix Windows `file://` plus native-Jiti plugin loader paths so onboarding, doctor, `openclaw secret`, and bundled plugin installs work again. (#61832, #61836, #61853, #61856) and contributors</li>
+    </ul>
+  </div>
+  <!-- RELEASE_END -->
+  <p style="margin-top:2rem">
+    <a href="https://github.com/openclaw/openclaw/releases" class="btn btn-ghost" style="display:inline-flex">All Releases</a>
+  </p>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ FOOTER ═══════════════ -->
+<footer>
+  <div class="tagline">Three agents. One APK. Your pocket.</div>
+  <div class="sub">They leaked Claude Code. We put it on a phone.</div>
+  <div class="links">
+    <a href="https://github.com/friuns2/openclaw-android-assistant">GitHub</a>
+    <a href="https://github.com/friuns2/openclaw-android-assistant/releases/latest/download/app-prod-release.apk">Download</a>
+    <a href="https://play.google.com/store/apps/details?id=gptos.intelligence.assistant&hl=en">Google Play</a>
+    <a href="https://openclaw.ai">OpenClaw</a>
+    <a href="https://claw-code.codes">Claw Code</a>
+    <a href="https://github.com/openai/codex">Codex CLI</a>
+  </div>
+</footer>
+
+</body>
+</html>

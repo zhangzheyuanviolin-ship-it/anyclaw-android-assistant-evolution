@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AnyClaw</string>
+    <string name="status_initializing">Initializing…</string>
+    <string name="status_extracting_bootstrap">Extracting environment…</string>
+    <string name="status_installing_packages">Installing packages (first run)…</string>
+    <string name="status_installing_codex">Installing Codex CLI…</string>
+    <string name="status_starting_server">Starting server…</string>
+    <string name="status_waiting_server">Waiting for server…</string>
+    <string name="api_key_title">OpenAI API Key</string>
+    <string name="api_key_message">Enter your OpenAI API key to use Codex.</string>
+    <string name="api_key_hint">sk-…</string>
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
+    <string name="error_title">Error</string>
+    <string name="error_bootstrap">Failed to set up the environment. Please try again.</string>
+    <string name="error_server">Failed to start the server.</string>
+    <string name="retry">Retry</string>
+</resources>
