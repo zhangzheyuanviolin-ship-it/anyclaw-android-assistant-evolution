@@ -44,6 +44,8 @@ class ConversationManagerActivity : AppCompatActivity() {
         ALL,
         CODEX,
         OPENCLAW,
+        CLAUDE_CODE,
+        OPEN_CODE,
     }
 
     private lateinit var spinnerSource: Spinner
@@ -74,6 +76,8 @@ class ConversationManagerActivity : AppCompatActivity() {
             getString(R.string.conversation_source_all),
             getString(R.string.conversation_source_codex),
             getString(R.string.conversation_source_openclaw),
+            getString(R.string.conversation_source_claude),
+            getString(R.string.conversation_source_opencode),
         )
         spinnerSource.adapter = ArrayAdapter(
             this,
@@ -104,6 +108,8 @@ class ConversationManagerActivity : AppCompatActivity() {
         return when (spinnerSource.selectedItemPosition) {
             1 -> SourceType.CODEX
             2 -> SourceType.OPENCLAW
+            3 -> SourceType.CLAUDE_CODE
+            4 -> SourceType.OPEN_CODE
             else -> SourceType.ALL
         }
     }
@@ -119,7 +125,9 @@ class ConversationManagerActivity : AppCompatActivity() {
             try {
                 val codexRows = loadCodexRows()
                 val openClawRows = loadOpenClawRows()
-                allRows = (codexRows + openClawRows)
+                val claudeRows = loadCliAgentRows(ExternalAgentId.CLAUDE_CODE, SourceType.CLAUDE_CODE)
+                val openCodeRows = loadCliAgentRows(ExternalAgentId.OPEN_CODE, SourceType.OPEN_CODE)
+                allRows = (codexRows + openClawRows + claudeRows + openCodeRows)
                     .distinctBy { "${it.source}:${it.id}" }
                     .sortedByDescending { it.updatedAtMs }
                     .toMutableList()
@@ -218,6 +226,21 @@ class ConversationManagerActivity : AppCompatActivity() {
         return merged.values.toList()
     }
 
+    private fun loadCliAgentRows(
+        agentId: ExternalAgentId,
+        source: SourceType,
+    ): List<ConversationRow> {
+        return AgentSessionStore.listSessions(this, agentId).map { session ->
+            ConversationRow(
+                source = source,
+                id = session.sessionId,
+                title = session.title,
+                updatedAtMs = session.updatedAtMs,
+                preview = session.messages.lastOrNull()?.text.orEmpty(),
+            )
+        }
+    }
+
     private fun loadOpenClawRowsFromGateway(): List<ConversationRow> {
         val payload = gateway.call(
             "sessions.list",
@@ -293,6 +316,8 @@ class ConversationManagerActivity : AppCompatActivity() {
                 val sourceName = when (row.source) {
                     SourceType.CODEX -> getString(R.string.conversation_source_codex)
                     SourceType.OPENCLAW -> getString(R.string.conversation_source_openclaw)
+                    SourceType.CLAUDE_CODE -> getString(R.string.conversation_source_claude)
+                    SourceType.OPEN_CODE -> getString(R.string.conversation_source_opencode)
                     SourceType.ALL -> getString(R.string.conversation_source_all)
                 }
                 val stateTag = if (row.source == SourceType.CODEX && row.archived) {
@@ -390,8 +415,27 @@ class ConversationManagerActivity : AppCompatActivity() {
                     putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
                     putExtra(MainActivity.EXTRA_SESSION_KEY, row.id)
                 }
+                SourceType.CLAUDE_CODE -> Unit
+                SourceType.OPEN_CODE -> Unit
                 SourceType.ALL -> Unit
             }
+        }
+        if (row.source == SourceType.CLAUDE_CODE || row.source == SourceType.OPEN_CODE) {
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(
+                        CliAgentChatActivity.EXTRA_AGENT_ID,
+                        if (row.source == SourceType.CLAUDE_CODE) {
+                            ExternalAgentId.CLAUDE_CODE.value
+                        } else {
+                            ExternalAgentId.OPEN_CODE.value
+                        },
+                    )
+                    putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, row.id)
+                },
+            )
+            Toast.makeText(this, getString(R.string.conversation_opening_toast), Toast.LENGTH_SHORT).show()
+            return
         }
         if (!intent.hasExtra(MainActivity.EXTRA_OPEN_TARGET)) {
             return
@@ -414,6 +458,12 @@ class ConversationManagerActivity : AppCompatActivity() {
                     }
                     SourceType.OPENCLAW -> {
                         renameOpenClawSession(row.id, newTitle)
+                    }
+                    SourceType.CLAUDE_CODE -> {
+                        AgentSessionStore.renameSession(this, ExternalAgentId.CLAUDE_CODE, row.id, newTitle)
+                    }
+                    SourceType.OPEN_CODE -> {
+                        AgentSessionStore.renameSession(this, ExternalAgentId.OPEN_CODE, row.id, newTitle)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -467,6 +517,12 @@ class ConversationManagerActivity : AppCompatActivity() {
                     }
                     SourceType.OPENCLAW -> {
                         deleteOpenClawSession(row.id)
+                    }
+                    SourceType.CLAUDE_CODE -> {
+                        AgentSessionStore.deleteSession(this, ExternalAgentId.CLAUDE_CODE, row.id)
+                    }
+                    SourceType.OPEN_CODE -> {
+                        AgentSessionStore.deleteSession(this, ExternalAgentId.OPEN_CODE, row.id)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -582,6 +638,8 @@ class ConversationManagerActivity : AppCompatActivity() {
         return when (row.source) {
             SourceType.CODEX -> loadCodexTranscript(row)
             SourceType.OPENCLAW -> loadOpenClawTranscript(row)
+            SourceType.CLAUDE_CODE -> loadCliAgentTranscript(ExternalAgentId.CLAUDE_CODE, row.id)
+            SourceType.OPEN_CODE -> loadCliAgentTranscript(ExternalAgentId.OPEN_CODE, row.id)
             SourceType.ALL -> ""
         }
     }
@@ -715,6 +773,12 @@ class ConversationManagerActivity : AppCompatActivity() {
             out.appendLine()
         }
         return out.toString().trim()
+    }
+
+    private fun loadCliAgentTranscript(agentId: ExternalAgentId, sessionId: String): String {
+        val session = AgentSessionStore.loadSession(this, agentId, sessionId)
+            ?: throw IOException("session not found")
+        return AgentSessionStore.transcript(session)
     }
 
     private fun renameOpenClawSession(sessionKey: String, label: String) {

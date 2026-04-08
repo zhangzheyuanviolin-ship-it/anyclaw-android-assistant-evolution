@@ -41,8 +41,11 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_OPEN_TARGET = "com.codex.mobile.extra.OPEN_TARGET"
         const val EXTRA_THREAD_ID = "com.codex.mobile.extra.THREAD_ID"
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.SESSION_KEY"
+        const val OPEN_TARGET_CODEX_HOME = "codex_home"
         const val OPEN_TARGET_CODEX_THREAD = "codex_thread"
         const val OPEN_TARGET_OPENCLAW_SESSION = "openclaw_session"
+        const val OPEN_TARGET_CLAUDE_SESSION = "claude_session"
+        const val OPEN_TARGET_OPENCODE_SESSION = "opencode_session"
     }
 
     private lateinit var webView: WebView
@@ -57,6 +60,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gatewayToggleButton: Button
     private lateinit var backToCodexButton: Button
     private lateinit var openClawNewChatButton: Button
+    private lateinit var bottomAgentTabs: View
+    private lateinit var tabOpenClawButton: Button
+    private lateinit var tabCodexButton: Button
+    private lateinit var tabClaudeButton: Button
+    private lateinit var tabOpenCodeButton: Button
     private lateinit var serverManager: CodexServerManager
     private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
@@ -67,6 +75,7 @@ class MainActivity : AppCompatActivity() {
     private var gatewayStatusMonitorStarted = false
     private var gatewayConnected = false
     private var gatewayStatusChecking = false
+    private var currentUiTarget: String = OPEN_TARGET_CODEX_HOME
     private var pendingLaunchUrl: String? = null
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawWatchdogRunnable: Runnable? = null
@@ -136,6 +145,11 @@ class MainActivity : AppCompatActivity() {
         gatewayToggleButton = findViewById(R.id.btnGatewayToggle)
         backToCodexButton = findViewById(R.id.btnBackToCodex)
         openClawNewChatButton = findViewById(R.id.btnOpenClawNewChat)
+        bottomAgentTabs = findViewById(R.id.bottomAgentTabs)
+        tabOpenClawButton = findViewById(R.id.btnTabOpenClaw)
+        tabCodexButton = findViewById(R.id.btnTabCodex)
+        tabClaudeButton = findViewById(R.id.btnTabClaude)
+        tabOpenCodeButton = findViewById(R.id.btnTabOpenCode)
 
         serverManager = CodexServerManager(this)
 
@@ -155,16 +169,47 @@ class MainActivity : AppCompatActivity() {
             onGatewayTogglePressed()
         }
         backToCodexButton.setOnClickListener {
+            currentUiTarget = OPEN_TARGET_CODEX_HOME
             webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
+            updateUiForCurrentTarget()
         }
         openClawNewChatButton.setOnClickListener {
+            currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
             webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
+            updateUiForCurrentTarget()
+        }
+        tabOpenClawButton.setOnClickListener {
+            currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
+            webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
+            updateUiForCurrentTarget()
+        }
+        tabCodexButton.setOnClickListener {
+            currentUiTarget = OPEN_TARGET_CODEX_HOME
+            webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
+            updateUiForCurrentTarget()
+        }
+        tabClaudeButton.setOnClickListener {
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
+                },
+            )
+        }
+        tabOpenCodeButton.setOnClickListener {
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.OPEN_CODE.value)
+                },
+            )
         }
 
         requestBatteryOptimizationExemption()
         startForegroundService()
         startShizukuBridgeServer()
         setupWebView()
+        if (redirectToExternalAgentIfNeeded(intent)) {
+            return
+        }
         pendingLaunchUrl = resolveLaunchUrlFromIntent(intent)
         ensureStorageAccessOrStartSetup()
     }
@@ -172,8 +217,12 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (redirectToExternalAgentIfNeeded(intent)) {
+            return
+        }
         val targetUrl = resolveLaunchUrlFromIntent(intent) ?: return
         pendingLaunchUrl = targetUrl
+        currentUiTarget = if (isOpenClawChatUrl(targetUrl)) OPEN_TARGET_OPENCLAW_SESSION else OPEN_TARGET_CODEX_HOME
         if (setupStarted && webView.visibility == View.VISIBLE) {
             webView.loadUrl(targetUrl)
             pendingLaunchUrl = null
@@ -192,9 +241,10 @@ class MainActivity : AppCompatActivity() {
             startSetupFlow()
         }
         if (setupStarted) {
-            startGatewayStatusMonitor()
+            updateUiForCurrentTarget()
             val targetUrl = pendingLaunchUrl
             if (targetUrl != null && webView.visibility == View.VISIBLE) {
+                currentUiTarget = if (isOpenClawChatUrl(targetUrl)) OPEN_TARGET_OPENCLAW_SESSION else OPEN_TARGET_CODEX_HOME
                 webView.loadUrl(targetUrl)
                 pendingLaunchUrl = null
             }
@@ -269,6 +319,12 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                currentUiTarget = if (isOpenClawChatUrl(url)) {
+                    OPEN_TARGET_OPENCLAW_SESSION
+                } else {
+                    OPEN_TARGET_CODEX_HOME
+                }
+                updateUiForCurrentTarget()
                 if (!isOpenClawChatUrl(url)) {
                     openClawRecoveryAttempts = 0
                 }
@@ -277,6 +333,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
+                updateUiForCurrentTarget()
                 scheduleOpenClawWatchdog(url)
             }
 
@@ -718,12 +775,22 @@ class MainActivity : AppCompatActivity() {
             promptManagerButton.visibility = View.VISIBLE
             conversationManagerButton.visibility = View.VISIBLE
             modelManagerButton.visibility = View.VISIBLE
-            gatewayToggleButton.visibility = View.VISIBLE
-            backToCodexButton.visibility = View.VISIBLE
-            openClawNewChatButton.visibility = View.VISIBLE
+            bottomAgentTabs.visibility = View.VISIBLE
             applyGatewayConnectedState(false, announce = false)
-            startGatewayStatusMonitor()
-            webView.loadUrl(consumeLaunchUrlOrDefault())
+            val explicitTarget = hasExplicitTargetIntent(intent)
+            if (!explicitTarget) {
+                startActivity(Intent(this, AgentHubActivity::class.java))
+                finish()
+            } else {
+                val launchUrl = consumeLaunchUrlOrDefault()
+                currentUiTarget = if (isOpenClawChatUrl(launchUrl)) {
+                    OPEN_TARGET_OPENCLAW_SESSION
+                } else {
+                    OPEN_TARGET_CODEX_HOME
+                }
+                updateUiForCurrentTarget()
+                webView.loadUrl(launchUrl)
+            }
         }
     }
 
@@ -766,6 +833,48 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun redirectToExternalAgentIfNeeded(intent: Intent?): Boolean {
+        val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
+        val nextAgent = when (target) {
+            OPEN_TARGET_CLAUDE_SESSION -> ExternalAgentId.CLAUDE_CODE
+            OPEN_TARGET_OPENCODE_SESSION -> ExternalAgentId.OPEN_CODE
+            else -> null
+        } ?: return false
+
+        startActivity(
+            Intent(this, CliAgentChatActivity::class.java).apply {
+                putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, nextAgent.value)
+                val sessionId = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
+                if (sessionId.isNotEmpty()) {
+                    putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, sessionId)
+                }
+            },
+        )
+        finish()
+        return true
+    }
+
+    private fun hasExplicitTargetIntent(intent: Intent?): Boolean {
+        val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
+        return target.isNotEmpty()
+    }
+
+    private fun updateUiForCurrentTarget() {
+        val openClawActive = currentUiTarget == OPEN_TARGET_OPENCLAW_SESSION
+        if (openClawActive) {
+            gatewayToggleButton.visibility = View.VISIBLE
+            backToCodexButton.visibility = View.VISIBLE
+            openClawNewChatButton.visibility = View.VISIBLE
+            startGatewayStatusMonitor()
+            refreshGatewayStatusAsync(announce = false)
+        } else {
+            gatewayToggleButton.visibility = View.GONE
+            backToCodexButton.visibility = View.GONE
+            openClawNewChatButton.visibility = View.GONE
+            stopGatewayStatusMonitor()
+        }
+    }
+
     private fun consumeLaunchUrlOrDefault(): String {
         val target = pendingLaunchUrl
         pendingLaunchUrl = null
@@ -776,6 +885,7 @@ class MainActivity : AppCompatActivity() {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
         if (target.isEmpty()) return null
         return when (target) {
+            OPEN_TARGET_CODEX_HOME -> "http://127.0.0.1:${CodexServerManager.SERVER_PORT}/"
             OPEN_TARGET_CODEX_THREAD -> {
                 val threadId = intent?.getStringExtra(EXTRA_THREAD_ID)?.trim().orEmpty()
                 if (threadId.isEmpty()) null
@@ -785,9 +895,13 @@ class MainActivity : AppCompatActivity() {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
                 buildOpenClawChatPageUrl(sessionKey)
             }
+            OPEN_TARGET_CLAUDE_SESSION -> null
+            OPEN_TARGET_OPENCODE_SESSION -> null
             else -> null
         }
     }
+
+    private fun resolveAgentSessionKey(agentId: String): String = "agent:$agentId:node-main"
 
     private fun extractSessionFromCurrentUrl(): String? {
         val current = webView.url ?: return null
@@ -982,6 +1096,7 @@ class MainActivity : AppCompatActivity() {
             promptManagerButton.visibility = View.GONE
             conversationManagerButton.visibility = View.GONE
             modelManagerButton.visibility = View.GONE
+            bottomAgentTabs.visibility = View.GONE
             gatewayToggleButton.visibility = View.GONE
             backToCodexButton.visibility = View.GONE
             openClawNewChatButton.visibility = View.GONE
