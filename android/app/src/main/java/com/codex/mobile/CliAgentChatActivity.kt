@@ -55,6 +55,11 @@ class CliAgentChatActivity : AppCompatActivity() {
         val dangerousAutoApprove: Boolean,
     )
 
+    private data class ProbeResult(
+        val code: Int,
+        val output: String,
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_cli_agent_chat)
@@ -228,7 +233,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         renderSession()
         Thread {
             val assistantText = runCatching {
-                val prompt = buildPromptWithHistory(activeSession.messages)
+                val prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
                 when (agentId) {
                     ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, prompt, runtimeOptions)
                     ExternalAgentId.OPEN_CODE -> runOpenCode(modelConfig, prompt, runtimeOptions)
@@ -252,15 +257,23 @@ class CliAgentChatActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun buildPromptWithHistory(messages: List<AgentChatMessage>): String {
+    private fun buildPromptWithHistory(
+        messages: List<AgentChatMessage>,
+        options: AgentRuntimeOptions,
+    ): String {
         val recent = messages.takeLast(12)
         val out = StringBuilder()
         out.appendLine("你正在继续已有会话。请结合上下文回答，并在需要时执行可用工具。")
         if (agentId == ExternalAgentId.OPEN_CODE || agentId == ExternalAgentId.CLAUDE_CODE) {
-            out.appendLine("工具链说明：")
-            out.appendLine("1) 你可直接运行 Ubuntu 命令。")
-            out.appendLine("2) 如需 Android 系统级命令，请使用 system-shell <command>。")
-            out.appendLine("3) 优先在回答前先执行必要命令验证结果。")
+            out.appendLine("高优先级运行规范（必须遵守）：")
+            out.appendLine("1) 先阅读“自动注入预检结果”，再决定用哪条执行链路。")
+            out.appendLine("2) Android 系统级命令必须使用 system-shell <command>。")
+            out.appendLine("3) Ubuntu 命令使用 ubuntu-shell <command> 或直接 Linux 命令。")
+            out.appendLine("4) 先做必要验证再给结论，且不要复述整段预检文本。")
+            out.appendLine("5) 若某链路失败，需明确失败原因并自动切换可用链路继续。")
+            out.appendLine()
+            out.appendLine("自动注入预检结果：")
+            out.appendLine(buildRuntimeProbeBlock(options))
             out.appendLine()
         }
         out.appendLine("会话上下文如下：")
@@ -303,6 +316,10 @@ class CliAgentChatActivity : AppCompatActivity() {
     ): String {
         val paths = BootstrapInstaller.getPaths(this)
         val homeDir = paths.homeDir
+        val nativeBin = "${paths.prefixDir}/lib/node_modules/opencode-ai/bin/.opencode"
+        if (!File(nativeBin).exists()) {
+            throw IllegalStateException("OpenCode 组件未安装或损坏：缺少 .opencode 二进制")
+        }
         val configFile = File(homeDir, ".pocketlobster/opencode/opencode-${activeSession.sessionId}.json")
         configFile.parentFile?.mkdirs()
         configFile.writeText(buildOpenCodeConfig(config).toString(2))
@@ -314,11 +331,76 @@ class CliAgentChatActivity : AppCompatActivity() {
         val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
         val cmd =
             "export OPENCODE_CONFIG=${LocalBridgeClients.shellQuote(configFile.absolutePath)}; " +
-                "export PATH=${LocalBridgeClients.shellQuote("$bridgeDir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}; " +
+                "export PATH=${LocalBridgeClients.shellQuote("$bridgeDir:${paths.prefixDir}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}; " +
                 "cd ${LocalBridgeClients.shellQuote(workDir)} 2>/dev/null || cd ${LocalBridgeClients.shellQuote(homeDir)}; " +
-                "${LocalBridgeClients.shellQuote("${paths.prefixDir}/bin/opencode")} run --model ${LocalBridgeClients.shellQuote(modelRef)} " +
+                "${LocalBridgeClients.shellQuote(nativeBin)} run --model ${LocalBridgeClients.shellQuote(modelRef)} " +
                 "--dir ${LocalBridgeClients.shellQuote(workDir)} ${dangerArg}--format default ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
         return runUbuntuCommandOrThrow(cmd).trim()
+    }
+
+    private fun buildRuntimeProbeBlock(options: AgentRuntimeOptions): String {
+        val paths = BootstrapInstaller.getPaths(this)
+        val openCodeBin = "${paths.prefixDir}/lib/node_modules/opencode-ai/bin/.opencode"
+        val localCapability = runPrefixCapture("codex-capabilities --plain 2>&1 || true")
+        val localChain = runPrefixCapture(
+            "id 2>&1; pwd 2>&1; command -v system-shell 2>&1 || true; command -v ubuntu-shell 2>&1 || true",
+        )
+        val systemChain = runPrefixCapture("system-shell id 2>&1 || true")
+        val ubuntuChain = runUbuntuCapture(
+            "id 2>&1; pwd 2>&1; command -v system-shell 2>&1 || true; command -v ubuntu-shell 2>&1 || true; echo ANYCLAW_UBUNTU_BIN=${'$'}ANYCLAW_UBUNTU_BIN",
+        )
+        val openCodeHealth = if (agentId == ExternalAgentId.OPEN_CODE) {
+            runUbuntuCapture("${LocalBridgeClients.shellQuote(openCodeBin)} --version 2>&1 || true")
+        } else {
+            ProbeResult(0, "skip")
+        }
+
+        return buildString {
+            appendLine("checked_at_ms=${System.currentTimeMillis()}")
+            appendLine("allow_shared_storage=${if (options.allowSharedStorage) 1 else 0}")
+            appendLine("dangerous_mode=${if (options.dangerousAutoApprove) 1 else 0}")
+            appendLine(formatProbe("local_capability", localCapability))
+            appendLine(formatProbe("local_chain", localChain))
+            appendLine(formatProbe("system_shell", systemChain))
+            appendLine(formatProbe("ubuntu_chain", ubuntuChain))
+            if (agentId == ExternalAgentId.OPEN_CODE) {
+                appendLine(formatProbe("opencode_binary", openCodeHealth))
+            }
+        }.trim()
+    }
+
+    private fun formatProbe(name: String, result: ProbeResult): String {
+        val trimmed = trimProbeOutput(result.output)
+        return "$name(exit=${result.code}): $trimmed"
+    }
+
+    private fun trimProbeOutput(value: String, maxChars: Int = 520): String {
+        val singleLine = value
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .take(8)
+            .joinToString(" | ")
+        if (singleLine.length <= maxChars) return singleLine
+        return singleLine.take(maxChars) + "..."
+    }
+
+    private fun runPrefixCapture(command: String): ProbeResult {
+        val output = StringBuilder()
+        val code = serverManager.runInPrefix(command) { line ->
+            output.appendLine(stripAnsi(line))
+        }
+        return ProbeResult(code = code, output = output.toString().trim())
+    }
+
+    private fun runUbuntuCapture(command: String): ProbeResult {
+        val output = StringBuilder()
+        val code = serverManager.runInUbuntu(command) { line ->
+            val cleaned = stripAnsi(line).trim()
+            if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
+            output.appendLine(cleaned)
+        }
+        return ProbeResult(code = code, output = output.toString().trim())
     }
 
     private fun buildOpenCodeConfig(config: AgentModelConfig): JSONObject {
@@ -419,7 +501,9 @@ class CliAgentChatActivity : AppCompatActivity() {
         val bridgeDir = File(homeDir, ".pocketlobster/bridges")
         if (!bridgeDir.exists()) bridgeDir.mkdirs()
         val systemShellScript = File(bridgeDir, "system-shell")
+        val systemShellAliasScript = File(bridgeDir, "system_shell")
         val ubuntuShellScript = File(bridgeDir, "ubuntu-shell")
+        val ubuntuShellAliasScript = File(bridgeDir, "ubuntu_shell")
 
         val systemShellContent =
             """
@@ -466,6 +550,11 @@ class CliAgentChatActivity : AppCompatActivity() {
             systemShellScript.writeText(systemShellContent)
             systemShellScript.setExecutable(true)
         }
+        val systemShellAliasContent = "#!/usr/bin/env bash\nexec \"${systemShellScript.absolutePath}\" \"\$@\"\n"
+        if (!systemShellAliasScript.exists() || systemShellAliasScript.readText() != systemShellAliasContent) {
+            systemShellAliasScript.writeText(systemShellAliasContent)
+            systemShellAliasScript.setExecutable(true)
+        }
 
         val ubuntuShellContent =
             """
@@ -478,6 +567,11 @@ class CliAgentChatActivity : AppCompatActivity() {
         if (!ubuntuShellScript.exists() || ubuntuShellScript.readText() != ubuntuShellContent) {
             ubuntuShellScript.writeText(ubuntuShellContent)
             ubuntuShellScript.setExecutable(true)
+        }
+        val ubuntuShellAliasContent = "#!/usr/bin/env bash\nexec \"${ubuntuShellScript.absolutePath}\" \"\$@\"\n"
+        if (!ubuntuShellAliasScript.exists() || ubuntuShellAliasScript.readText() != ubuntuShellAliasContent) {
+            ubuntuShellAliasScript.writeText(ubuntuShellAliasContent)
+            ubuntuShellAliasScript.setExecutable(true)
         }
 
         return bridgeDir.absolutePath

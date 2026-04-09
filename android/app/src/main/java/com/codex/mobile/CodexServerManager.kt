@@ -210,10 +210,11 @@ class CodexServerManager(private val context: Context) {
 
     fun isOpenCodeInstalled(): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
-        val wrapper = File(paths.prefixDir, "lib/node_modules/opencode-ai/bin/opencode")
         val nativeBin = File(paths.prefixDir, "lib/node_modules/opencode-ai/bin/.opencode")
-        if (!wrapper.exists() || !nativeBin.exists()) return false
-        val checkCmd = "${paths.prefixDir}/bin/opencode --version >/dev/null 2>&1"
+        if (!nativeBin.exists()) return false
+        // Validate the native OpenCode binary directly inside Ubuntu runtime.
+        // The JS wrapper depends on node and can fail even when binary is healthy.
+        val checkCmd = "${shellQuote(nativeBin.absolutePath)} --version >/dev/null 2>&1"
         return runInUbuntu(checkCmd) == 0
     }
 
