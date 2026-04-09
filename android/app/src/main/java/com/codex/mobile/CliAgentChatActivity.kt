@@ -466,10 +466,20 @@ class CliAgentChatActivity : AppCompatActivity() {
             out.appendLine("3) Ubuntu 命令使用 ubuntu-shell <command> 或直接 Linux 命令。")
             out.appendLine("4) 先做必要验证再给结论，且不要复述整段预检文本。")
             out.appendLine("5) 若某链路失败，需明确失败原因并自动切换可用链路继续。")
+            if (agentId == ExternalAgentId.CLAUDE_CODE) {
+                out.appendLine("6) 本会话已注入 AnyClaw MCP 工具箱，工具名前缀为 anyclaw_。")
+                out.appendLine("7) 用户要求验证工具时，先尝试列出或调用 anyclaw_ 工具，不得只依据内置工具列表给结论。")
+                out.appendLine("8) 若 anyclaw_ 工具不可见或调用失败，必须输出 MCP_TOOLBOX_STATUS=UNAVAILABLE，并给出 reason 与 step。")
+            }
             out.appendLine()
             out.appendLine("自动注入预检结果：")
             out.appendLine(buildRuntimeProbeBlock(options))
             out.appendLine()
+            if (agentId == ExternalAgentId.CLAUDE_CODE) {
+                out.appendLine("AnyClaw MCP注入状态：")
+                out.appendLine(buildClaudeMcpProbeBlock(options))
+                out.appendLine()
+            }
         }
         out.appendLine("会话上下文如下：")
         recent.forEach { msg ->
@@ -1014,6 +1024,46 @@ class CliAgentChatActivity : AppCompatActivity() {
         }.trim()
     }
 
+    private fun buildClaudeMcpProbeBlock(options: AgentRuntimeOptions): String {
+        val configFile = ensureClaudeAnyClawMcpConfig(options)
+        val serverFile = File(configFile.parentFile, "anyclaw-toolbox-server.js")
+        val toolNames = if (serverFile.exists()) {
+            extractAnyClawToolNames(serverFile.readText())
+        } else {
+            emptyList()
+        }
+        val required = listOf("anyclaw_device_exec", "anyclaw_search_web", "anyclaw_github_repo")
+        val missing = required.filterNot { toolNames.contains(it) }
+        val statusHint = when {
+            !configFile.exists() -> "CONFIG_MISSING"
+            !serverFile.exists() -> "SERVER_SCRIPT_MISSING"
+            missing.isNotEmpty() -> "REQUIRED_TOOLS_MISSING"
+            else -> "READY"
+        }
+        return buildString {
+            appendLine("mcp_config_path=${configFile.absolutePath}")
+            appendLine("mcp_config_exists=${if (configFile.exists()) 1 else 0}")
+            appendLine("mcp_server_path=${serverFile.absolutePath}")
+            appendLine("mcp_server_exists=${if (serverFile.exists()) 1 else 0}")
+            appendLine("anyclaw_tools_count=${toolNames.size}")
+            appendLine("anyclaw_tools_declared=${if (toolNames.isEmpty()) "none" else toolNames.joinToString(",")}")
+            appendLine("required_probe_tools=${required.joinToString(",")}")
+            appendLine("required_probe_missing=${if (missing.isEmpty()) "none" else missing.joinToString(",")}")
+            appendLine("mcp_toolbox_status_hint=$statusHint")
+            appendLine("if_tools_unavailable_report=MCP_TOOLBOX_STATUS=UNAVAILABLE reason=<no_anyclaw_tools|tool_call_error|tool_timeout> step=<list|device|search|github>")
+        }.trim()
+    }
+
+    private fun extractAnyClawToolNames(script: String): List<String> {
+        return Regex("""name:\s*"([^"]+)"""")
+            .findAll(script)
+            .map { it.groupValues.getOrElse(1) { "" }.trim() }
+            .filter { it.startsWith("anyclaw_") }
+            .distinct()
+            .sorted()
+            .toList()
+    }
+
     private fun formatProbe(name: String, result: ProbeResult): String {
         val trimmed = trimProbeOutput(result.output)
         return "$name(exit=${result.code}): $trimmed"
@@ -1405,17 +1455,16 @@ class CliAgentChatActivity : AppCompatActivity() {
               }
             ];
 
-            let inputBuffer = Buffer.alloc(0);
+            let lineBuffer = "";
+            process.stdin.setEncoding("utf8");
             process.stdin.on("data", (chunk) => {
-              inputBuffer = Buffer.concat([inputBuffer, chunk]);
-              processFrames();
+              lineBuffer += String(chunk || "");
+              processLines();
             });
             process.stdin.on("end", () => process.exit(0));
 
-            function writeFrame(payload) {
-              const body = Buffer.from(JSON.stringify(payload), "utf8");
-              process.stdout.write("Content-Length: " + body.length + "\r\n\r\n");
-              process.stdout.write(body);
+            function writeMessage(payload) {
+              process.stdout.write(JSON.stringify(payload) + "\n");
             }
 
             function makeResponse(id, result) {
@@ -1426,28 +1475,14 @@ class CliAgentChatActivity : AppCompatActivity() {
               return { jsonrpc: "2.0", id, error: { code, message } };
             }
 
-            function processFrames() {
+            function processLines() {
               while (true) {
-                const sep = inputBuffer.indexOf("\r\n\r\n");
-                if (sep === -1) return;
-                const headerText = inputBuffer.slice(0, sep).toString("utf8");
-                const lengthLine = headerText
-                  .split("\r\n")
-                  .map((x) => x.trim())
-                  .find((x) => x.toLowerCase().startsWith("content-length:"));
-                if (!lengthLine) {
-                  inputBuffer = Buffer.alloc(0);
-                  return;
-                }
-                const contentLength = Number(lengthLine.split(":")[1].trim());
-                const frameTotal = sep + 4 + contentLength;
-                if (!Number.isFinite(contentLength) || contentLength < 0) {
-                  inputBuffer = Buffer.alloc(0);
-                  return;
-                }
-                if (inputBuffer.length < frameTotal) return;
-                const body = inputBuffer.slice(sep + 4, frameTotal).toString("utf8");
-                inputBuffer = inputBuffer.slice(frameTotal);
+                const idx = lineBuffer.indexOf("\n");
+                if (idx === -1) return;
+                const rawLine = lineBuffer.slice(0, idx);
+                lineBuffer = lineBuffer.slice(idx + 1);
+                const body = rawLine.trim();
+                if (!body) continue;
                 let message;
                 try {
                   message = JSON.parse(body);
@@ -1456,7 +1491,7 @@ class CliAgentChatActivity : AppCompatActivity() {
                 }
                 handleMessage(message).catch((error) => {
                   if (typeof message?.id !== "undefined") {
-                    writeFrame(makeError(message.id, -32603, String(error?.message || error)));
+                    writeMessage(makeError(message.id, -32603, String(error?.message || error)));
                   }
                 });
               }
@@ -1469,8 +1504,8 @@ class CliAgentChatActivity : AppCompatActivity() {
               if (!method) return;
 
               if (method === "initialize") {
-                writeFrame(makeResponse(id, {
-                  protocolVersion: message?.params?.protocolVersion || "2024-11-05",
+                writeMessage(makeResponse(id, {
+                  protocolVersion: message?.params?.protocolVersion || "2025-11-25",
                   capabilities: { tools: {} },
                   serverInfo: SERVER_INFO
                 }));
@@ -1478,11 +1513,11 @@ class CliAgentChatActivity : AppCompatActivity() {
               }
               if (method === "notifications/initialized") return;
               if (method === "ping") {
-                writeFrame(makeResponse(id, {}));
+                writeMessage(makeResponse(id, {}));
                 return;
               }
               if (method === "tools/list") {
-                writeFrame(makeResponse(id, { tools: TOOL_DEFS }));
+                writeMessage(makeResponse(id, { tools: TOOL_DEFS }));
                 return;
               }
               if (method === "tools/call") {
@@ -1490,9 +1525,9 @@ class CliAgentChatActivity : AppCompatActivity() {
                 const args = message?.params?.arguments || {};
                 try {
                   const text = await callTool(toolName, args);
-                  writeFrame(makeResponse(id, { content: [{ type: "text", text }], isError: false }));
+                  writeMessage(makeResponse(id, { content: [{ type: "text", text }], isError: false }));
                 } catch (error) {
-                  writeFrame(makeResponse(id, {
+                  writeMessage(makeResponse(id, {
                     content: [{ type: "text", text: "Tool error: " + String(error?.message || error) }],
                     isError: true
                   }));
@@ -1501,7 +1536,7 @@ class CliAgentChatActivity : AppCompatActivity() {
               }
 
               if (typeof id !== "undefined") {
-                writeFrame(makeError(id, -32601, "Method not found: " + method));
+                writeMessage(makeError(id, -32601, "Method not found: " + method));
               }
             }
 
