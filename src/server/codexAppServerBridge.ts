@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { accessSync, constants as fsConstants, createWriteStream } from 'node:fs'
 import { mkdtemp, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
@@ -47,6 +47,19 @@ const OPENCLAW_RUN_CONTEXT_TTL_MS = 6 * 60 * 60_000
 const OPENCLAW_RUN_CONTEXT_MAX = 400
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
 const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
+const CLAUDE_STATE_PATH = homeDir
+  ? join(homeDir, '.pocketlobster', 'claude-web', 'sessions.json')
+  : join(process.cwd(), '.pocketlobster', 'claude-web', 'sessions.json')
+const CLAUDE_UPLOAD_DIR = homeDir
+  ? join(homeDir, '.pocketlobster', 'claude-web', 'uploads')
+  : join(process.cwd(), '.pocketlobster', 'claude-web', 'uploads')
+const CLAUDE_UPLOAD_MAX_BYTES = 1_000_000_000
+const CLAUDE_UPLOAD_STREAM_MAX_BYTES = 1_000_000_000
+const CLAUDE_RUN_WAIT_TIMEOUT_MS = 12_000
+const CLAUDE_RUN_CONTEXT_TTL_MS = 2 * 60 * 60_000
+const CLAUDE_PROCESS_LINES_MAX = 240
+const CLAUDE_OUTPUT_CHARS_MAX = 240_000
+const CLAUDE_SESSION_HISTORY_DEFAULT = 60
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -133,9 +146,59 @@ type OpenClawNativeRunContext = {
   updatedAtMs: number
 }
 
+type ClaudeContentItem = {
+  type: string
+  text?: string
+}
+
+type ClaudeHistoryMessage = {
+  role: string
+  timestamp: number
+  content: ClaudeContentItem[]
+  toolName?: string
+  isError?: boolean
+}
+
+type ClaudeSession = {
+  key: string
+  title: string
+  updatedAt: number
+  lastMessagePreview: string
+  modelProvider: string
+  model: string
+  messages: ClaudeHistoryMessage[]
+}
+
+type ClaudeState = {
+  sessions: ClaudeSession[]
+}
+
+type ClaudeModelConfig = {
+  providerName: string
+  modelId: string
+  baseUrl: string
+  apiKey: string
+}
+
+type ClaudeRunContext = {
+  runId: string
+  sessionKey: string
+  status: string
+  startedAtMs: number
+  updatedAtMs: number
+  completed: boolean
+  processLines: string[]
+  rawOutput: string
+  assistantText: string
+  errorText: string
+  exitCode: number | null
+  process: ChildProcess | null
+}
+
 let openClawNativeReadyCacheValue: boolean | null = null
 let openClawNativeReadyCacheAtMs = 0
 const openClawNativeRuns = new Map<string, OpenClawNativeRunContext>()
+const claudeRuns = new Map<string, ClaudeRunContext>()
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -1926,6 +1989,558 @@ async function buildInjectedDeveloperInstructions(): Promise<string> {
   return chunks.join('\n\n').trim()
 }
 
+function toClaudeTextContent(text: string): ClaudeContentItem[] {
+  const value = text.trim()
+  if (!value) return []
+  return [{ type: 'text', text: value }]
+}
+
+function buildClaudeSessionKey(currentSessionKey = ''): string {
+  const normalized = currentSessionKey.trim()
+  const now = Date.now().toString(36)
+  const rand = Math.random().toString(36).slice(2, 8)
+  if (normalized.startsWith('claude:')) {
+    return `claude:${now}-${rand}`
+  }
+  return `claude:${now}-${rand}`
+}
+
+function buildClaudePreview(messages: ClaudeHistoryMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const row = messages[index]
+    const text = row.content
+      .map((item) => normalizeText(item.text))
+      .filter((value) => value.length > 0)
+      .join('\n')
+      .trim()
+    if (text) {
+      return truncateText(text, 140)
+    }
+  }
+  return ''
+}
+
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/gu, '"')
+    .replace(/&apos;/gu, '\'')
+    .replace(/&lt;/gu, '<')
+    .replace(/&gt;/gu, '>')
+    .replace(/&amp;/gu, '&')
+}
+
+async function loadClaudeModelConfigFromSharedPrefs(): Promise<ClaudeModelConfig | null> {
+  if (!homeDir) return null
+  const appRoot = dirname(dirname(homeDir))
+  const prefsPath = join(appRoot, 'shared_prefs', 'agent_model_configs.xml')
+  let raw = ''
+  try {
+    raw = await readFile(prefsPath, 'utf8')
+  } catch {
+    return null
+  }
+  const match = raw.match(/<string name="configs_json">([\s\S]*?)<\/string>/u)
+  if (!match) return null
+  const encoded = match[1] ?? ''
+  const decoded = decodeXmlEntities(encoded).trim()
+  if (!decoded) return null
+
+  let list: unknown = null
+  try {
+    list = JSON.parse(decoded)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(list)) return null
+
+  const rows = list
+    .map((row) => asRecord(row))
+    .filter((row): row is Record<string, unknown> => row !== null)
+    .filter((row) => normalizeText(row.agentId) === 'claude-code')
+    .filter((row) => normalizeText(row.modelId) && normalizeText(row.baseUrl) && normalizeText(row.apiKey))
+
+  if (rows.length === 0) return null
+  const target = rows.find((row) => row.isDefault === true) ?? rows[0]
+  return {
+    providerName: normalizeText(target.providerName) || 'claude',
+    modelId: normalizeText(target.modelId),
+    baseUrl: normalizeBaseUrl(normalizeText(target.baseUrl)),
+    apiKey: normalizeText(target.apiKey),
+  }
+}
+
+async function readClaudeState(): Promise<ClaudeState> {
+  try {
+    const raw = await readFile(CLAUDE_STATE_PATH, 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    const root = asRecord(parsed)
+    const sessionsRaw = Array.isArray(root?.sessions) ? root.sessions : []
+    const sessions: ClaudeSession[] = []
+    for (const row of sessionsRaw) {
+      const item = asRecord(row)
+      if (!item) continue
+      const key = normalizeText(item.key)
+      if (!key) continue
+      const title = normalizeText(item.title) || key
+      const updatedAt = typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt)
+        ? Math.floor(item.updatedAt)
+        : Date.now()
+      const lastMessagePreview = normalizeText(item.lastMessagePreview)
+      const modelProvider = normalizeText(item.modelProvider)
+      const model = normalizeText(item.model)
+      const messagesRaw = Array.isArray(item.messages) ? item.messages : []
+      const messages: ClaudeHistoryMessage[] = []
+      for (const msgRow of messagesRaw) {
+        const msg = asRecord(msgRow)
+        if (!msg) continue
+        const role = normalizeText(msg.role) || 'assistant'
+        const timestamp = typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp)
+          ? Math.floor(msg.timestamp)
+          : Date.now()
+        const contentRaw = Array.isArray(msg.content) ? msg.content : []
+        const content: ClaudeContentItem[] = contentRaw
+          .map((contentRow) => asRecord(contentRow))
+          .filter((contentRow): contentRow is Record<string, unknown> => contentRow !== null)
+          .map((contentRow) => ({
+            type: normalizeText(contentRow.type) || 'text',
+            text: normalizeText(contentRow.text),
+          }))
+          .filter((contentRow) => contentRow.text || contentRow.type !== 'text')
+        messages.push({
+          role,
+          timestamp,
+          content,
+          toolName: normalizeText(msg.toolName) || undefined,
+          isError: msg.isError === true,
+        })
+      }
+      sessions.push({
+        key,
+        title,
+        updatedAt,
+        lastMessagePreview,
+        modelProvider,
+        model,
+        messages,
+      })
+    }
+    return { sessions }
+  } catch {
+    return { sessions: [] }
+  }
+}
+
+async function writeClaudeState(state: ClaudeState): Promise<void> {
+  await mkdir(dirname(CLAUDE_STATE_PATH), { recursive: true })
+  await writeFile(
+    CLAUDE_STATE_PATH,
+    JSON.stringify({ sessions: state.sessions }, null, 2),
+    { mode: 0o600 },
+  )
+}
+
+async function ensureClaudeSession(state: ClaudeState, sessionKey: string): Promise<ClaudeSession> {
+  const key = sessionKey.trim()
+  if (!key) {
+    throw new Error('Missing session key')
+  }
+  let target = state.sessions.find((row) => row.key === key)
+  if (target) return target
+  target = {
+    key,
+    title: 'Claude 会话',
+    updatedAt: Date.now(),
+    lastMessagePreview: '',
+    modelProvider: '',
+    model: '',
+    messages: [],
+  }
+  state.sessions.push(target)
+  return target
+}
+
+function toClaudeSessionSummary(session: ClaudeSession): Record<string, unknown> {
+  return {
+    key: session.key,
+    displayName: session.title,
+    label: session.title,
+    updatedAt: session.updatedAt,
+    lastMessagePreview: session.lastMessagePreview,
+    modelProvider: session.modelProvider,
+    model: session.model,
+  }
+}
+
+async function listClaudeSessions(limit: number): Promise<Record<string, unknown>[]> {
+  const state = await readClaudeState()
+  if (state.sessions.length === 0) {
+    const created: ClaudeSession = {
+      key: buildClaudeSessionKey(''),
+      title: 'Claude 会话',
+      updatedAt: Date.now(),
+      lastMessagePreview: '',
+      modelProvider: '',
+      model: '',
+      messages: [],
+    }
+    state.sessions.push(created)
+    await writeClaudeState(state)
+  }
+  return [...state.sessions]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, Math.max(1, limit))
+    .map(toClaudeSessionSummary)
+}
+
+async function createClaudeSession(label: string, currentSessionKey: string): Promise<string> {
+  const state = await readClaudeState()
+  const used = new Set(state.sessions.map((row) => row.title))
+  const title = buildUniqueOpenClawSessionLabel(label.trim() || 'Claude 会话', used)
+  const key = buildClaudeSessionKey(currentSessionKey)
+  state.sessions.push({
+    key,
+    title,
+    updatedAt: Date.now(),
+    lastMessagePreview: '',
+    modelProvider: '',
+    model: '',
+    messages: [],
+  })
+  await writeClaudeState(state)
+  return key
+}
+
+async function resetClaudeSession(currentSessionKey: string): Promise<string> {
+  const state = await readClaudeState()
+  const target = state.sessions.find((row) => row.key === currentSessionKey.trim())
+  if (!target) {
+    throw new Error('Session not found')
+  }
+  target.messages = []
+  target.updatedAt = Date.now()
+  target.lastMessagePreview = ''
+  await writeClaudeState(state)
+  return target.key
+}
+
+async function renameClaudeSession(sessionKey: string, title: string): Promise<void> {
+  const state = await readClaudeState()
+  const target = state.sessions.find((row) => row.key === sessionKey.trim())
+  if (!target) {
+    throw new Error('Session not found')
+  }
+  target.title = title.trim() || target.title
+  target.updatedAt = Date.now()
+  await writeClaudeState(state)
+}
+
+async function readClaudeHistory(sessionKey: string, limit: number): Promise<{
+  sessionKey: string
+  messages: ClaudeHistoryMessage[]
+  thinkingLevel: string
+}> {
+  const state = await readClaudeState()
+  const target = await ensureClaudeSession(state, sessionKey)
+  const normalizedLimit = clampInt(limit, 10, 400)
+  const messages = target.messages.slice(-normalizedLimit)
+  await writeClaudeState(state)
+  return {
+    sessionKey: target.key,
+    messages,
+    thinkingLevel: 'medium',
+  }
+}
+
+function stripAnsiCodes(value: string): string {
+  return value.replace(/\u001B\[[0-9;]*[A-Za-z]/gu, '')
+}
+
+function isClaudeProcessLine(line: string): boolean {
+  const text = line.trim()
+  if (!text) return false
+  if (/^INFO\s+\d{4}-\d{2}-\d{2}/u.test(text)) return true
+  if (/^(DEBUG|TRACE|WARN)\s+\d{4}-\d{2}-\d{2}/u.test(text)) return true
+  if (text.includes('service=') && text.includes('status=')) return true
+  if (text.includes('tool.registry')) return true
+  if (text.includes('sqlite-migration:')) return true
+  if (text.includes('Database migration complete.')) return true
+  if (text.startsWith('Performing one time database migration')) return true
+  return false
+}
+
+function trimClaudeProcessLines(lines: string[]): string[] {
+  if (lines.length <= CLAUDE_PROCESS_LINES_MAX) return lines
+  return lines.slice(lines.length - CLAUDE_PROCESS_LINES_MAX)
+}
+
+function extractClaudeAssistantText(raw: string): string {
+  const cleaned = stripAnsiCodes(raw)
+    .split(/\r?\n/u)
+    .map((line) => line.trimEnd())
+    .filter((line) =>
+      !line.startsWith('Claude Code Warning: no stdin data received') &&
+      !line.startsWith('If piping from a slow command, redirect stdin explicitly:'),
+    )
+  const nonProcess = cleaned.filter((line) => !isClaudeProcessLine(line))
+  const text = nonProcess.join('\n').trim()
+  if (text) return truncateText(text, CLAUDE_OUTPUT_CHARS_MAX)
+  return truncateText(cleaned.join('\n').trim(), CLAUDE_OUTPUT_CHARS_MAX)
+}
+
+function collectClaudeProcessLines(raw: string): string[] {
+  const lines = stripAnsiCodes(raw)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => isClaudeProcessLine(line))
+  return trimClaudeProcessLines(lines)
+}
+
+function reapStaleClaudeRuns(): void {
+  const now = Date.now()
+  for (const [runId, run] of claudeRuns.entries()) {
+    if (!run.completed) continue
+    if (now - run.updatedAtMs > CLAUDE_RUN_CONTEXT_TTL_MS) {
+      claudeRuns.delete(runId)
+    }
+  }
+}
+
+function buildClaudePrompt(message: string, attachmentPaths: string[]): string {
+  const trimmed = message.trim()
+  if (attachmentPaths.length === 0) return trimmed
+  const rows = attachmentPaths.map((path) => `PATH::${path}`)
+  const filesSection = [
+    '附件路径如下，请逐一读取并基于这些路径完成任务：',
+    'PATH_BEGIN',
+    ...rows,
+    'PATH_END',
+  ].join('\n')
+  if (!trimmed) {
+    return `${filesSection}\n\n请先确认可访问以上路径。`
+  }
+  return `${trimmed}\n\n${filesSection}`
+}
+
+function ensurePrefixPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next = { ...env }
+  if (prefixBin) {
+    const currentPath = typeof next.PATH === 'string' ? next.PATH : ''
+    if (!currentPath.split(':').includes(prefixBin)) {
+      next.PATH = currentPath.length > 0 ? `${prefixBin}:${currentPath}` : prefixBin
+    }
+  }
+  return next
+}
+
+async function finalizeClaudeRun(runId: string): Promise<void> {
+  const run = claudeRuns.get(runId)
+  if (!run) return
+  const state = await readClaudeState()
+  const session = await ensureClaudeSession(state, run.sessionKey)
+  const processLines = trimClaudeProcessLines(run.processLines)
+  if (processLines.length > 0) {
+    session.messages.push({
+      role: 'toolResult',
+      timestamp: Date.now(),
+      toolName: 'claude.process',
+      isError: false,
+      content: toClaudeTextContent(processLines.join('\n')),
+    })
+  }
+  if (run.assistantText.trim()) {
+    session.messages.push({
+      role: 'assistant',
+      timestamp: Date.now(),
+      content: toClaudeTextContent(run.assistantText),
+    })
+  } else if (run.errorText.trim()) {
+    session.messages.push({
+      role: 'assistant',
+      timestamp: Date.now(),
+      content: toClaudeTextContent(`Claude 执行失败：${run.errorText}`),
+    })
+  }
+  session.updatedAt = Date.now()
+  session.lastMessagePreview = buildClaudePreview(session.messages)
+  await writeClaudeState(state)
+}
+
+async function sendClaudeMessage(payload: Record<string, unknown>): Promise<{ runId: string }> {
+  const sessionKey = normalizeText(payload.sessionKey)
+  const message = normalizeText(payload.message)
+  const attachmentPaths = Array.isArray(payload.attachmentPaths)
+    ? payload.attachmentPaths
+      .map((row) => normalizeText(row))
+      .filter((row) => row.length > 0)
+    : []
+  if (!sessionKey || (!message && attachmentPaths.length === 0)) {
+    throw new Error('Missing sessionKey and message/attachments')
+  }
+
+  const model = await loadClaudeModelConfigFromSharedPrefs()
+  if (!model || !model.apiKey || !model.baseUrl || !model.modelId) {
+    throw new Error('Claude model is not configured, please save Claude model in 模型管理 first')
+  }
+
+  const allowSharedStorage = payload.allowSharedStorage === true
+  const dangerousMode = payload.dangerousMode === true
+
+  const state = await readClaudeState()
+  const session = await ensureClaudeSession(state, sessionKey)
+  const prompt = buildClaudePrompt(message, attachmentPaths)
+  session.messages.push({
+    role: 'user',
+    timestamp: Date.now(),
+    content: toClaudeTextContent(prompt),
+  })
+  session.model = model.modelId
+  session.modelProvider = model.providerName
+  session.updatedAt = Date.now()
+  session.lastMessagePreview = buildClaudePreview(session.messages)
+  await writeClaudeState(state)
+
+  const dirs = [homeDir].filter((row) => row.length > 0)
+  if (allowSharedStorage) {
+    dirs.push('/sdcard', '/storage/emulated/0')
+  }
+  const addDirArg = dirs.map((dir) => `--add-dir ${shellQuote(dir)}`).join(' ')
+  const modelArg = model.modelId ? `--model ${shellQuote(model.modelId)} ` : ''
+  const baseEnv = model.baseUrl ? `ANTHROPIC_BASE_URL=${shellQuote(model.baseUrl)} ` : ''
+  const keyEnv = `ANTHROPIC_API_KEY=${shellQuote(model.apiKey)} `
+  const dangerArg = dangerousMode ? '--dangerously-skip-permissions ' : ''
+  const cmd = `${baseEnv}${keyEnv}claude -p ${dangerArg}${addDirArg} ${modelArg}${shellQuote(prompt)} < /dev/null 2>&1`
+
+  const runId = `claude_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  const run: ClaudeRunContext = {
+    runId,
+    sessionKey,
+    status: 'running',
+    startedAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+    completed: false,
+    processLines: [],
+    rawOutput: '',
+    assistantText: '',
+    errorText: '',
+    exitCode: null,
+    process: null,
+  }
+  claudeRuns.set(runId, run)
+  reapStaleClaudeRuns()
+
+  const env = ensurePrefixPath({
+    ...process.env,
+    NO_COLOR: '1',
+    CI: '1',
+  })
+
+  const proc = spawn(shellPath, ['-lc', cmd], {
+    cwd: homeDir || process.cwd(),
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  run.process = proc
+  proc.stdout.setEncoding('utf8')
+  proc.stderr.setEncoding('utf8')
+  const appendOutput = (chunk: string) => {
+    run.rawOutput = truncateText(run.rawOutput + String(chunk), CLAUDE_OUTPUT_CHARS_MAX)
+    run.processLines = collectClaudeProcessLines(run.rawOutput)
+    run.updatedAtMs = Date.now()
+  }
+  proc.stdout.on('data', appendOutput)
+  proc.stderr.on('data', appendOutput)
+  proc.on('error', async (error) => {
+    run.errorText = getErrorMessage(error, 'claude process start failed')
+    run.status = 'failed'
+    run.completed = true
+    run.exitCode = 127
+    run.process = null
+    run.assistantText = extractClaudeAssistantText(run.rawOutput)
+    run.updatedAtMs = Date.now()
+    await finalizeClaudeRun(runId)
+  })
+  proc.on('close', async (code) => {
+    run.exitCode = typeof code === 'number' ? code : null
+    run.assistantText = extractClaudeAssistantText(run.rawOutput)
+    if ((run.exitCode ?? 1) === 0) {
+      run.status = 'completed'
+      run.errorText = ''
+    } else if (run.status !== 'aborted') {
+      run.status = 'failed'
+      const fallbackError = normalizeText(run.rawOutput) || `exit code ${String(run.exitCode ?? -1)}`
+      run.errorText = truncateText(fallbackError, 4000)
+    }
+    run.completed = true
+    run.process = null
+    run.updatedAtMs = Date.now()
+    await finalizeClaudeRun(runId)
+  })
+  return { runId }
+}
+
+function getClaudeRunStatus(runId: string): Record<string, unknown> {
+  const run = claudeRuns.get(runId)
+  if (!run) {
+    return {
+      ok: false,
+      runId,
+      status: 'unknown',
+      completed: true,
+      error: 'Run not found',
+    }
+  }
+  const processText = trimClaudeProcessLines(run.processLines).join('\n')
+  const result = {
+    processText: truncateText(processText, 12_000),
+    assistantText: truncateText(run.assistantText, 12_000),
+    exitCode: run.exitCode,
+  }
+  if (run.completed) {
+    return {
+      ok: run.status === 'completed',
+      runId: run.runId,
+      status: run.status,
+      completed: true,
+      result,
+      error: run.errorText || null,
+    }
+  }
+  return {
+    ok: true,
+    runId: run.runId,
+    status: run.status || 'running',
+    completed: false,
+    result,
+    error: null,
+  }
+}
+
+async function abortClaudeRun(runId: string): Promise<boolean> {
+  const run = claudeRuns.get(runId)
+  if (!run) return false
+  if (run.completed) return true
+  run.status = 'aborted'
+  run.errorText = 'aborted by user'
+  run.updatedAtMs = Date.now()
+  try {
+    run.process?.kill('SIGTERM')
+  } catch {
+    // ignore
+  }
+  await sleepMs(120)
+  try {
+    run.process?.kill('SIGKILL')
+  } catch {
+    // ignore
+  }
+  run.completed = true
+  run.exitCode = 130
+  run.process = null
+  await finalizeClaudeRun(runId)
+  return true
+}
+
 class AppServerProcess {
   private process: ChildProcessWithoutNullStreams | null = null
   private initialized = false
@@ -3094,6 +3709,216 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         } else {
           await deleteLightweightSession(sessionKey)
         }
+        setJson(res, 200, { ok: true })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/claude-api/health') {
+        const model = await loadClaudeModelConfigFromSharedPrefs()
+        setJson(res, 200, {
+          ok: true,
+          data: {
+            mode: 'claude-cli',
+            modelConfigured: !!(model && model.apiKey && model.baseUrl && model.modelId),
+          },
+        })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/claude-api/sessions') {
+        const limit = readPositiveInt(url.searchParams.get('limit'), 200)
+        const sessions = await listClaudeSessions(limit)
+        setJson(res, 200, { sessions })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/history') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        if (!sessionKey) {
+          setJson(res, 400, { error: 'Missing sessionKey' })
+          return
+        }
+        const limit = readPositiveInt(String(payload?.limit ?? ''), CLAUDE_SESSION_HISTORY_DEFAULT)
+        const history = await readClaudeHistory(sessionKey, limit)
+        setJson(res, 200, history)
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/send') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        const message = normalizeText(payload?.message)
+        const attachmentPaths = Array.isArray(payload?.attachmentPaths)
+          ? payload.attachmentPaths.map((row) => normalizeText(row)).filter((row) => row.length > 0)
+          : []
+        if (!sessionKey || (!message && attachmentPaths.length === 0)) {
+          setJson(res, 400, { error: 'Missing sessionKey and message/attachments' })
+          return
+        }
+        const run = await sendClaudeMessage({
+          sessionKey,
+          message,
+          attachmentPaths,
+          allowSharedStorage: payload?.allowSharedStorage === true,
+          dangerousMode: payload?.dangerousMode === true,
+        })
+        setJson(res, 200, { ok: true, runId: run.runId })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/run/wait') {
+        const payload = asRecord(await readJsonBody(req))
+        const runId = normalizeText(payload?.runId)
+        if (!runId) {
+          setJson(res, 400, { error: 'Missing runId' })
+          return
+        }
+        const waitTimeoutMs = normalizeTimeoutMs(
+          payload?.timeoutMs,
+          CLAUDE_RUN_WAIT_TIMEOUT_MS,
+          2_000,
+          120_000,
+        )
+        const startedAt = Date.now()
+        while (Date.now() - startedAt < waitTimeoutMs) {
+          const status = getClaudeRunStatus(runId)
+          if (status.completed === true) {
+            setJson(res, 200, status)
+            return
+          }
+          await sleepMs(250)
+        }
+        setJson(res, 200, getClaudeRunStatus(runId))
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/run/abort') {
+        const payload = asRecord(await readJsonBody(req))
+        const requestedRunId = normalizeText(payload?.runId)
+        const sessionKey = normalizeText(payload?.sessionKey)
+        let targetRunId = requestedRunId
+        if (!targetRunId && sessionKey) {
+          let picked: ClaudeRunContext | null = null
+          for (const run of claudeRuns.values()) {
+            if (run.sessionKey !== sessionKey || run.completed) continue
+            if (!picked || run.updatedAtMs > picked.updatedAtMs) {
+              picked = run
+            }
+          }
+          targetRunId = picked?.runId ?? ''
+        }
+        if (!targetRunId) {
+          setJson(res, 400, { error: 'Missing runId or active session run' })
+          return
+        }
+        const aborted = await abortClaudeRun(targetRunId)
+        setJson(res, 200, {
+          ok: aborted,
+          aborted,
+          status: aborted ? 'aborted' : 'failed',
+          runId: targetRunId,
+        })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/attachments/upload-stream') {
+        const fileName = sanitizeOpenClawUploadFileName(
+          normalizeText(url.searchParams.get('fileName')) ||
+          readHeaderText(req.headers['x-file-name']) ||
+          'attachment.bin',
+        )
+        const contentType = readHeaderText(req.headers['content-type'])
+        const mimeType =
+          normalizeText(url.searchParams.get('mimeType')) ||
+          readHeaderText(req.headers['x-mime-type']) ||
+          (contentType.split(';')[0]?.trim() || 'application/octet-stream')
+        await mkdir(CLAUDE_UPLOAD_DIR, { recursive: true })
+        const storedName = buildOpenClawUploadStoredName(fileName)
+        const storedPath = join(CLAUDE_UPLOAD_DIR, storedName)
+        try {
+          const sizeBytes = await writeOpenClawUploadStream(
+            req,
+            storedPath,
+            CLAUDE_UPLOAD_STREAM_MAX_BYTES,
+          )
+          setJson(res, 200, {
+            ok: true,
+            path: storedPath,
+            fileName,
+            mimeType,
+            sizeBytes,
+          })
+        } catch (error) {
+          await unlink(storedPath).catch(() => undefined)
+          const message = error instanceof Error ? error.message : 'Attachment upload failed'
+          if (message.includes('Attachment exceeds size limit')) {
+            setJson(res, 400, { error: message })
+          } else {
+            setJson(res, 500, { error: message })
+          }
+        }
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/attachments/upload') {
+        const payload = asRecord(await readJsonBody(req))
+        const fileName = sanitizeOpenClawUploadFileName(normalizeText(payload?.fileName))
+        const mimeType = normalizeText(payload?.mimeType) || 'application/octet-stream'
+        const contentBase64 = normalizeText(payload?.contentBase64)
+        if (!contentBase64) {
+          setJson(res, 400, { error: 'Missing attachment content' })
+          return
+        }
+        const decoded = decodeStrictBase64(contentBase64)
+        if (decoded.length > CLAUDE_UPLOAD_MAX_BYTES) {
+          setJson(res, 400, { error: 'Attachment exceeds size limit (1000MB)' })
+          return
+        }
+        await mkdir(CLAUDE_UPLOAD_DIR, { recursive: true })
+        const storedName = buildOpenClawUploadStoredName(fileName)
+        const storedPath = join(CLAUDE_UPLOAD_DIR, storedName)
+        await writeFile(storedPath, decoded, { mode: 0o600 })
+        setJson(res, 200, {
+          ok: true,
+          path: storedPath,
+          fileName,
+          mimeType,
+          sizeBytes: decoded.length,
+        })
+        return
+      }
+
+      if (req.method === 'POST' && (url.pathname === '/claude-api/sessions/new-independent' || url.pathname === '/claude-api/sessions/new')) {
+        const payload = asRecord(await readJsonBody(req))
+        const label = normalizeText(payload?.label) || 'Claude 会话'
+        const currentSessionKey = normalizeText(payload?.currentSessionKey)
+        const sessionKey = await createClaudeSession(label, currentSessionKey)
+        setJson(res, 200, { sessionKey })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/sessions/reset') {
+        const payload = asRecord(await readJsonBody(req))
+        const currentSessionKey = normalizeText(payload?.currentSessionKey)
+        if (!currentSessionKey) {
+          setJson(res, 400, { error: 'Missing currentSessionKey' })
+          return
+        }
+        const sessionKey = await resetClaudeSession(currentSessionKey)
+        setJson(res, 200, { sessionKey })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/claude-api/sessions/rename') {
+        const payload = asRecord(await readJsonBody(req))
+        const sessionKey = normalizeText(payload?.sessionKey)
+        const label = normalizeText(payload?.label)
+        if (!sessionKey || !label) {
+          setJson(res, 400, { error: 'Missing sessionKey or label' })
+          return
+        }
+        await renameClaudeSession(sessionKey, label)
         setJson(res, 200, { ok: true })
         return
       }

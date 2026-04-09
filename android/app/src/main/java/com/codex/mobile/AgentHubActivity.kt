@@ -24,11 +24,7 @@ class AgentHubActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnAgentHubClaude).setOnClickListener {
-            startActivity(
-                Intent(this, CliAgentChatActivity::class.java).apply {
-                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
-                },
-            )
+            startMainWithTarget(MainActivity.OPEN_TARGET_CLAUDE_SESSION)
         }
 
         findViewById<Button>(R.id.btnAgentHubOpenCode).setOnClickListener {

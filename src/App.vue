@@ -102,6 +102,96 @@
         </a>
       </section>
 
+      <section v-else-if="isClaudeRoute" class="sidebar-root">
+        <div v-if="!isSidebarCollapsed" class="openclaw-sidebar-actions">
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('openclaw_back_codex')"
+            @click="onBackToCodexRoute"
+          >
+            {{ t('openclaw_back_codex') }}
+          </button>
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('claude_new_session')"
+            :disabled="isClaudeSessionCreating"
+            @click="onCreateClaudeSession"
+          >
+            {{ t('claude_new_session') }}
+          </button>
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('claude_reset_session')"
+            :disabled="isClaudeSessionCreating || !claudeSelectedSessionKey"
+            @click="onResetClaudeSession"
+          >
+            {{ t('claude_reset_session') }}
+          </button>
+          <button
+            type="button"
+            class="openclaw-sidebar-button"
+            :aria-label="t('claude_refresh')"
+            @click="onRefreshClaude"
+          >
+            {{ t('claude_refresh') }}
+          </button>
+        </div>
+
+        <div v-if="!isSidebarCollapsed" class="sidebar-search-bar">
+          <IconTablerSearch class="sidebar-search-bar-icon" />
+          <input
+            v-model="claudeSearchQuery"
+            class="sidebar-search-input"
+            type="text"
+            :aria-label="t('claude_search_sessions')"
+            :placeholder="t('claude_filter_sessions')"
+          />
+          <button
+            v-if="claudeSearchQuery.length > 0"
+            class="sidebar-search-clear"
+            type="button"
+            :aria-label="t('sidebar_clear_search')"
+            @click="onToggleClaudeSearch"
+          >
+            <IconTablerX class="sidebar-search-clear-icon" />
+          </button>
+        </div>
+
+        <div v-if="!isSidebarCollapsed" class="openclaw-health-status">
+          {{ claudeHealthOk ? t('claude_health_ok') : t('claude_health_fail') }}
+        </div>
+
+        <ul v-if="!isSidebarCollapsed" class="openclaw-session-list">
+          <li v-if="isClaudeLoadingSessions" class="openclaw-session-empty">
+            {{ t('claude_session_loading') }}
+          </li>
+          <li v-else-if="claudeFilteredSessions.length === 0" class="openclaw-session-empty">
+            {{ t('claude_session_empty') }}
+          </li>
+          <li
+            v-for="session in claudeFilteredSessions"
+            :key="session.key"
+            class="openclaw-session-item"
+          >
+            <button
+              type="button"
+              class="openclaw-session-button"
+              :class="{ 'is-active': session.key === claudeSelectedSessionKey }"
+              :aria-current="session.key === claudeSelectedSessionKey ? 'true' : 'false'"
+              :aria-label="`${session.title} ${formatOpenClawTime(session.updatedAtMs)}`"
+              @click="onSelectClaudeSession(session.key)"
+              @contextmenu.prevent="onRenameClaudeSession(session.key)"
+            >
+              <span class="openclaw-session-title">{{ session.title }}</span>
+              <span class="openclaw-session-meta">{{ formatOpenClawTime(session.updatedAtMs) }}</span>
+            </button>
+          </li>
+        </ul>
+      </section>
+
       <section v-else class="sidebar-root">
         <SidebarThreadControls
           v-if="!isSidebarCollapsed"
@@ -174,7 +264,7 @@
         <ContentHeader :title="contentTitle">
           <template #leading>
             <SidebarThreadControls
-              v-if="isSidebarCollapsed && !isOpenClawRoute"
+              v-if="isSidebarCollapsed && !isOpenClawRoute && !isClaudeRoute"
               class="sidebar-thread-controls-header-host"
               :is-sidebar-collapsed="isSidebarCollapsed"
               :is-auto-refresh-enabled="isAutoRefreshEnabled"
@@ -282,6 +372,99 @@
             </div>
           </template>
 
+          <template v-else-if="isClaudeRoute">
+            <div class="content-grid">
+              <div class="openclaw-toolbar">
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="claudeProcessToggleLabel"
+                  @click="toggleClaudeProcessView"
+                >
+                  {{ claudeProcessToggleLabel }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="claudeSharedStorageToggleLabel"
+                  @click="toggleClaudeAllowSharedStorage"
+                >
+                  {{ claudeSharedStorageToggleLabel }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="claudeDangerousModeToggleLabel"
+                  @click="toggleClaudeDangerousMode"
+                >
+                  {{ claudeDangerousModeToggleLabel }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="t('claude_load_older')"
+                  @click="loadOlderClaudeHistory"
+                >
+                  {{ t('claude_load_older') }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="t('claude_reset_lite')"
+                  @click="resetClaudeHistoryToLite"
+                >
+                  {{ t('claude_reset_lite') }}
+                </button>
+                <span class="openclaw-toolbar-tip">
+                  {{ t('claude_history_window', { count: String(claudeHistoryLimit) }) }}
+                </span>
+              </div>
+
+              <p v-if="claudeLastError.length > 0" class="content-error">
+                {{ claudeLastError }}
+              </p>
+
+              <div class="content-thread">
+                <ThreadConversation
+                  :messages="claudeMessages"
+                  :is-loading="isClaudeLoadingMessages && claudeMessages.length === 0"
+                  :active-thread-id="claudeSelectedSessionKey || '__claude__'"
+                  :scroll-state="null"
+                  :live-overlay="claudeLiveOverlay"
+                  :pending-requests="claudePendingRequests"
+                  :message-actions-enabled="false"
+                  @update-scroll-state="onIgnoreThreadScrollState"
+                  @respond-server-request="onIgnoreServerRequest"
+                  @copy-message="onCopyMessage"
+                  @delete-from-message="onIgnoreMessageAction"
+                  @branch-from-message="onIgnoreMessageAction"
+                />
+              </div>
+
+              <p v-if="!claudeSelectedSessionKey" class="conversation-empty">
+                {{ t('claude_no_session_selected') }}
+              </p>
+
+              <ClaudeComposer
+                :session-key="claudeSelectedSessionKey"
+                :disabled="isClaudeSendingMessage"
+                :placeholder="t('claude_send_placeholder')"
+                :send-label="t('claude_send_button')"
+                :abort-label="t('claude_abort_task')"
+                :abort-disabled="!claudeSelectedSessionKey || isClaudeAbortingRun"
+                :attach-label="t('claude_attach_button')"
+                :attach-camera-label="t('claude_attach_camera')"
+                :attach-gallery-label="t('claude_attach_gallery')"
+                :attach-files-label="t('claude_attach_files')"
+                :remove-attachment-label="t('claude_attach_remove')"
+                :image-tag-label="t('claude_attach_image_tag')"
+                :file-tag-label="t('claude_attach_file_tag')"
+                @submit="onSubmitClaudeMessage"
+                @abort-run="onAbortClaudeRun"
+              />
+            </div>
+          </template>
+
           <template v-else-if="isHomeRoute">
             <div class="content-grid">
               <div class="new-thread-empty">
@@ -336,6 +519,7 @@ import ContentHeader from './components/content/ContentHeader.vue'
 import ThreadConversation from './components/content/ThreadConversation.vue'
 import ThreadComposer from './components/content/ThreadComposer.vue'
 import OpenClawComposer from './components/content/OpenClawComposer.vue'
+import ClaudeComposer from './components/content/ClaudeComposer.vue'
 import ComposerDropdown from './components/content/ComposerDropdown.vue'
 import SidebarThreadControls from './components/sidebar/SidebarThreadControls.vue'
 import IconTablerSearch from './components/icons/IconTablerSearch.vue'
@@ -343,9 +527,11 @@ import IconTablerX from './components/icons/IconTablerX.vue'
 import IconTablerExternalLink from './components/icons/IconTablerExternalLink.vue'
 import { useDesktopState } from './composables/useDesktopState'
 import { useOpenClawState } from './composables/useOpenClawState'
+import { useClaudeState } from './composables/useClaudeState'
 import { useUiI18n, type LocalePreference } from './composables/useUiI18n'
 import type { ReasoningEffort, ThreadScrollState, UiServerRequest } from './types/codex'
 import type { OpenClawComposerSubmitPayload } from './types/openclaw'
+import type { ClaudeComposerSubmitPayload } from './types/claude'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
 const { localePreference, setLocalePreference, t } = useUiI18n()
@@ -431,6 +617,43 @@ const {
   stopPolling: stopOpenClawPolling,
 } = useOpenClawState()
 
+const {
+  sessions: claudeSessions,
+  selectedSession: claudeSelectedSession,
+  selectedSessionKey: claudeSelectedSessionKey,
+  selectedSessionTitle: claudeSelectedSessionTitle,
+  messages: claudeMessages,
+  showProcess: claudeShowProcess,
+  historyLimit: claudeHistoryLimit,
+  healthOk: claudeHealthOk,
+  allowSharedStorage: claudeAllowSharedStorage,
+  dangerousMode: claudeDangerousMode,
+  isLoadingSessions: isClaudeLoadingSessions,
+  isLoadingMessages: isClaudeLoadingMessages,
+  isSendingMessage: isClaudeSendingMessage,
+  abortingRun: isClaudeAbortingRun,
+  liveOverlay: claudeLiveOverlay,
+  lastError: claudeLastError,
+  initialize: initializeClaude,
+  ensureSessionReady: ensureClaudeSessionReady,
+  refreshHealth: refreshClaudeHealth,
+  refreshSessions: refreshClaudeSessions,
+  refreshHistory: refreshClaudeHistory,
+  selectSession: selectClaudeSession,
+  sendMessage: sendClaudeMessage,
+  createSession: createClaudeSession,
+  resetCurrentSession: resetCurrentClaudeSession,
+  updateSessionTitle: updateClaudeSessionTitle,
+  toggleProcessView: toggleClaudeProcessView,
+  loadOlderHistory: loadOlderClaudeHistory,
+  resetHistoryToLite: resetClaudeHistoryToLite,
+  toggleAllowSharedStorage: toggleClaudeAllowSharedStorage,
+  toggleDangerousMode: toggleClaudeDangerousMode,
+  abortCurrentRunNow: abortClaudeRunNow,
+  startPolling: startClaudePolling,
+  stopPolling: stopClaudePolling,
+} = useClaudeState()
+
 const route = useRoute()
 const router = useRouter()
 const isCodexBridgeAvailable = ref(true)
@@ -444,12 +667,19 @@ const sidebarSearchInputRef = ref<HTMLInputElement | null>(null)
 const openClawSearchQuery = ref('')
 const openClawPendingRequests = ref<UiServerRequest[]>([])
 const isOpenClawSessionCreating = ref(false)
+const claudeSearchQuery = ref('')
+const claudePendingRequests = ref<UiServerRequest[]>([])
+const isClaudeSessionCreating = ref(false)
 
 const routeThreadId = computed(() => {
   const rawThreadId = route.params.threadId
   return typeof rawThreadId === 'string' ? rawThreadId : ''
 })
 const routeOpenClawSessionKey = computed(() => {
+  const rawSession = route.query.session
+  return typeof rawSession === 'string' ? rawSession.trim() : ''
+})
+const routeClaudeSessionKey = computed(() => {
   const rawSession = route.query.session
   return typeof rawSession === 'string' ? rawSession.trim() : ''
 })
@@ -467,10 +697,14 @@ const knownThreadIdSet = computed(() => {
 const isHomeRoute = computed(() => route.name === 'home')
 const isThreadRoute = computed(() => route.name === 'thread')
 const isOpenClawRoute = computed(() => route.name === 'openclaw-chat')
+const isClaudeRoute = computed(() => route.name === 'claude-chat')
 const isCodexRoute = computed(() => isHomeRoute.value || isThreadRoute.value)
 const contentTitle = computed(() => {
   if (isOpenClawRoute.value) {
     return openClawSelectedSessionTitle.value || t('openclaw_chat_title')
+  }
+  if (isClaudeRoute.value) {
+    return claudeSelectedSessionTitle.value || t('claude_chat_title')
   }
   if (isHomeRoute.value) return t('content_new_thread')
   return selectedThread.value?.title ?? t('content_choose_thread')
@@ -494,10 +728,30 @@ const isSelectedThreadInProgress = computed(() => !isHomeRoute.value && selected
 const openClawProcessToggleLabel = computed(() =>
   openClawShowProcess.value ? t('openclaw_process_on') : t('openclaw_process_off'),
 )
+const claudeProcessToggleLabel = computed(() =>
+  claudeShowProcess.value ? t('claude_process_on') : t('claude_process_off'),
+)
+const claudeSharedStorageToggleLabel = computed(() =>
+  claudeAllowSharedStorage.value ? t('claude_allow_shared_storage_on') : t('claude_allow_shared_storage_off'),
+)
+const claudeDangerousModeToggleLabel = computed(() =>
+  claudeDangerousMode.value ? t('claude_dangerous_mode_on') : t('claude_dangerous_mode_off'),
+)
 const openClawFilteredSessions = computed(() => {
   const query = openClawSearchQuery.value.trim().toLowerCase()
   if (query.length === 0) return openClawSessions.value
   return openClawSessions.value.filter((row) => {
+    return (
+      row.title.toLowerCase().includes(query) ||
+      row.key.toLowerCase().includes(query) ||
+      row.preview.toLowerCase().includes(query)
+    )
+  })
+})
+const claudeFilteredSessions = computed(() => {
+  const query = claudeSearchQuery.value.trim().toLowerCase()
+  if (query.length === 0) return claudeSessions.value
+  return claudeSessions.value.filter((row) => {
     return (
       row.title.toLowerCase().includes(query) ||
       row.key.toLowerCase().includes(query) ||
@@ -537,6 +791,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onWindowKeyDown)
   stopPolling()
   stopOpenClawPolling()
+  stopClaudePolling()
 })
 
 function toggleSidebarSearch(): void {
@@ -709,6 +964,13 @@ function onOpenOpenClawChat(): void {
   void router.push({ name: 'openclaw-chat', query })
 }
 
+function onOpenClaudeChat(): void {
+  const query = claudeSelectedSessionKey.value
+    ? { session: claudeSelectedSessionKey.value }
+    : undefined
+  void router.push({ name: 'claude-chat', query })
+}
+
 function onBackToCodexRoute(): void {
   if (selectedThreadId.value) {
     void router.push({ name: 'thread', params: { threadId: selectedThreadId.value } })
@@ -719,6 +981,10 @@ function onBackToCodexRoute(): void {
 
 function onToggleOpenClawSearch(): void {
   openClawSearchQuery.value = ''
+}
+
+function onToggleClaudeSearch(): void {
+  claudeSearchQuery.value = ''
 }
 
 function onSelectOpenClawSession(sessionKey: string): void {
@@ -739,12 +1005,34 @@ function onRefreshOpenClaw(): void {
   })()
 }
 
+function onSelectClaudeSession(sessionKey: string): void {
+  if (!sessionKey) return
+  void (async () => {
+    await selectClaudeSession(sessionKey)
+    if (isClaudeRoute.value) {
+      await router.replace({ name: 'claude-chat', query: { session: sessionKey } })
+    }
+  })()
+}
+
+function onRefreshClaude(): void {
+  void (async () => {
+    await refreshClaudeHealth()
+    await refreshClaudeSessions(claudeSelectedSessionKey.value)
+    await refreshClaudeHistory()
+  })()
+}
+
 function onTriggerOpenClawHeartbeat(): void {
   void triggerOpenClawHeartbeatNow()
 }
 
 function onAbortOpenClawRun(): void {
   void abortOpenClawRunNow()
+}
+
+function onAbortClaudeRun(): void {
+  void abortClaudeRunNow()
 }
 
 function onCreateOpenClawSession(): void {
@@ -762,6 +1050,25 @@ function onCreateOpenClawSession(): void {
       }
     } finally {
       isOpenClawSessionCreating.value = false
+    }
+  })()
+}
+
+function onCreateClaudeSession(): void {
+  void (async () => {
+    if (isClaudeSessionCreating.value) return
+    isClaudeSessionCreating.value = true
+    try {
+      const sessionKey = await createClaudeSession()
+      if (sessionKey) {
+        await router.replace({ name: 'claude-chat', query: { session: sessionKey } })
+      }
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        window.alert(error instanceof Error ? error.message : t('claude_create_session_failed'))
+      }
+    } finally {
+      isClaudeSessionCreating.value = false
     }
   })()
 }
@@ -785,6 +1092,25 @@ function onResetOpenClawSession(): void {
   })()
 }
 
+function onResetClaudeSession(): void {
+  void (async () => {
+    if (isClaudeSessionCreating.value) return
+    isClaudeSessionCreating.value = true
+    try {
+      const sessionKey = await resetCurrentClaudeSession()
+      if (sessionKey) {
+        await router.replace({ name: 'claude-chat', query: { session: sessionKey } })
+      }
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        window.alert(error instanceof Error ? error.message : t('claude_reset_session_failed'))
+      }
+    } finally {
+      isClaudeSessionCreating.value = false
+    }
+  })()
+}
+
 function onRenameOpenClawSession(sessionKey: string): void {
   if (!sessionKey || typeof window === 'undefined') return
   const current = openClawSelectedSession.value?.title || sessionKey
@@ -799,8 +1125,26 @@ function onRenameOpenClawSession(sessionKey: string): void {
   })()
 }
 
+function onRenameClaudeSession(sessionKey: string): void {
+  if (!sessionKey || typeof window === 'undefined') return
+  const current = claudeSelectedSession.value?.title || sessionKey
+  const nextTitle = window.prompt(t('claude_rename_session'), current)?.trim() || ''
+  if (!nextTitle) return
+  void (async () => {
+    try {
+      await updateClaudeSessionTitle(sessionKey, nextTitle)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : t('claude_rename_session_failed'))
+    }
+  })()
+}
+
 function onSubmitOpenClawMessage(payload: OpenClawComposerSubmitPayload): void {
   void sendOpenClawMessage(payload)
+}
+
+function onSubmitClaudeMessage(payload: ClaudeComposerSubmitPayload): void {
+  void sendClaudeMessage(payload)
 }
 
 function onIgnoreThreadScrollState(): void {
@@ -845,6 +1189,11 @@ async function initialize(): Promise<void> {
   } catch {
     // Keep Codex UI available even if OpenClaw bootstrap is temporarily unavailable.
   }
+  try {
+    await initializeClaude(routeClaudeSessionKey.value)
+  } catch {
+    // Keep Codex UI available even if Claude bootstrap is temporarily unavailable.
+  }
   hasInitialized.value = true
   await syncThreadSelectionWithRoute()
   if (isCodexBridgeAvailable.value) {
@@ -852,6 +1201,9 @@ async function initialize(): Promise<void> {
   }
   if (isOpenClawRoute.value) {
     startOpenClawPolling()
+  }
+  if (isClaudeRoute.value) {
+    startClaudePolling()
   }
 }
 
@@ -977,6 +1329,52 @@ watch(
     if (!sessionKey) return
     if (routeOpenClawSessionKey.value === sessionKey) return
     void router.replace({ name: 'openclaw-chat', query: { session: sessionKey } })
+  },
+)
+
+watch(
+  () => isClaudeRoute.value,
+  (isActive) => {
+    if (!hasInitialized.value) return
+    if (isActive) {
+      startClaudePolling()
+      void (async () => {
+        try {
+          await ensureClaudeSessionReady(routeClaudeSessionKey.value)
+          if (routeClaudeSessionKey.value) {
+            await selectClaudeSession(routeClaudeSessionKey.value)
+          } else if (claudeSelectedSessionKey.value) {
+            await router.replace({ name: 'claude-chat', query: { session: claudeSelectedSessionKey.value } })
+          }
+        } catch {
+          // Keep route stable and let polling-based bootstrap continue recovering.
+        }
+      })()
+      return
+    }
+    stopClaudePolling()
+  },
+)
+
+watch(
+  () => routeClaudeSessionKey.value,
+  (sessionKey) => {
+    if (!hasInitialized.value) return
+    if (!isClaudeRoute.value) return
+    if (!sessionKey) return
+    if (sessionKey === claudeSelectedSessionKey.value) return
+    void selectClaudeSession(sessionKey)
+  },
+)
+
+watch(
+  () => claudeSelectedSessionKey.value,
+  (sessionKey) => {
+    if (!hasInitialized.value) return
+    if (!isClaudeRoute.value) return
+    if (!sessionKey) return
+    if (routeClaudeSessionKey.value === sessionKey) return
+    void router.replace({ name: 'claude-chat', query: { session: sessionKey } })
   },
 )
 

@@ -187,11 +187,9 @@ class MainActivity : AppCompatActivity() {
             updateUiForCurrentTarget()
         }
         tabClaudeButton.setOnClickListener {
-            startActivity(
-                Intent(this, CliAgentChatActivity::class.java).apply {
-                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
-                },
-            )
+            currentUiTarget = OPEN_TARGET_CLAUDE_SESSION
+            webView.loadUrl(buildClaudeChatPageUrl(extractSessionFromCurrentUrl()))
+            updateUiForCurrentTarget()
         }
         tabOpenCodeButton.setOnClickListener {
             startActivity(
@@ -220,7 +218,11 @@ class MainActivity : AppCompatActivity() {
         }
         val targetUrl = resolveLaunchUrlFromIntent(intent) ?: return
         pendingLaunchUrl = targetUrl
-        currentUiTarget = if (isOpenClawChatUrl(targetUrl)) OPEN_TARGET_OPENCLAW_SESSION else OPEN_TARGET_CODEX_HOME
+        currentUiTarget = when {
+            isOpenClawChatUrl(targetUrl) -> OPEN_TARGET_OPENCLAW_SESSION
+            isClaudeChatUrl(targetUrl) -> OPEN_TARGET_CLAUDE_SESSION
+            else -> OPEN_TARGET_CODEX_HOME
+        }
         if (setupStarted && webView.visibility == View.VISIBLE) {
             webView.loadUrl(targetUrl)
             pendingLaunchUrl = null
@@ -243,7 +245,11 @@ class MainActivity : AppCompatActivity() {
             updateUiForCurrentTarget()
             val targetUrl = pendingLaunchUrl
             if (targetUrl != null && webView.visibility == View.VISIBLE) {
-                currentUiTarget = if (isOpenClawChatUrl(targetUrl)) OPEN_TARGET_OPENCLAW_SESSION else OPEN_TARGET_CODEX_HOME
+                currentUiTarget = when {
+                    isOpenClawChatUrl(targetUrl) -> OPEN_TARGET_OPENCLAW_SESSION
+                    isClaudeChatUrl(targetUrl) -> OPEN_TARGET_CLAUDE_SESSION
+                    else -> OPEN_TARGET_CODEX_HOME
+                }
                 webView.loadUrl(targetUrl)
                 pendingLaunchUrl = null
             }
@@ -318,6 +324,8 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 currentUiTarget = if (isOpenClawChatUrl(url)) {
                     OPEN_TARGET_OPENCLAW_SESSION
+                } else if (isClaudeChatUrl(url)) {
+                    OPEN_TARGET_CLAUDE_SESSION
                 } else {
                     OPEN_TARGET_CODEX_HOME
                 }
@@ -780,10 +788,10 @@ class MainActivity : AppCompatActivity() {
                 finish()
             } else {
                 val launchUrl = consumeLaunchUrlOrDefault()
-                currentUiTarget = if (isOpenClawChatUrl(launchUrl)) {
-                    OPEN_TARGET_OPENCLAW_SESSION
-                } else {
-                    OPEN_TARGET_CODEX_HOME
+                currentUiTarget = when {
+                    isOpenClawChatUrl(launchUrl) -> OPEN_TARGET_OPENCLAW_SESSION
+                    isClaudeChatUrl(launchUrl) -> OPEN_TARGET_CLAUDE_SESSION
+                    else -> OPEN_TARGET_CODEX_HOME
                 }
                 updateUiForCurrentTarget()
                 webView.loadUrl(launchUrl)
@@ -833,7 +841,6 @@ class MainActivity : AppCompatActivity() {
     private fun redirectToExternalAgentIfNeeded(intent: Intent?): Boolean {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
         val nextAgent = when (target) {
-            OPEN_TARGET_CLAUDE_SESSION -> ExternalAgentId.CLAUDE_CODE
             OPEN_TARGET_OPENCODE_SESSION -> ExternalAgentId.OPEN_CODE
             else -> null
         } ?: return false
@@ -892,7 +899,10 @@ class MainActivity : AppCompatActivity() {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
                 buildOpenClawChatPageUrl(sessionKey)
             }
-            OPEN_TARGET_CLAUDE_SESSION -> null
+            OPEN_TARGET_CLAUDE_SESSION -> {
+                val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
+                buildClaudeChatPageUrl(sessionKey)
+            }
             OPEN_TARGET_OPENCODE_SESSION -> null
             else -> null
         }
@@ -911,6 +921,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildOpenClawChatPageUrl(sessionKey: String?): String {
         val builder = Uri.parse("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/openclaw/chat").buildUpon()
+        val normalized = sessionKey?.trim().orEmpty()
+        if (normalized.isNotEmpty()) {
+            builder.appendQueryParameter("session", normalized)
+        }
+        return builder.build().toString()
+    }
+
+    private fun isClaudeChatUrl(url: String?): Boolean {
+        val raw = url?.trim().orEmpty()
+        return raw.contains("/claude/chat")
+    }
+
+    private fun buildClaudeChatPageUrl(sessionKey: String?): String {
+        val builder = Uri.parse("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/claude/chat").buildUpon()
         val normalized = sessionKey?.trim().orEmpty()
         if (normalized.isNotEmpty()) {
             builder.appendQueryParameter("session", normalized)
