@@ -2426,21 +2426,21 @@ EOF
         val repairCmd = """
             set -e
             BASE="$prefix/lib/node_modules/opencode-ai"
-            BIN_DIR="$BASE/bin"
-            mkdir -p "$BIN_DIR"
-            if [ ! -f "$BIN_DIR/.opencode" ]; then
-              SRC="$BASE/node_modules/opencode-linux-arm64/bin/opencode"
-              if [ ! -f "$SRC" ]; then
+            BIN_DIR="${'$'}BASE/bin"
+            mkdir -p "${'$'}BIN_DIR"
+            if [ ! -f "${'$'}BIN_DIR/.opencode" ]; then
+              SRC="${'$'}BASE/node_modules/opencode-linux-arm64/bin/opencode"
+              if [ ! -f "${'$'}SRC" ]; then
                 node $npmCli install -g opencode-linux-arm64@latest 2>&1
                 SRC="$prefix/lib/node_modules/opencode-linux-arm64/bin/opencode"
               fi
-              if [ -f "$SRC" ]; then
-                cp -f "$SRC" "$BIN_DIR/.opencode"
-                chmod 700 "$BIN_DIR/.opencode"
+              if [ -f "${'$'}SRC" ]; then
+                cp -f "${'$'}SRC" "${'$'}BIN_DIR/.opencode"
+                chmod 700 "${'$'}BIN_DIR/.opencode"
               fi
             fi
-            [ -f "$BIN_DIR/opencode" ] && chmod 700 "$BIN_DIR/opencode"
-            [ -f "$BIN_DIR/.opencode" ] && chmod 700 "$BIN_DIR/.opencode"
+            [ -f "${'$'}BIN_DIR/opencode" ] && chmod 700 "${'$'}BIN_DIR/opencode"
+            [ -f "${'$'}BIN_DIR/.opencode" ] && chmod 700 "${'$'}BIN_DIR/.opencode"
         """.trimIndent()
         runInPrefix(repairCmd, onOutput = { onProgress(it) })
         return isOpenCodeInstalled()
