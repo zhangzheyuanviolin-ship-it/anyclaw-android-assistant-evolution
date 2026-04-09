@@ -272,6 +272,8 @@ class CliAgentChatActivity : AppCompatActivity() {
             out.appendLine("3) Ubuntu 命令使用 ubuntu-shell <command> 或直接 Linux 命令。")
             out.appendLine("4) 先做必要验证再给结论，且不要复述整段预检文本。")
             out.appendLine("5) 若某链路失败，需明确失败原因并自动切换可用链路继续。")
+            out.appendLine("6) 若用户只是问候/闲聊，直接文字回复，不调用任何工具。")
+            out.appendLine("7) 未经用户明确要求，不要调用 edit/write 类改文件工具。")
             out.appendLine()
             out.appendLine("自动注入预检结果：")
             out.appendLine(buildRuntimeProbeBlock(options))
@@ -329,20 +331,25 @@ class CliAgentChatActivity : AppCompatActivity() {
         val providerKey = normalizeProviderKey(config.providerId.ifBlank { "lobster" })
         val modelName = normalizeOpenCodeModelName(config.modelId)
         val modelRef = "$providerKey/$modelName"
-        val workDir = if (options.allowSharedStorage) "/sdcard" else homeDir
-        val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
+        // Keep runtime workspace deterministic and small; shared storage can still
+        // be accessed via explicit absolute paths when the model needs it.
+        val workDir = homeDir
+        // OpenCode chat is non-interactive in app UI; force auto-approve to avoid
+        // blocking on hidden approval prompts that can stall forever.
+        val dangerArg = "--dangerously-skip-permissions "
         val cmd =
             "export OPENCODE_CONFIG=${LocalBridgeClients.shellQuote(configFile.absolutePath)}; " +
+                "export CI=1; export NO_COLOR=1; " +
                 "export PATH=${LocalBridgeClients.shellQuote("$bridgeDir:${paths.prefixDir}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}; " +
                 "cd ${LocalBridgeClients.shellQuote(workDir)} 2>/dev/null || cd ${LocalBridgeClients.shellQuote(homeDir)}; " +
                 "${LocalBridgeClients.shellQuote(nativeBin)} run --model ${LocalBridgeClients.shellQuote(modelRef)} " +
-                "--dir ${LocalBridgeClients.shellQuote(workDir)} ${dangerArg}--format json ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
+                "--dir ${LocalBridgeClients.shellQuote(workDir)} ${dangerArg}--format json --print-logs ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
 
         return try {
             val raw = runUbuntuCommandOrThrow(
                 cmd,
-                timeoutMillis = 240_000L,
-                idleTimeoutMillis = 60_000L,
+                timeoutMillis = 900_000L,
+                idleTimeoutMillis = null,
             ).trim()
             parseOpenCodeJsonOutput(raw)
         } catch (error: Exception) {
