@@ -409,11 +409,14 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun runUbuntuCapture(command: String): ProbeResult {
         val output = StringBuilder()
-        val code = serverManager.runInUbuntu(command) { line ->
-            val cleaned = stripAnsi(line).trim()
-            if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
-            output.appendLine(cleaned)
-        }
+        val code = serverManager.runInUbuntu(
+            command = command,
+            onOutput = { line ->
+                val cleaned = stripAnsi(line).trim()
+                if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
+                output.appendLine(cleaned)
+            },
+        )
         return ProbeResult(code = code, output = output.toString().trim())
     }
 
@@ -475,13 +478,14 @@ class CliAgentChatActivity : AppCompatActivity() {
         val output = StringBuilder()
         val code = serverManager.runInUbuntu(
             command = command,
+            onOutput = { line ->
+                val cleaned = stripAnsi(line).trim()
+                if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
+                output.appendLine(cleaned)
+            },
             timeoutMillis = timeoutMillis,
             idleTimeoutMillis = idleTimeoutMillis,
-        ) { line ->
-            val cleaned = stripAnsi(line).trim()
-            if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
-            output.appendLine(cleaned)
-        }
+        )
         val raw = output.toString().trim()
         if (code != 0) {
             if (code == 124) {
