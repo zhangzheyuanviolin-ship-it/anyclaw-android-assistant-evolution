@@ -60,6 +60,7 @@ class ConversationManagerActivity : AppCompatActivity() {
 
     private var allRows = mutableListOf<ConversationRow>()
     private var visibleRows = mutableListOf<ConversationRow>()
+    private var loadWarnings = mutableListOf<String>()
     private var loading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -122,35 +123,55 @@ class ConversationManagerActivity : AppCompatActivity() {
         tvStatus.text = getString(R.string.conversation_loading)
 
         Thread {
-            try {
-                val codexRows = loadCodexRows()
-                val openClawRows = loadOpenClawRows()
-                val claudeRows = loadCliAgentRows(ExternalAgentId.CLAUDE_CODE, SourceType.CLAUDE_CODE)
-                val openCodeRows = loadCliAgentRows(ExternalAgentId.OPEN_CODE, SourceType.OPEN_CODE)
-                allRows = (codexRows + openClawRows + claudeRows + openCodeRows)
-                    .distinctBy { "${it.source}:${it.id}" }
-                    .sortedByDescending { it.updatedAtMs }
-                    .toMutableList()
-
-                runOnUiThread {
-                    loading = false
-                    progressBar.visibility = View.GONE
-                    applyFilterAndRender()
+            val warnings = mutableListOf<String>()
+            val codexRows = runCatching { loadCodexRows() }.getOrElse { error ->
+                warnings += "Codex: ${normalizeLoadError(error)}"
+                emptyList()
+            }
+            val openClawRows = runCatching { loadOpenClawRows() }.getOrElse { error ->
+                warnings += "大龙虾: ${normalizeLoadError(error)}"
+                emptyList()
+            }
+            val claudeRows = runCatching { loadCliAgentRows(ExternalAgentId.CLAUDE_CODE, SourceType.CLAUDE_CODE) }
+                .getOrElse { error ->
+                    warnings += "Claude Code: ${normalizeLoadError(error)}"
+                    emptyList()
                 }
-            } catch (error: Exception) {
-                runOnUiThread {
-                    loading = false
-                    progressBar.visibility = View.GONE
-                    tvStatus.visibility = View.VISIBLE
-                    tvStatus.text = getString(R.string.conversation_error_prefix) + (error.message ?: "unknown")
+            val openCodeRows = runCatching { loadCliAgentRows(ExternalAgentId.OPEN_CODE, SourceType.OPEN_CODE) }
+                .getOrElse { error ->
+                    warnings += "OpenCode: ${normalizeLoadError(error)}"
+                    emptyList()
+                }
+
+            allRows = (codexRows + openClawRows + claudeRows + openCodeRows)
+                .distinctBy { "${it.source}:${it.id}" }
+                .sortedByDescending { it.updatedAtMs }
+                .toMutableList()
+
+            runOnUiThread {
+                loading = false
+                progressBar.visibility = View.GONE
+                loadWarnings = warnings.toMutableList()
+                applyFilterAndRender()
+                if (warnings.isNotEmpty()) {
                     Toast.makeText(
                         this,
-                        getString(R.string.conversation_error_prefix) + (error.message ?: "unknown"),
+                        getString(R.string.conversation_error_prefix) + warnings.joinToString(" | "),
                         Toast.LENGTH_LONG,
                     ).show()
                 }
             }
         }.start()
+    }
+
+    private fun normalizeLoadError(error: Throwable): String {
+        val firstLine = error.message
+            ?.lineSequence()
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (firstLine.isNotEmpty()) return firstLine
+        return error.javaClass.simpleName.ifEmpty { "unknown" }
     }
 
     private fun loadCodexRows(): List<ConversationRow> {
@@ -359,10 +380,17 @@ class ConversationManagerActivity : AppCompatActivity() {
             }
         }
         tvStatus.visibility = View.VISIBLE
-        tvStatus.text = if (visibleRows.isEmpty()) {
+        val baseStatus = if (visibleRows.isEmpty()) {
             getString(R.string.conversation_empty)
         } else {
             "${visibleRows.size} ${getString(R.string.conversation_source_all)}"
+        }
+        if (loadWarnings.isEmpty()) {
+            tvStatus.text = baseStatus
+        } else {
+            val brief = loadWarnings.take(2).joinToString(" | ")
+            val moreSuffix = if (loadWarnings.size > 2) " | +${loadWarnings.size - 2}项" else ""
+            tvStatus.text = "$baseStatus\n部分来源加载失败：$brief$moreSuffix"
         }
     }
 
