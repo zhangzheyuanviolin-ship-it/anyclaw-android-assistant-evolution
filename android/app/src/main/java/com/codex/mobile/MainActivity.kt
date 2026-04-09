@@ -31,7 +31,6 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import fi.iki.elonen.NanoHTTPD
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
@@ -66,7 +65,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabClaudeButton: Button
     private lateinit var tabOpenCodeButton: Button
     private lateinit var serverManager: CodexServerManager
-    private var shizukuBridgeServer: ShizukuShellBridgeServer? = null
     private var setupStarted = false
     private var waitingForStorageGrant = false
     private var waitingForShizukuGrant = false
@@ -231,6 +229,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        startShizukuBridgeServer()
         PromptProfileStore.ensureSynced(this)
         if (!setupStarted && waitingForStorageGrant && hasStorageAccess()) {
             waitingForStorageGrant = false
@@ -257,8 +256,6 @@ class MainActivity : AppCompatActivity() {
         stopGatewayStatusMonitor()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
-        shizukuBridgeServer?.stop()
-        shizukuBridgeServer = null
         serverManager.stopServer()
         stopService(Intent(this, CodexForegroundService::class.java))
     }
@@ -1209,13 +1206,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startShizukuBridgeServer() {
-        try {
-            val server = ShizukuShellBridgeServer(this)
-            server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-            shizukuBridgeServer = server
-            Log.i(TAG, "Shizuku bridge server started on ${ShizukuShellBridgeServer.BRIDGE_PORT}")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to start Shizuku bridge server: ${e.message}")
+        val started = ShizukuBridgeRuntime.ensureStarted(this)
+        if (!started) {
+            Log.w(TAG, "Shizuku bridge ensureStarted failed")
         }
     }
 }

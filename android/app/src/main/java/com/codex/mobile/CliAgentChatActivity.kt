@@ -61,6 +61,7 @@ class CliAgentChatActivity : AppCompatActivity() {
 
         agentId = parseAgent(intent.getStringExtra(EXTRA_AGENT_ID))
         serverManager = CodexServerManager(this)
+        ShizukuBridgeRuntime.ensureStarted(this)
 
         tvTitle = findViewById(R.id.tvCliAgentTitle)
         tvSession = findViewById(R.id.tvCliAgentSession)
@@ -204,6 +205,7 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun sendMessage() {
         if (sending) return
+        ShizukuBridgeRuntime.ensureStarted(this)
         val input = inputMessage.text.toString().trim()
         if (input.isEmpty()) return
 

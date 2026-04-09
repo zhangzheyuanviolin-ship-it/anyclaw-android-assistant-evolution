@@ -49,6 +49,8 @@ class CodexServerManager(private val context: Context) {
     private var proxyProcess: Process? = null
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
+    @Volatile
+    private var lastOpenCodeInstallError: String? = null
 
     /**
      * Use Android system shell for process bootstrap.
@@ -214,6 +216,8 @@ class CodexServerManager(private val context: Context) {
         val checkCmd = "${paths.prefixDir}/bin/opencode --version >/dev/null 2>&1"
         return runInUbuntu(checkCmd) == 0
     }
+
+    fun getLastOpenCodeInstallError(): String? = lastOpenCodeInstallError
 
     fun isServerBundleInstalled(): Boolean = false
 
@@ -2413,37 +2417,68 @@ EOF
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+        lastOpenCodeInstallError = null
 
-        onProgress("Installing OpenCode CLI…")
-        val code = runInPrefix(
-            "node $npmCli install -g opencode-ai@latest 2>&1",
+        onProgress("Installing OpenCode CLI package (ignore postinstall scripts)…")
+        val baseCode = runInPrefix(
+            "node $npmCli install -g --ignore-scripts opencode-ai@latest 2>&1",
             onOutput = { onProgress(it) },
         )
-        if (code != 0) {
-            Log.e(TAG, "npm install opencode-ai failed with code $code")
+        if (baseCode != 0) {
+            lastOpenCodeInstallError = "base_package_install_failed(code=$baseCode)"
+            Log.e(TAG, "npm install opencode-ai --ignore-scripts failed with code $baseCode")
             return false
         }
+
+        onProgress("Installing OpenCode linux-arm64 binary package (forced platform)…")
+        val linuxCode = runInPrefix(
+            "node $npmCli install -g --force opencode-linux-arm64@latest 2>&1",
+            onOutput = { onProgress(it) },
+        )
+        if (linuxCode != 0) {
+            onProgress("OpenCode linux binary package install returned non-zero: $linuxCode")
+        }
+
         val repairCmd = """
             set -e
             BASE="$prefix/lib/node_modules/opencode-ai"
             BIN_DIR="${'$'}BASE/bin"
+            WRAPPER="${'$'}BIN_DIR/opencode"
             mkdir -p "${'$'}BIN_DIR"
-            if [ ! -f "${'$'}BIN_DIR/.opencode" ]; then
-              SRC="${'$'}BASE/node_modules/opencode-linux-arm64/bin/opencode"
-              if [ ! -f "${'$'}SRC" ]; then
-                node $npmCli install -g opencode-linux-arm64@latest 2>&1
-                SRC="$prefix/lib/node_modules/opencode-linux-arm64/bin/opencode"
-              fi
-              if [ -f "${'$'}SRC" ]; then
-                cp -f "${'$'}SRC" "${'$'}BIN_DIR/.opencode"
-                chmod 700 "${'$'}BIN_DIR/.opencode"
-              fi
+            if [ ! -f "${'$'}WRAPPER" ]; then
+              echo "OpenCode wrapper missing: ${'$'}WRAPPER"
+              exit 13
             fi
-            [ -f "${'$'}BIN_DIR/opencode" ] && chmod 700 "${'$'}BIN_DIR/opencode"
-            [ -f "${'$'}BIN_DIR/.opencode" ] && chmod 700 "${'$'}BIN_DIR/.opencode"
+
+            SRC1="${'$'}BASE/node_modules/opencode-linux-arm64/bin/opencode"
+            SRC2="$prefix/lib/node_modules/opencode-linux-arm64/bin/opencode"
+            if [ -f "${'$'}SRC1" ]; then
+              cp -f "${'$'}SRC1" "${'$'}BIN_DIR/.opencode"
+            elif [ -f "${'$'}SRC2" ]; then
+              cp -f "${'$'}SRC2" "${'$'}BIN_DIR/.opencode"
+            fi
+
+            if [ ! -f "${'$'}BIN_DIR/.opencode" ]; then
+              echo "OpenCode binary source missing after install"
+              exit 14
+            fi
+
+            chmod 700 "${'$'}BIN_DIR/opencode" "${'$'}BIN_DIR/.opencode"
         """.trimIndent()
-        runInPrefix(repairCmd, onOutput = { onProgress(it) })
-        return isOpenCodeInstalled()
+        val repairCode = runInPrefix(repairCmd, onOutput = { onProgress(it) })
+        if (repairCode != 0) {
+            lastOpenCodeInstallError = "binary_repair_failed(code=$repairCode)"
+            Log.e(TAG, "OpenCode binary repair failed with code $repairCode")
+            return false
+        }
+
+        val healthy = isOpenCodeInstalled()
+        if (!healthy) {
+            lastOpenCodeInstallError = "ubuntu_health_check_failed"
+            Log.e(TAG, "OpenCode install finished but ubuntu health check failed")
+            return false
+        }
+        return true
     }
 
     fun ensureCodexWrapperScript() {

@@ -38,6 +38,7 @@ class PermissionManagerActivity : AppCompatActivity() {
         setContentView(R.layout.activity_permission_manager)
 
         serverManager = CodexServerManager(this)
+        ShizukuBridgeRuntime.ensureStarted(this)
         tvStatus = findViewById(R.id.tvShizukuStatus)
         tvCodexAuthStatus = findViewById(R.id.tvCodexAuthStatus)
         tvClaudeInstallStatus = findViewById(R.id.tvClaudeInstallStatus)
@@ -97,6 +98,7 @@ class PermissionManagerActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        ShizukuBridgeRuntime.ensureStarted(this)
         refreshStatus()
         refreshCodexAuthStatus()
         refreshOptionalAgentInstallStatus()
@@ -334,7 +336,12 @@ class PermissionManagerActivity : AppCompatActivity() {
                 val message = if (installed) {
                     getString(R.string.opencode_install_success)
                 } else {
-                    getString(R.string.opencode_install_failed)
+                    val detail = serverManager.getLastOpenCodeInstallError()?.trim().orEmpty()
+                    if (detail.isEmpty()) {
+                        getString(R.string.opencode_install_failed)
+                    } else {
+                        "${getString(R.string.opencode_install_failed)} ($detail)"
+                    }
                 }
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 refreshOptionalAgentInstallStatus()
