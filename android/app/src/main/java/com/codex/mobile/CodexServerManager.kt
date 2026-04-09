@@ -98,6 +98,47 @@ class CodexServerManager(private val context: Context) {
         return proc.waitFor()
     }
 
+    /**
+     * Run a command inside bundled Ubuntu runtime.
+     * Use this for binaries that require glibc (for example OpenCode native binary).
+     */
+    fun runInUbuntu(
+        command: String,
+        onOutput: ((String) -> Unit)? = null,
+    ): Int {
+        val paths = BootstrapInstaller.getPaths(context)
+        val env = buildEnvironment(paths)
+        val ubuntuBin = File(paths.homeDir, ".openclaw-android/linux-runtime/bin/ubuntu-shell.sh")
+        if (!ubuntuBin.exists()) {
+            onOutput?.invoke("ubuntu-runtime-missing")
+            return 127
+        }
+
+        val shell = runtimeShell()
+        val quoted = shellQuote(command)
+        val wrapped = "${ubuntuBin.absolutePath} --command $quoted"
+        val pb = ProcessBuilder(shell, "-c", wrapped)
+        pb.environment().clear()
+        pb.environment().putAll(env)
+        pb.directory(File(paths.homeDir))
+        pb.redirectErrorStream(true)
+
+        val proc = pb.start()
+        val reader = BufferedReader(InputStreamReader(proc.inputStream))
+        var line = reader.readLine()
+        while (line != null) {
+            Log.d(TAG, "[ubuntu] $line")
+            onOutput?.invoke(line)
+            line = reader.readLine()
+        }
+        return proc.waitFor()
+    }
+
+    private fun shellQuote(value: String): String {
+        val escaped = value.replace("'", "'\"'\"'")
+        return "'$escaped'"
+    }
+
     private fun startProcessLogThread(proc: Process, label: String) {
         Thread {
             try {
@@ -167,9 +208,11 @@ class CodexServerManager(private val context: Context) {
 
     fun isOpenCodeInstalled(): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
-        val pkg = File(paths.prefixDir, "lib/node_modules/opencode-ai")
-        if (pkg.exists()) return true
-        return runCapture("command -v opencode >/dev/null 2>&1 && echo yes || echo no") == "yes"
+        val wrapper = File(paths.prefixDir, "lib/node_modules/opencode-ai/bin/opencode")
+        val nativeBin = File(paths.prefixDir, "lib/node_modules/opencode-ai/bin/.opencode")
+        if (!wrapper.exists() || !nativeBin.exists()) return false
+        val checkCmd = "${paths.prefixDir}/bin/opencode --version >/dev/null 2>&1"
+        return runInUbuntu(checkCmd) == 0
     }
 
     fun isServerBundleInstalled(): Boolean = false
@@ -2380,6 +2423,26 @@ EOF
             Log.e(TAG, "npm install opencode-ai failed with code $code")
             return false
         }
+        val repairCmd = """
+            set -e
+            BASE="$prefix/lib/node_modules/opencode-ai"
+            BIN_DIR="$BASE/bin"
+            mkdir -p "$BIN_DIR"
+            if [ ! -f "$BIN_DIR/.opencode" ]; then
+              SRC="$BASE/node_modules/opencode-linux-arm64/bin/opencode"
+              if [ ! -f "$SRC" ]; then
+                node $npmCli install -g opencode-linux-arm64@latest 2>&1
+                SRC="$prefix/lib/node_modules/opencode-linux-arm64/bin/opencode"
+              fi
+              if [ -f "$SRC" ]; then
+                cp -f "$SRC" "$BIN_DIR/.opencode"
+                chmod 700 "$BIN_DIR/.opencode"
+              fi
+            fi
+            [ -f "$BIN_DIR/opencode" ] && chmod 700 "$BIN_DIR/opencode"
+            [ -f "$BIN_DIR/.opencode" ] && chmod 700 "$BIN_DIR/.opencode"
+        """.trimIndent()
+        runInPrefix(repairCmd, onOutput = { onProgress(it) })
         return isOpenCodeInstalled()
     }
 

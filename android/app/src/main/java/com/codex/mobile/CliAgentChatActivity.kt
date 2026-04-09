@@ -13,6 +13,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import java.io.File
 import java.util.Locale
 import org.json.JSONObject
@@ -22,6 +23,7 @@ class CliAgentChatActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_AGENT_ID = "com.codex.mobile.extra.AGENT_ID"
         const val EXTRA_SESSION_ID = "com.codex.mobile.extra.AGENT_SESSION_ID"
+        private const val RUNTIME_PREFS = "cli_agent_runtime_options"
     }
 
     private lateinit var tvTitle: TextView
@@ -39,11 +41,19 @@ class CliAgentChatActivity : AppCompatActivity() {
     private lateinit var btnCodex: Button
     private lateinit var btnClaude: Button
     private lateinit var btnOpenCode: Button
+    private lateinit var switchAllowSharedStorage: SwitchCompat
+    private lateinit var switchDangerousMode: SwitchCompat
 
     private lateinit var serverManager: CodexServerManager
     private lateinit var agentId: ExternalAgentId
     private lateinit var activeSession: AgentChatSession
+    private lateinit var runtimeOptions: AgentRuntimeOptions
     private var sending = false
+
+    private data class AgentRuntimeOptions(
+        val allowSharedStorage: Boolean,
+        val dangerousAutoApprove: Boolean,
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,8 +77,23 @@ class CliAgentChatActivity : AppCompatActivity() {
         btnCodex = findViewById(R.id.btnCliTabCodex)
         btnClaude = findViewById(R.id.btnCliTabClaude)
         btnOpenCode = findViewById(R.id.btnCliTabOpenCode)
+        switchAllowSharedStorage = findViewById(R.id.switchCliAllowSharedStorage)
+        switchDangerousMode = findViewById(R.id.switchCliDangerousMode)
 
         tvTitle.text = AgentSessionStore.displayAgentName(agentId)
+        runtimeOptions = loadRuntimeOptions()
+        switchAllowSharedStorage.isChecked = runtimeOptions.allowSharedStorage
+        switchDangerousMode.isChecked = runtimeOptions.dangerousAutoApprove
+        switchAllowSharedStorage.setOnCheckedChangeListener { _, checked ->
+            runtimeOptions = runtimeOptions.copy(allowSharedStorage = checked)
+            saveRuntimeOptions(runtimeOptions)
+            renderSession()
+        }
+        switchDangerousMode.setOnCheckedChangeListener { _, checked ->
+            runtimeOptions = runtimeOptions.copy(dangerousAutoApprove = checked)
+            saveRuntimeOptions(runtimeOptions)
+            renderSession()
+        }
 
         btnPermissionCenter.setOnClickListener {
             startActivity(Intent(this, PermissionManagerActivity::class.java))
@@ -132,7 +157,13 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun renderSession() {
         tvSession.text = "会话：${activeSession.title}"
-        tvStatus.text = if (sending) "正在执行..." else "就绪"
+        tvStatus.text = if (sending) {
+            "正在执行..."
+        } else {
+            val shared = if (runtimeOptions.allowSharedStorage) "开" else "关"
+            val danger = if (runtimeOptions.dangerousAutoApprove) "开" else "关"
+            "就绪 · 共享存储:$shared · 高权限:$danger"
+        }
         renderBottomTabState()
 
         listView.adapter = object : BaseAdapter() {
@@ -197,8 +228,8 @@ class CliAgentChatActivity : AppCompatActivity() {
             val assistantText = runCatching {
                 val prompt = buildPromptWithHistory(activeSession.messages)
                 when (agentId) {
-                    ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, prompt)
-                    ExternalAgentId.OPEN_CODE -> runOpenCode(modelConfig, prompt)
+                    ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, prompt, runtimeOptions)
+                    ExternalAgentId.OPEN_CODE -> runOpenCode(modelConfig, prompt, runtimeOptions)
                 }
             }.getOrElse { error ->
                 "执行失败：${error.message ?: "unknown error"}"
@@ -223,6 +254,13 @@ class CliAgentChatActivity : AppCompatActivity() {
         val recent = messages.takeLast(12)
         val out = StringBuilder()
         out.appendLine("你正在继续已有会话。请结合上下文回答，并在需要时执行可用工具。")
+        if (agentId == ExternalAgentId.OPEN_CODE || agentId == ExternalAgentId.CLAUDE_CODE) {
+            out.appendLine("工具链说明：")
+            out.appendLine("1) 你可直接运行 Ubuntu 命令。")
+            out.appendLine("2) 如需 Android 系统级命令，请使用 system-shell <command>。")
+            out.appendLine("3) 优先在回答前先执行必要命令验证结果。")
+            out.appendLine()
+        }
         out.appendLine("会话上下文如下：")
         recent.forEach { msg ->
             val role = msg.role.lowercase(Locale.getDefault())
@@ -234,28 +272,51 @@ class CliAgentChatActivity : AppCompatActivity() {
         return out.toString().trim()
     }
 
-    private fun runClaudePrint(config: AgentModelConfig, prompt: String): String {
+    private fun runClaudePrint(
+        config: AgentModelConfig,
+        prompt: String,
+        options: AgentRuntimeOptions,
+    ): String {
         val modelArg = if (config.modelId.isBlank()) "" else "--model ${LocalBridgeClients.shellQuote(config.modelId)} "
         val baseEnv = if (config.baseUrl.isBlank()) "" else "ANTHROPIC_BASE_URL=${LocalBridgeClients.shellQuote(config.baseUrl)} "
         val keyEnv = "ANTHROPIC_API_KEY=${LocalBridgeClients.shellQuote(config.apiKey)} "
+        val paths = BootstrapInstaller.getPaths(this)
+        val dirs = mutableListOf(paths.homeDir)
+        if (options.allowSharedStorage) {
+            dirs += "/sdcard"
+            dirs += "/storage/emulated/0"
+        }
+        val addDirArg = dirs.joinToString(" ") { "--add-dir ${LocalBridgeClients.shellQuote(it)}" } + " "
+        val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
         val cmd =
-            "${baseEnv}${keyEnv}claude -p ${modelArg}--output-format text ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
-        return runPrefixCommandOrThrow(cmd).trim()
+            "${baseEnv}${keyEnv}claude -p ${dangerArg}${addDirArg}${modelArg}--output-format text ${LocalBridgeClients.shellQuote(prompt)} < /dev/null 2>&1"
+        val raw = runPrefixCommandOrThrow(cmd).trim()
+        return cleanClaudeOutput(raw)
     }
 
-    private fun runOpenCode(config: AgentModelConfig, prompt: String): String {
-        val homeDir = BootstrapInstaller.getPaths(this).homeDir
+    private fun runOpenCode(
+        config: AgentModelConfig,
+        prompt: String,
+        options: AgentRuntimeOptions,
+    ): String {
+        val paths = BootstrapInstaller.getPaths(this)
+        val homeDir = paths.homeDir
         val configFile = File(homeDir, ".pocketlobster/opencode/opencode-${activeSession.sessionId}.json")
         configFile.parentFile?.mkdirs()
         configFile.writeText(buildOpenCodeConfig(config).toString(2))
+        val bridgeDir = ensureOpenCodeBridgeScripts(homeDir)
 
         val providerKey = normalizeProviderKey(config.providerId.ifBlank { "lobster" })
         val modelRef = if (config.modelId.contains("/")) config.modelId else "$providerKey/${config.modelId}"
+        val workDir = if (options.allowSharedStorage) "/sdcard" else homeDir
+        val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
         val cmd =
-            "OPENCODE_CONFIG=${LocalBridgeClients.shellQuote(configFile.absolutePath)} " +
-                "opencode run --model ${LocalBridgeClients.shellQuote(modelRef)} " +
-                "--format default ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
-        return runPrefixCommandOrThrow(cmd).trim()
+            "export OPENCODE_CONFIG=${LocalBridgeClients.shellQuote(configFile.absolutePath)}; " +
+                "export PATH=${LocalBridgeClients.shellQuote("$bridgeDir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}; " +
+                "cd ${LocalBridgeClients.shellQuote(workDir)} 2>/dev/null || cd ${LocalBridgeClients.shellQuote(homeDir)}; " +
+                "${LocalBridgeClients.shellQuote("${paths.prefixDir}/bin/opencode")} run --model ${LocalBridgeClients.shellQuote(modelRef)} " +
+                "--dir ${LocalBridgeClients.shellQuote(workDir)} ${dangerArg}--format default ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
+        return runUbuntuCommandOrThrow(cmd).trim()
     }
 
     private fun buildOpenCodeConfig(config: AgentModelConfig): JSONObject {
@@ -301,13 +362,123 @@ class CliAgentChatActivity : AppCompatActivity() {
         return raw
     }
 
+    private fun runUbuntuCommandOrThrow(command: String): String {
+        val output = StringBuilder()
+        val code = serverManager.runInUbuntu(command) { line ->
+            val cleaned = stripAnsi(line).trim()
+            if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
+            output.appendLine(cleaned)
+        }
+        val raw = output.toString().trim()
+        if (code != 0) {
+            throw IllegalStateException(raw.ifBlank { "ubuntu command exit code=$code" })
+        }
+        return raw
+    }
+
+    private fun cleanClaudeOutput(raw: String): String {
+        val filtered = raw.lineSequence()
+            .filterNot { it.startsWith("Claude Code Warning: no stdin data received") }
+            .filterNot { it.startsWith("If piping from a slow command, redirect stdin explicitly") }
+            .joinToString("\n")
+            .trim()
+        return filtered.ifBlank { raw.trim() }
+    }
+
     private fun stripAnsi(value: String): String {
-        return value.replace(Regex("\\u001B\\[[;\\d]*m"), "")
+        return value.replace(Regex("\\u001B\\[[;\\d]*[A-Za-z]"), "")
     }
 
     private fun normalizeProviderKey(raw: String): String {
         val cleaned = raw.trim().lowercase(Locale.US).replace(Regex("[^a-z0-9._-]"), "-")
         return cleaned.ifBlank { "lobster" }
+    }
+
+    private fun runtimeOptionKey(name: String): String = "${agentId.value}_$name"
+
+    private fun loadRuntimeOptions(): AgentRuntimeOptions {
+        val prefs = getSharedPreferences(RUNTIME_PREFS, MODE_PRIVATE)
+        val defaultDangerous = agentId == ExternalAgentId.OPEN_CODE
+        return AgentRuntimeOptions(
+            allowSharedStorage = prefs.getBoolean(runtimeOptionKey("allow_shared_storage"), true),
+            dangerousAutoApprove = prefs.getBoolean(runtimeOptionKey("dangerous_mode"), defaultDangerous),
+        )
+    }
+
+    private fun saveRuntimeOptions(options: AgentRuntimeOptions) {
+        getSharedPreferences(RUNTIME_PREFS, MODE_PRIVATE)
+            .edit()
+            .putBoolean(runtimeOptionKey("allow_shared_storage"), options.allowSharedStorage)
+            .putBoolean(runtimeOptionKey("dangerous_mode"), options.dangerousAutoApprove)
+            .apply()
+    }
+
+    private fun ensureOpenCodeBridgeScripts(homeDir: String): String {
+        val bridgeDir = File(homeDir, ".pocketlobster/bridges")
+        if (!bridgeDir.exists()) bridgeDir.mkdirs()
+        val systemShellScript = File(bridgeDir, "system-shell")
+        val ubuntuShellScript = File(bridgeDir, "ubuntu-shell")
+
+        val systemShellContent =
+            """
+            #!/usr/bin/env bash
+            set -euo pipefail
+            if [ "${'$'}#" -eq 0 ]; then
+              echo "Usage: system-shell <command>" >&2
+              exit 2
+            fi
+            cmd="${'$'}*"
+            payload=${'$'}(python3 - "${'$'}cmd" <<'PY'
+            import json,sys
+            print(json.dumps({"command": sys.argv[1]}))
+            PY
+            )
+            resp=${'$'}(curl -fsS --max-time 120 -H "Content-Type: application/json" -d "${'$'}payload" http://127.0.0.1:18926/exec || true)
+            if [ -z "${'$'}resp" ]; then
+              echo "Shizuku bridge unreachable" >&2
+              exit 3
+            fi
+            python3 - "${'$'}resp" <<'PY'
+            import json,sys
+            data={}
+            try:
+                data=json.loads(sys.argv[1])
+            except Exception:
+                sys.stderr.write("Invalid bridge response\n")
+                sys.exit(1)
+            out=data.get("stdout","")
+            err=data.get("stderr","")
+            if out:
+                sys.stdout.write(out)
+            if err:
+                sys.stderr.write(err)
+            code=data.get("exitCode", 0 if data.get("ok") else 1)
+            if (not data.get("ok")) and data.get("error"):
+                sys.stderr.write(str(data["error"]) + "\n")
+            if (not data.get("ok")) and data.get("error_code"):
+                sys.stderr.write("error_code=" + str(data["error_code"]) + "\n")
+            sys.exit(int(code))
+            PY
+            """.trimIndent() + "\n"
+        if (!systemShellScript.exists() || systemShellScript.readText() != systemShellContent) {
+            systemShellScript.writeText(systemShellContent)
+            systemShellScript.setExecutable(true)
+        }
+
+        val ubuntuShellContent =
+            """
+            #!/usr/bin/env bash
+            if [ "${'$'}#" -eq 0 ]; then
+              exec /bin/bash -il
+            fi
+            exec /bin/bash -lc "${'$'}*"
+            """.trimIndent() + "\n"
+        if (!ubuntuShellScript.exists() || ubuntuShellScript.readText() != ubuntuShellContent) {
+            ubuntuShellScript.writeText(ubuntuShellContent)
+            ubuntuShellScript.setExecutable(true)
+        }
+
+        return bridgeDir.absolutePath
     }
 
     private fun restartWithAgent(next: ExternalAgentId, sessionId: String?) {

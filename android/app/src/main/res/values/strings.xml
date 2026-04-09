@@ -199,6 +199,8 @@
     <string name="opencode_install_starting">正在安装 OpenCode…</string>
     <string name="opencode_install_success">OpenCode 组件安装完成。</string>
     <string name="opencode_install_failed">OpenCode 组件安装失败，请检查网络后重试。</string>
+    <string name="cli_option_allow_shared_storage">允许访问共享存储（/sdcard）</string>
+    <string name="cli_option_dangerous_mode">高权限自动放行（谨慎使用）</string>
     <string name="shizuku_revoke_hint">如需彻底撤销授权：点击“打开 Shizuku 应用”，在其中关闭对口袋大龙虾的授权。</string>
     <string name="shizuku_not_installed">未检测到 Shizuku 应用，系统命令通道不可用。</string>
     <string name="shizuku_service_not_running">检测到 Shizuku 已安装，但服务未运行。请先在 Shizuku 内启动服务。</string>

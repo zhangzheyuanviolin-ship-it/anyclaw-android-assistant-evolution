@@ -73,6 +73,20 @@
         </LinearLayout>
     </HorizontalScrollView>
 
+    <androidx.appcompat.widget.SwitchCompat
+        android:id="@+id/switchCliAllowSharedStorage"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/cli_option_allow_shared_storage" />
+
+    <androidx.appcompat.widget.SwitchCompat
+        android:id="@+id/switchCliDangerousMode"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text="@string/cli_option_dangerous_mode" />
+
     <ListView
         android:id="@+id/listCliAgentMessages"
         android:layout_width="match_parent"
