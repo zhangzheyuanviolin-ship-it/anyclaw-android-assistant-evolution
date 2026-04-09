@@ -79,17 +79,7 @@ class CodexServerManager(private val context: Context) {
         command: String,
         onOutput: ((String) -> Unit)? = null,
     ): Int {
-        val paths = BootstrapInstaller.getPaths(context)
-        val env = buildEnvironment(paths)
-
-        val shell = runtimeShell()
-        val pb = ProcessBuilder(shell, "-c", command)
-        pb.environment().clear()
-        pb.environment().putAll(env)
-        pb.directory(File(paths.homeDir))
-        pb.redirectErrorStream(true)
-
-        val proc = pb.start()
+        val proc = startPrefixProcess(command)
         val reader = BufferedReader(InputStreamReader(proc.inputStream))
         var line = reader.readLine()
         while (line != null) {
@@ -108,12 +98,36 @@ class CodexServerManager(private val context: Context) {
         command: String,
         onOutput: ((String) -> Unit)? = null,
     ): Int {
+        val proc = startUbuntuProcess(command)
+        val reader = BufferedReader(InputStreamReader(proc.inputStream))
+        var line = reader.readLine()
+        while (line != null) {
+            Log.d(TAG, "[ubuntu] $line")
+            onOutput?.invoke(line)
+            line = reader.readLine()
+        }
+        return proc.waitFor()
+    }
+
+    fun startPrefixProcess(command: String): Process {
+        val paths = BootstrapInstaller.getPaths(context)
+        val env = buildEnvironment(paths)
+
+        val shell = runtimeShell()
+        val pb = ProcessBuilder(shell, "-c", command)
+        pb.environment().clear()
+        pb.environment().putAll(env)
+        pb.directory(File(paths.homeDir))
+        pb.redirectErrorStream(true)
+        return pb.start()
+    }
+
+    fun startUbuntuProcess(command: String): Process {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths)
         val ubuntuBin = File(paths.homeDir, ".openclaw-android/linux-runtime/bin/ubuntu-shell.sh")
         if (!ubuntuBin.exists()) {
-            onOutput?.invoke("ubuntu-runtime-missing")
-            return 127
+            throw IllegalStateException("ubuntu-runtime-missing")
         }
 
         val shell = runtimeShell()
@@ -124,16 +138,7 @@ class CodexServerManager(private val context: Context) {
         pb.environment().putAll(env)
         pb.directory(File(paths.homeDir))
         pb.redirectErrorStream(true)
-
-        val proc = pb.start()
-        val reader = BufferedReader(InputStreamReader(proc.inputStream))
-        var line = reader.readLine()
-        while (line != null) {
-            Log.d(TAG, "[ubuntu] $line")
-            onOutput?.invoke(line)
-            line = reader.readLine()
-        }
-        return proc.waitFor()
+        return pb.start()
     }
 
     private fun shellQuote(value: String): String {

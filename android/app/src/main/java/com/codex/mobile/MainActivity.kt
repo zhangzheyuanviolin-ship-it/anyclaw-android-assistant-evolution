@@ -187,9 +187,11 @@ class MainActivity : AppCompatActivity() {
             updateUiForCurrentTarget()
         }
         tabClaudeButton.setOnClickListener {
-            currentUiTarget = OPEN_TARGET_CLAUDE_SESSION
-            webView.loadUrl(buildClaudeChatPageUrl(extractSessionFromCurrentUrl()))
-            updateUiForCurrentTarget()
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
+                },
+            )
         }
         tabOpenCodeButton.setOnClickListener {
             startActivity(
@@ -841,6 +843,7 @@ class MainActivity : AppCompatActivity() {
     private fun redirectToExternalAgentIfNeeded(intent: Intent?): Boolean {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
         val nextAgent = when (target) {
+            OPEN_TARGET_CLAUDE_SESSION -> ExternalAgentId.CLAUDE_CODE
             OPEN_TARGET_OPENCODE_SESSION -> ExternalAgentId.OPEN_CODE
             else -> null
         } ?: return false

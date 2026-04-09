@@ -87,6 +87,67 @@
         android:layout_marginTop="2dp"
         android:text="@string/cli_option_dangerous_mode" />
 
+    <androidx.appcompat.widget.SwitchCompat
+        android:id="@+id/switchCliShowProcess"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text="@string/cli_option_show_process" />
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnCliAttach"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/cli_attach_button_text" />
+
+            <Button
+                android:id="@+id/btnCliClearAttachments"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:text="@string/cli_clear_attachments_button_text" />
+
+            <Button
+                android:id="@+id/btnCliAbort"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:text="@string/cli_abort_button_text" />
+
+            <Button
+                android:id="@+id/btnCliLoadOlder"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:text="@string/cli_load_older_button_text" />
+
+            <Button
+                android:id="@+id/btnCliRestoreLite"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:text="@string/cli_restore_lite_button_text" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <TextView
+        android:id="@+id/tvCliAttachmentSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:textSize="13sp" />
+
     <ListView
         android:id="@+id/listCliAgentMessages"
         android:layout_width="match_parent"
