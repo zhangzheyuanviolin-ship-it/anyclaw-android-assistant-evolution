@@ -110,6 +110,15 @@ class CliAgentChatActivity : AppCompatActivity() {
         val processText: String,
     )
 
+    private data class ClaudeStreamParseState(
+        var assistantText: String = "",
+        var resultText: String = "",
+        val processLines: MutableList<String> = mutableListOf(),
+        val fallbackLines: MutableList<String> = mutableListOf(),
+        val seenToolUseIds: MutableSet<String> = mutableSetOf(),
+        val seenToolResultIds: MutableSet<String> = mutableSetOf(),
+    )
+
     private val filePickerLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             handlePickedUris(collectSelectionUris(result.resultCode, result.data))
@@ -488,10 +497,10 @@ class CliAgentChatActivity : AppCompatActivity() {
         val addDirArg = buildClaudeDirArgs(options)
         val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
         val cmd =
-            "${baseEnv}${keyEnv}claude -p ${dangerArg}${addDirArg}${modelArg}--output-format text ${LocalBridgeClients.shellQuote(prompt)} < /dev/null 2>&1"
-        return runStreamingCommand(serverManager.startPrefixProcess(cmd)) { raw ->
-            cleanClaudeOutput(raw)
-        }
+            "${baseEnv}${keyEnv}claude -p --verbose ${dangerArg}${addDirArg}${modelArg}" +
+                "--output-format stream-json --include-partial-messages --include-hook-events " +
+                "${LocalBridgeClients.shellQuote(prompt)} < /dev/null 2>&1"
+        return runClaudeStreamJson(serverManager.startPrefixProcess(cmd))
     }
 
     private fun buildClaudeDirArgs(options: AgentRuntimeOptions): String {
@@ -572,6 +581,173 @@ class CliAgentChatActivity : AppCompatActivity() {
             assistantText = assistant,
             processText = processText,
         )
+    }
+
+    private fun runClaudeStreamJson(process: Process): AgentRunResult {
+        activeProcess = process
+        val state = ClaudeStreamParseState()
+        BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+            var line = reader.readLine()
+            while (line != null) {
+                val cleaned = stripAnsi(line).trim()
+                if (shouldIgnoreProcessLine(cleaned)) {
+                    line = reader.readLine()
+                    continue
+                }
+                if (cleaned.isNotEmpty()) {
+                    if (!parseClaudeStreamLine(cleaned, state)) {
+                        state.fallbackLines += cleaned
+                        appendClaudeProcessLine(state.processLines, cleaned)
+                    }
+                }
+                line = reader.readLine()
+            }
+        }
+        val exitCode = process.waitFor()
+        activeProcess = null
+
+        if (abortRequested) {
+            return AgentRunResult(
+                assistantText = getString(R.string.cli_task_aborted),
+                processText = state.processLines.joinToString("\n").trim(),
+            )
+        }
+
+        val processText = state.processLines.joinToString("\n").trim()
+        val assistantText = chooseClaudeAssistantText(state).ifBlank {
+            cleanClaudeOutput(state.fallbackLines.joinToString("\n"))
+        }
+
+        if (exitCode != 0) {
+            val raw = (processText.ifBlank { state.fallbackLines.joinToString("\n").trim() })
+            throw IllegalStateException(raw.ifBlank { "command exit code=$exitCode" })
+        }
+
+        return AgentRunResult(
+            assistantText = assistantText.ifBlank { "Claude 未返回可解析内容" },
+            processText = processText,
+        )
+    }
+
+    private fun parseClaudeStreamLine(line: String, state: ClaudeStreamParseState): Boolean {
+        if (!line.startsWith("{")) return false
+        val payload = runCatching { JSONObject(line) }.getOrNull() ?: return false
+        val type = payload.optString("type").trim()
+        if (type.isBlank()) return false
+
+        when (type) {
+            "system" -> {
+                val subtype = payload.optString("subtype").trim()
+                if (subtype.equals("init", ignoreCase = true)) {
+                    appendClaudeProcessLine(state.processLines, "Claude 会话已初始化")
+                }
+            }
+            "assistant" -> {
+                val message = payload.optJSONObject("message")
+                if (message != null) {
+                    parseClaudeMessageContent(message, state)
+                }
+                val error = payload.optString("error").trim()
+                if (error.isNotBlank()) {
+                    appendClaudeProcessLine(state.processLines, "Claude 错误: $error")
+                }
+            }
+            "result" -> {
+                val result = payload.optString("result").trim()
+                if (result.isNotBlank()) {
+                    state.resultText = result
+                }
+                val isError = payload.optBoolean("is_error", false)
+                val terminalReason = payload.optString("terminal_reason").trim()
+                if (terminalReason.isNotBlank()) {
+                    appendClaudeProcessLine(state.processLines, "Claude 运行状态: $terminalReason")
+                }
+                if (isError && result.isNotBlank()) {
+                    appendClaudeProcessLine(state.processLines, "Claude 返回错误: $result")
+                }
+            }
+            else -> {
+                val subtype = payload.optString("subtype").trim()
+                val status = payload.optString("status").trim()
+                val phase = listOf(type, subtype, status)
+                    .filter { it.isNotBlank() }
+                    .joinToString("/")
+                    .trim()
+                if (phase.isNotBlank() && !phase.equals("assistant", ignoreCase = true)) {
+                    appendClaudeProcessLine(state.processLines, "事件: $phase")
+                }
+            }
+        }
+        return true
+    }
+
+    private fun parseClaudeMessageContent(message: JSONObject, state: ClaudeStreamParseState) {
+        val role = message.optString("role").trim().lowercase(Locale.US)
+        val content = message.optJSONArray("content") ?: return
+        val assistantParts = mutableListOf<String>()
+        for (i in 0 until content.length()) {
+            val block = content.optJSONObject(i) ?: continue
+            val blockType = block.optString("type").trim().lowercase(Locale.US)
+            when (blockType) {
+                "text" -> {
+                    val text = block.optString("text").trim()
+                    if (text.isNotBlank() && role == "assistant") {
+                        assistantParts += text
+                    }
+                }
+                "thinking" -> {
+                    val thinking = block.optString("thinking").trim()
+                    if (thinking.isNotBlank()) {
+                        appendClaudeProcessLine(state.processLines, "思考: ${clipProcessText(thinking)}")
+                    }
+                }
+                "redacted_thinking" -> {
+                    appendClaudeProcessLine(state.processLines, "思考: [模型返回了加密思考片段]")
+                }
+                "tool_use" -> {
+                    val id = block.optString("id").trim()
+                    if (id.isNotBlank() && !state.seenToolUseIds.add(id)) continue
+                    val name = block.optString("name").trim().ifBlank { "unknown_tool" }
+                    val inputText = block.opt("input")?.toString()?.trim().orEmpty()
+                    val suffix = if (inputText.isBlank()) "" else " 参数: ${clipProcessText(inputText)}"
+                    appendClaudeProcessLine(state.processLines, "工具调用: $name$suffix")
+                }
+                "tool_result" -> {
+                    val id = block.optString("tool_use_id").trim()
+                    if (id.isNotBlank() && !state.seenToolResultIds.add(id)) continue
+                    val contentText = block.opt("content")?.toString()?.trim().orEmpty()
+                    val suffix = if (contentText.isBlank()) "" else " 输出: ${clipProcessText(contentText)}"
+                    appendClaudeProcessLine(state.processLines, "工具结果:$suffix")
+                }
+            }
+        }
+        if (assistantParts.isNotEmpty()) {
+            state.assistantText = assistantParts.joinToString("\n").trim()
+        }
+    }
+
+    private fun chooseClaudeAssistantText(state: ClaudeStreamParseState): String {
+        if (state.assistantText.isNotBlank()) return state.assistantText
+        if (state.resultText.isNotBlank()) return state.resultText
+        return ""
+    }
+
+    private fun appendClaudeProcessLine(lines: MutableList<String>, line: String) {
+        val normalized = line.trim()
+        if (normalized.isBlank()) return
+        if (lines.lastOrNull() == normalized) return
+        lines += normalized
+        recordLiveProcessLine(normalized)
+    }
+
+    private fun clipProcessText(value: String, maxChars: Int = 220): String {
+        val singleLine = value
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+        if (singleLine.length <= maxChars) return singleLine
+        return singleLine.take(maxChars) + "..."
     }
 
     private fun shouldIgnoreProcessLine(line: String): Boolean {
