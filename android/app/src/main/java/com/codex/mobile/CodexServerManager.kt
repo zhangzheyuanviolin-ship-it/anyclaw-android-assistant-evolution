@@ -10,6 +10,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -107,6 +108,8 @@ class CodexServerManager(private val context: Context) {
     fun runInUbuntu(
         command: String,
         onOutput: ((String) -> Unit)? = null,
+        timeoutMillis: Long? = null,
+        idleTimeoutMillis: Long? = null,
     ): Int {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths)
@@ -126,14 +129,64 @@ class CodexServerManager(private val context: Context) {
         pb.redirectErrorStream(true)
 
         val proc = pb.start()
-        val reader = BufferedReader(InputStreamReader(proc.inputStream))
-        var line = reader.readLine()
-        while (line != null) {
-            Log.d(TAG, "[ubuntu] $line")
-            onOutput?.invoke(line)
-            line = reader.readLine()
+        val lastOutputAt = AtomicLong(System.currentTimeMillis())
+        val readerThread = Thread {
+            try {
+                val reader = BufferedReader(InputStreamReader(proc.inputStream))
+                var line = reader.readLine()
+                while (line != null) {
+                    lastOutputAt.set(System.currentTimeMillis())
+                    Log.d(TAG, "[ubuntu] $line")
+                    onOutput?.invoke(line)
+                    line = reader.readLine()
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "runInUbuntu reader error: ${error.message}")
+            }
         }
-        return proc.waitFor()
+        readerThread.isDaemon = true
+        readerThread.start()
+
+        if (timeoutMillis == null && idleTimeoutMillis == null) {
+            val code = proc.waitFor()
+            readerThread.join(500)
+            return code
+        }
+
+        val startedAt = System.currentTimeMillis()
+        var timeoutHit = false
+        var idleTimeoutHit = false
+        while (true) {
+            if (proc.waitFor(300, TimeUnit.MILLISECONDS)) break
+            val now = System.currentTimeMillis()
+            if (timeoutMillis != null && now - startedAt > timeoutMillis) {
+                timeoutHit = true
+                break
+            }
+            if (idleTimeoutMillis != null && now - lastOutputAt.get() > idleTimeoutMillis) {
+                idleTimeoutHit = true
+                break
+            }
+        }
+
+        if (timeoutHit || idleTimeoutHit) {
+            if (idleTimeoutHit) {
+                onOutput?.invoke("ubuntu-command-idle-timeout")
+            } else {
+                onOutput?.invoke("ubuntu-command-timeout")
+            }
+            proc.destroy()
+            if (!proc.waitFor(1500, TimeUnit.MILLISECONDS)) {
+                proc.destroyForcibly()
+                proc.waitFor(1500, TimeUnit.MILLISECONDS)
+            }
+            readerThread.join(500)
+            return if (idleTimeoutHit) 125 else 124
+        }
+
+        val code = proc.waitFor()
+        readerThread.join(500)
+        return code
     }
 
     private fun shellQuote(value: String): String {

@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import java.io.File
 import java.util.Locale
+import org.json.JSONArray
 import org.json.JSONObject
 
 class CliAgentChatActivity : AppCompatActivity() {
@@ -326,7 +327,8 @@ class CliAgentChatActivity : AppCompatActivity() {
         val bridgeDir = ensureOpenCodeBridgeScripts(homeDir)
 
         val providerKey = normalizeProviderKey(config.providerId.ifBlank { "lobster" })
-        val modelRef = if (config.modelId.contains("/")) config.modelId else "$providerKey/${config.modelId}"
+        val modelName = normalizeOpenCodeModelName(config.modelId)
+        val modelRef = "$providerKey/$modelName"
         val workDir = if (options.allowSharedStorage) "/sdcard" else homeDir
         val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
         val cmd =
@@ -334,8 +336,20 @@ class CliAgentChatActivity : AppCompatActivity() {
                 "export PATH=${LocalBridgeClients.shellQuote("$bridgeDir:${paths.prefixDir}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}; " +
                 "cd ${LocalBridgeClients.shellQuote(workDir)} 2>/dev/null || cd ${LocalBridgeClients.shellQuote(homeDir)}; " +
                 "${LocalBridgeClients.shellQuote(nativeBin)} run --model ${LocalBridgeClients.shellQuote(modelRef)} " +
-                "--dir ${LocalBridgeClients.shellQuote(workDir)} ${dangerArg}--format default ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
-        return runUbuntuCommandOrThrow(cmd).trim()
+                "--dir ${LocalBridgeClients.shellQuote(workDir)} ${dangerArg}--format json ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
+
+        return try {
+            val raw = runUbuntuCommandOrThrow(
+                cmd,
+                timeoutMillis = 240_000L,
+                idleTimeoutMillis = 60_000L,
+            ).trim()
+            parseOpenCodeJsonOutput(raw)
+        } catch (error: Exception) {
+            val tail = fetchOpenCodeLogTail()
+            if (tail.isBlank()) throw error
+            throw IllegalStateException("${error.message ?: "OpenCode 执行失败"}；日志尾部：$tail")
+        }
     }
 
     private fun buildRuntimeProbeBlock(options: AgentRuntimeOptions): String {
@@ -405,9 +419,22 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun buildOpenCodeConfig(config: AgentModelConfig): JSONObject {
         val providerKey = normalizeProviderKey(config.providerId.ifBlank { "lobster" })
+        val modelName = normalizeOpenCodeModelName(config.modelId)
         val npmPackage = when (config.protocol) {
             ProviderProtocol.ANTHROPIC -> "@ai-sdk/anthropic"
             ProviderProtocol.OPENAI_COMPATIBLE -> "@ai-sdk/openai-compatible"
+        }
+        val modelsJson = JSONObject()
+            .put(
+                modelName,
+                JSONObject().put("name", modelName),
+            )
+        val rawModel = config.modelId.trim()
+        if (rawModel.isNotEmpty() && rawModel != modelName) {
+            modelsJson.put(
+                rawModel,
+                JSONObject().put("name", modelName),
+            )
         }
         val providerJson = JSONObject()
             .put("npm", npmPackage)
@@ -418,13 +445,7 @@ class CliAgentChatActivity : AppCompatActivity() {
                     .put("baseURL", config.baseUrl)
                     .put("apiKey", config.apiKey),
             )
-            .put(
-                "models",
-                JSONObject().put(
-                    config.modelId,
-                    JSONObject().put("name", config.modelId),
-                ),
-            )
+            .put("models", modelsJson)
 
         return JSONObject()
             .put("\$schema", "https://opencode.ai/config.json")
@@ -446,18 +467,128 @@ class CliAgentChatActivity : AppCompatActivity() {
         return raw
     }
 
-    private fun runUbuntuCommandOrThrow(command: String): String {
+    private fun runUbuntuCommandOrThrow(
+        command: String,
+        timeoutMillis: Long? = null,
+        idleTimeoutMillis: Long? = null,
+    ): String {
         val output = StringBuilder()
-        val code = serverManager.runInUbuntu(command) { line ->
+        val code = serverManager.runInUbuntu(
+            command = command,
+            timeoutMillis = timeoutMillis,
+            idleTimeoutMillis = idleTimeoutMillis,
+        ) { line ->
             val cleaned = stripAnsi(line).trim()
             if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
             output.appendLine(cleaned)
         }
         val raw = output.toString().trim()
         if (code != 0) {
+            if (code == 124) {
+                throw IllegalStateException(raw.ifBlank { "ubuntu command timeout" })
+            }
+            if (code == 125) {
+                throw IllegalStateException(raw.ifBlank { "ubuntu command idle-timeout" })
+            }
             throw IllegalStateException(raw.ifBlank { "ubuntu command exit code=$code" })
         }
         return raw
+    }
+
+    private fun parseOpenCodeJsonOutput(raw: String): String {
+        if (raw.isBlank()) {
+            throw IllegalStateException("OpenCode 未返回任何输出")
+        }
+
+        val events = raw.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("{") && it.endsWith("}") }
+            .mapNotNull { line -> runCatching { JSONObject(line) }.getOrNull() }
+            .toList()
+
+        if (events.isEmpty()) {
+            val lowered = raw.lowercase(Locale.US)
+            if (lowered.contains("error") || lowered.contains("exception")) {
+                throw IllegalStateException(raw.take(500))
+            }
+            return raw
+        }
+
+        val errorMessage = extractOpenCodeError(events)
+        if (!errorMessage.isNullOrBlank()) {
+            throw IllegalStateException(errorMessage)
+        }
+
+        val assistantText = extractOpenCodeAssistantText(events)
+        if (assistantText.isBlank()) {
+            throw IllegalStateException("OpenCode 已执行但未返回可显示内容")
+        }
+        return assistantText
+    }
+
+    private fun extractOpenCodeError(events: List<JSONObject>): String? {
+        for (event in events) {
+            val type = event.optString("type", "")
+            val errorObj = event.optJSONObject("error")
+            if (type.equals("error", ignoreCase = true) || errorObj != null) {
+                val data = errorObj?.optJSONObject("data")
+                val nested = data?.optString("message").orEmpty().trim()
+                val direct = errorObj?.optString("message").orEmpty().trim()
+                val top = event.optString("message", "").trim()
+                return nested.ifBlank { direct.ifBlank { top.ifBlank { event.toString() } } }
+            }
+        }
+        return null
+    }
+
+    private fun extractOpenCodeAssistantText(events: List<JSONObject>): String {
+        val candidates = linkedSetOf<String>()
+        events.forEach { event ->
+            collectOpenCodeTextCandidates(event, null, candidates, 0)
+        }
+        return candidates
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("\n\n")
+            .trim()
+    }
+
+    private fun collectOpenCodeTextCandidates(
+        value: Any?,
+        key: String?,
+        sink: MutableSet<String>,
+        depth: Int,
+    ) {
+        if (depth > 8 || value == null) return
+        when (value) {
+            is JSONObject -> {
+                val iterator = value.keys()
+                while (iterator.hasNext()) {
+                    val childKey = iterator.next()
+                    collectOpenCodeTextCandidates(value.opt(childKey), childKey, sink, depth + 1)
+                }
+            }
+            is JSONArray -> {
+                for (index in 0 until value.length()) {
+                    collectOpenCodeTextCandidates(value.opt(index), key, sink, depth + 1)
+                }
+            }
+            is String -> {
+                val normalized = key?.lowercase(Locale.US).orEmpty()
+                if (normalized in setOf("text", "content", "output", "answer", "message")) {
+                    val text = value.trim()
+                    if (text.isNotEmpty()) sink += text
+                }
+            }
+        }
+    }
+
+    private fun fetchOpenCodeLogTail(): String {
+        val probe = runUbuntuCapture(
+            "latest=$(ls -1t /root/.local/share/opencode/log/*.log 2>/dev/null | head -n 1); " +
+                "if [ -n \"${'$'}latest\" ]; then tail -n 30 \"${'$'}latest\"; fi",
+        )
+        return trimProbeOutput(probe.output, maxChars = 700)
     }
 
     private fun cleanClaudeOutput(raw: String): String {
@@ -476,6 +607,13 @@ class CliAgentChatActivity : AppCompatActivity() {
     private fun normalizeProviderKey(raw: String): String {
         val cleaned = raw.trim().lowercase(Locale.US).replace(Regex("[^a-z0-9._-]"), "-")
         return cleaned.ifBlank { "lobster" }
+    }
+
+    private fun normalizeOpenCodeModelName(raw: String): String {
+        val trimmed = raw.trim()
+        val model = if (trimmed.contains("/")) trimmed.substringAfterLast("/") else trimmed
+        if (model.isBlank()) throw IllegalStateException("模型ID为空")
+        return model
     }
 
     private fun runtimeOptionKey(name: String): String = "${agentId.value}_$name"
