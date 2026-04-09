@@ -23,6 +23,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.util.Locale
+import org.json.JSONArray
 import org.json.JSONObject
 
 class CliAgentChatActivity : AppCompatActivity() {
@@ -491,13 +492,16 @@ class CliAgentChatActivity : AppCompatActivity() {
         prompt: String,
         options: AgentRuntimeOptions,
     ): AgentRunResult {
+        val mcpConfigPath = ensureClaudeAnyClawMcpConfig(options).absolutePath
         val modelArg = if (config.modelId.isBlank()) "" else "--model ${LocalBridgeClients.shellQuote(config.modelId)} "
         val baseEnv = if (config.baseUrl.isBlank()) "" else "ANTHROPIC_BASE_URL=${LocalBridgeClients.shellQuote(config.baseUrl)} "
         val keyEnv = "ANTHROPIC_API_KEY=${LocalBridgeClients.shellQuote(config.apiKey)} "
         val addDirArg = buildClaudeDirArgs(options)
         val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
+        val mcpArg =
+            "--mcp-config ${LocalBridgeClients.shellQuote(mcpConfigPath)} --strict-mcp-config "
         val cmd =
-            "${baseEnv}${keyEnv}claude -p --verbose ${dangerArg}${addDirArg}${modelArg}" +
+            "${baseEnv}${keyEnv}claude -p --verbose ${dangerArg}${addDirArg}${mcpArg}${modelArg}" +
                 "--output-format stream-json --include-partial-messages --include-hook-events " +
                 "${LocalBridgeClients.shellQuote(prompt)} < /dev/null 2>&1"
         return runClaudeStreamJson(serverManager.startPrefixProcess(cmd))
@@ -1215,6 +1219,537 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
 
         return bridgeDir.absolutePath
+    }
+
+    private fun ensureClaudeAnyClawMcpConfig(options: AgentRuntimeOptions): File {
+        val paths = BootstrapInstaller.getPaths(this)
+        val mcpDir = File(paths.homeDir, ".pocketlobster/mcp")
+        if (!mcpDir.exists()) {
+            mcpDir.mkdirs()
+        }
+
+        val serverFile = File(mcpDir, "anyclaw-toolbox-server.js")
+        val serverScript = buildAnyClawToolboxServerScript()
+        writeTextIfChanged(serverFile, serverScript)
+        serverFile.setExecutable(true)
+
+        val systemShellPath = File(paths.prefixDir, "bin/system-shell")
+        val envJson = JSONObject()
+            .put("HOME", paths.homeDir)
+            .put("PREFIX", paths.prefixDir)
+            .put("PATH", "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin")
+            .put("ANYCLAW_ALLOW_SHARED_STORAGE", if (options.allowSharedStorage) "1" else "0")
+        if (systemShellPath.exists()) {
+            envJson.put("ANYCLAW_SYSTEM_SHELL_BIN", systemShellPath.absolutePath)
+        }
+
+        val serverConfig = JSONObject()
+            .put("command", "${paths.prefixDir}/bin/node")
+            .put("args", JSONArray().put(serverFile.absolutePath))
+            .put("env", envJson)
+
+        val root = JSONObject()
+            .put("mcpServers", JSONObject().put("anyclaw_toolbox", serverConfig))
+
+        val configFile = File(mcpDir, "claude-anyclaw-mcp.json")
+        writeTextIfChanged(configFile, root.toString(2) + "\n")
+        return configFile
+    }
+
+    private fun writeTextIfChanged(target: File, content: String) {
+        val current = if (target.exists()) target.readText() else null
+        if (current == content) return
+        target.parentFile?.mkdirs()
+        target.writeText(content)
+    }
+
+    private fun buildAnyClawToolboxServerScript(): String {
+        return """
+            #!/usr/bin/env node
+            const https = require("https");
+            const http = require("http");
+            const { spawnSync } = require("child_process");
+
+            const SERVER_INFO = { name: "anyclaw-toolbox", version: "1.0.0" };
+            const MAX_STDIO_BYTES = 1024 * 1024;
+            const DEFAULT_TIMEOUT = 30000;
+
+            const TOOL_DEFS = [
+              {
+                name: "anyclaw_device_exec",
+                description: "Execute Android system command via Shizuku-backed system-shell.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    command: { type: "string", minLength: 1 },
+                    timeoutMs: { type: "integer", minimum: 1000, maximum: 120000 }
+                  },
+                  required: ["command"],
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_device_screenshot",
+                description: "Capture Android screenshot using system-shell screencap and save to shared storage.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    outputPath: { type: "string" }
+                  },
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_device_uiautomator_dump",
+                description: "Dump Android UI hierarchy xml into shared storage.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    outputPath: { type: "string" }
+                  },
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_search_web",
+                description: "Web search using DuckDuckGo instant answer and related topics API.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    query: { type: "string", minLength: 1 },
+                    maxResults: { type: "integer", minimum: 1, maximum: 10 }
+                  },
+                  required: ["query"],
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_search_wikipedia",
+                description: "Search Wikipedia summaries by keyword.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    query: { type: "string", minLength: 1 },
+                    maxResults: { type: "integer", minimum: 1, maximum: 10 }
+                  },
+                  required: ["query"],
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_fetch_url",
+                description: "Fetch URL content over HTTP/HTTPS and return text snippet.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    url: { type: "string", minLength: 8 },
+                    maxChars: { type: "integer", minimum: 200, maximum: 50000 }
+                  },
+                  required: ["url"],
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_github_repo",
+                description: "Read GitHub repository metadata.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    owner: { type: "string", minLength: 1 },
+                    repo: { type: "string", minLength: 1 }
+                  },
+                  required: ["owner", "repo"],
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_github_search_repositories",
+                description: "Search GitHub repositories.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    query: { type: "string", minLength: 1 },
+                    perPage: { type: "integer", minimum: 1, maximum: 30 }
+                  },
+                  required: ["query"],
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_github_search_code",
+                description: "Search GitHub code snippets.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    query: { type: "string", minLength: 1 },
+                    perPage: { type: "integer", minimum: 1, maximum: 20 }
+                  },
+                  required: ["query"],
+                  additionalProperties: false
+                }
+              },
+              {
+                name: "anyclaw_github_list_issues",
+                description: "List GitHub issues for a repository.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    owner: { type: "string", minLength: 1 },
+                    repo: { type: "string", minLength: 1 },
+                    state: { type: "string", enum: ["open", "closed", "all"] },
+                    perPage: { type: "integer", minimum: 1, maximum: 30 }
+                  },
+                  required: ["owner", "repo"],
+                  additionalProperties: false
+                }
+              }
+            ];
+
+            let inputBuffer = Buffer.alloc(0);
+            process.stdin.on("data", (chunk) => {
+              inputBuffer = Buffer.concat([inputBuffer, chunk]);
+              processFrames();
+            });
+            process.stdin.on("end", () => process.exit(0));
+
+            function writeFrame(payload) {
+              const body = Buffer.from(JSON.stringify(payload), "utf8");
+              process.stdout.write("Content-Length: " + body.length + "\r\n\r\n");
+              process.stdout.write(body);
+            }
+
+            function makeResponse(id, result) {
+              return { jsonrpc: "2.0", id, result };
+            }
+
+            function makeError(id, code, message) {
+              return { jsonrpc: "2.0", id, error: { code, message } };
+            }
+
+            function processFrames() {
+              while (true) {
+                const sep = inputBuffer.indexOf("\r\n\r\n");
+                if (sep === -1) return;
+                const headerText = inputBuffer.slice(0, sep).toString("utf8");
+                const lengthLine = headerText
+                  .split("\r\n")
+                  .map((x) => x.trim())
+                  .find((x) => x.toLowerCase().startsWith("content-length:"));
+                if (!lengthLine) {
+                  inputBuffer = Buffer.alloc(0);
+                  return;
+                }
+                const contentLength = Number(lengthLine.split(":")[1].trim());
+                const frameTotal = sep + 4 + contentLength;
+                if (!Number.isFinite(contentLength) || contentLength < 0) {
+                  inputBuffer = Buffer.alloc(0);
+                  return;
+                }
+                if (inputBuffer.length < frameTotal) return;
+                const body = inputBuffer.slice(sep + 4, frameTotal).toString("utf8");
+                inputBuffer = inputBuffer.slice(frameTotal);
+                let message;
+                try {
+                  message = JSON.parse(body);
+                } catch {
+                  continue;
+                }
+                handleMessage(message).catch((error) => {
+                  if (typeof message?.id !== "undefined") {
+                    writeFrame(makeError(message.id, -32603, String(error?.message || error)));
+                  }
+                });
+              }
+            }
+
+            async function handleMessage(message) {
+              if (!message || typeof message !== "object") return;
+              const id = message.id;
+              const method = message.method;
+              if (!method) return;
+
+              if (method === "initialize") {
+                writeFrame(makeResponse(id, {
+                  protocolVersion: message?.params?.protocolVersion || "2024-11-05",
+                  capabilities: { tools: {} },
+                  serverInfo: SERVER_INFO
+                }));
+                return;
+              }
+              if (method === "notifications/initialized") return;
+              if (method === "ping") {
+                writeFrame(makeResponse(id, {}));
+                return;
+              }
+              if (method === "tools/list") {
+                writeFrame(makeResponse(id, { tools: TOOL_DEFS }));
+                return;
+              }
+              if (method === "tools/call") {
+                const toolName = message?.params?.name;
+                const args = message?.params?.arguments || {};
+                try {
+                  const text = await callTool(toolName, args);
+                  writeFrame(makeResponse(id, { content: [{ type: "text", text }], isError: false }));
+                } catch (error) {
+                  writeFrame(makeResponse(id, {
+                    content: [{ type: "text", text: "Tool error: " + String(error?.message || error) }],
+                    isError: true
+                  }));
+                }
+                return;
+              }
+
+              if (typeof id !== "undefined") {
+                writeFrame(makeError(id, -32601, "Method not found: " + method));
+              }
+            }
+
+            function shellQuote(value) {
+              return "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+            }
+
+            function runSystemShell(command, timeoutMs) {
+              const bin = process.env.ANYCLAW_SYSTEM_SHELL_BIN || "system-shell";
+              const result = spawnSync(bin, [command], {
+                encoding: "utf8",
+                timeout: timeoutMs || DEFAULT_TIMEOUT,
+                maxBuffer: MAX_STDIO_BYTES
+              });
+              const stdout = (result.stdout || "").trim();
+              const stderr = (result.stderr || "").trim();
+              const status = typeof result.status === "number" ? result.status : 1;
+              if (result.error) {
+                throw new Error("system-shell invoke failed: " + String(result.error.message || result.error));
+              }
+              if (status !== 0) {
+                throw new Error((stderr || stdout || ("system-shell exit " + status)).trim());
+              }
+              return stdout || "(no output)";
+            }
+
+            function requestJson(url, headers = {}) {
+              return new Promise((resolve, reject) => {
+                let current = String(url);
+                let redirects = 0;
+                const doRequest = () => {
+                  const parsed = new URL(current);
+                  const mod = parsed.protocol === "https:" ? https : http;
+                  const req = mod.request({
+                    protocol: parsed.protocol,
+                    hostname: parsed.hostname,
+                    port: parsed.port || undefined,
+                    path: parsed.pathname + parsed.search,
+                    method: "GET",
+                    headers: {
+                      "User-Agent": "AnyClawClaudeToolbox/1.0",
+                      "Accept": "application/json,text/plain,*/*",
+                      ...headers
+                    },
+                    timeout: 25000
+                  }, (res) => {
+                    const chunks = [];
+                    res.on("data", (d) => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)));
+                    res.on("end", () => {
+                      const body = Buffer.concat(chunks).toString("utf8");
+                      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects < 3) {
+                        redirects += 1;
+                        current = new URL(res.headers.location, current).toString();
+                        doRequest();
+                        return;
+                      }
+                      if (res.statusCode < 200 || res.statusCode >= 300) {
+                        reject(new Error("HTTP " + res.statusCode + " " + body.slice(0, 600)));
+                        return;
+                      }
+                      try {
+                        resolve(JSON.parse(body));
+                      } catch {
+                        resolve({ raw: body });
+                      }
+                    });
+                  });
+                  req.on("timeout", () => req.destroy(new Error("request timeout")));
+                  req.on("error", reject);
+                  req.end();
+                };
+                doRequest();
+              });
+            }
+
+            function requestText(url) {
+              return new Promise((resolve, reject) => {
+                const parsed = new URL(String(url));
+                const mod = parsed.protocol === "https:" ? https : http;
+                const req = mod.request({
+                  protocol: parsed.protocol,
+                  hostname: parsed.hostname,
+                  port: parsed.port || undefined,
+                  path: parsed.pathname + parsed.search,
+                  method: "GET",
+                  headers: { "User-Agent": "AnyClawClaudeToolbox/1.0", "Accept": "text/plain,text/html,*/*" },
+                  timeout: 25000
+                }, (res) => {
+                  const chunks = [];
+                  res.on("data", (d) => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)));
+                  res.on("end", () => {
+                    const body = Buffer.concat(chunks).toString("utf8");
+                    if (res.statusCode < 200 || res.statusCode >= 300) {
+                      reject(new Error("HTTP " + res.statusCode + " " + body.slice(0, 600)));
+                      return;
+                    }
+                    resolve(body);
+                  });
+                });
+                req.on("timeout", () => req.destroy(new Error("request timeout")));
+                req.on("error", reject);
+                req.end();
+              });
+            }
+
+            function flattenDuckRelated(related, out) {
+              if (!Array.isArray(related)) return;
+              for (const item of related) {
+                if (!item || typeof item !== "object") continue;
+                if (Array.isArray(item.Topics)) {
+                  flattenDuckRelated(item.Topics, out);
+                } else if (item.Text) {
+                  out.push({ text: String(item.Text), url: String(item.FirstURL || "") });
+                }
+              }
+            }
+
+            function ghHeaders() {
+              const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
+              const headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28"
+              };
+              if (token.trim()) headers.Authorization = "Bearer " + token.trim();
+              return headers;
+            }
+
+            async function callTool(name, args) {
+              switch (name) {
+                case "anyclaw_device_exec": {
+                  const command = String(args.command || "").trim();
+                  if (!command) throw new Error("command is required");
+                  const timeoutMs = Number(args.timeoutMs || DEFAULT_TIMEOUT);
+                  const output = runSystemShell(command, timeoutMs);
+                  return "system-shell success\n" + output;
+                }
+                case "anyclaw_device_screenshot": {
+                  const outputPath = String(args.outputPath || ("/sdcard/Download/AnyClawShots/claude_capture_" + Date.now() + ".png"));
+                  const cmd = "mkdir -p " + shellQuote(outputPath.replace(/\/[^/]*$/, "")) + " && screencap -p " + shellQuote(outputPath);
+                  runSystemShell(cmd, 40000);
+                  return "screenshot saved: " + outputPath;
+                }
+                case "anyclaw_device_uiautomator_dump": {
+                  const outputPath = String(args.outputPath || ("/sdcard/Download/AnyClawShots/ui_dump_" + Date.now() + ".xml"));
+                  const cmd = "mkdir -p " + shellQuote(outputPath.replace(/\/[^/]*$/, "")) + " && uiautomator dump " + shellQuote(outputPath) + " >/dev/null && cat " + shellQuote(outputPath);
+                  const xml = runSystemShell(cmd, 45000);
+                  return "ui dump saved: " + outputPath + "\n" + xml.slice(0, 5000);
+                }
+                case "anyclaw_search_web": {
+                  const query = String(args.query || "").trim();
+                  if (!query) throw new Error("query is required");
+                  const maxResults = Math.max(1, Math.min(10, Number(args.maxResults || 5)));
+                  const url = "https://api.duckduckgo.com/?q=" + encodeURIComponent(query) + "&format=json&no_html=1&no_redirect=1&skip_disambig=0";
+                  const data = await requestJson(url);
+                  const lines = [];
+                  if (data?.Heading) lines.push("Heading: " + data.Heading);
+                  if (data?.AbstractText) {
+                    lines.push("Abstract: " + String(data.AbstractText));
+                    if (data?.AbstractURL) lines.push("AbstractURL: " + String(data.AbstractURL));
+                  }
+                  const related = [];
+                  flattenDuckRelated(data?.RelatedTopics, related);
+                  related.slice(0, maxResults).forEach((x, idx) => {
+                    lines.push((idx + 1) + ". " + x.text + (x.url ? " | " + x.url : ""));
+                  });
+                  if (lines.length === 0) lines.push("No result");
+                  return lines.join("\n");
+                }
+                case "anyclaw_search_wikipedia": {
+                  const query = String(args.query || "").trim();
+                  if (!query) throw new Error("query is required");
+                  const maxResults = Math.max(1, Math.min(10, Number(args.maxResults || 5)));
+                  const url = "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" + encodeURIComponent(query) + "&format=json&srlimit=" + maxResults;
+                  const data = await requestJson(url);
+                  const items = Array.isArray(data?.query?.search) ? data.query.search : [];
+                  if (!items.length) return "No result";
+                  return items.map((item, idx) => {
+                    const title = String(item?.title || "");
+                    const snippet = String(item?.snippet || "").replace(/<[^>]+>/g, "");
+                    return (idx + 1) + ". " + title + " | " + snippet;
+                  }).join("\n");
+                }
+                case "anyclaw_fetch_url": {
+                  const url = String(args.url || "").trim();
+                  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                    throw new Error("url must start with http:// or https://");
+                  }
+                  const maxChars = Math.max(200, Math.min(50000, Number(args.maxChars || 8000)));
+                  const body = await requestText(url);
+                  const normalized = body.replace(/\r/g, "").replace(/\t/g, " ").replace(/\x00/g, "");
+                  return normalized.slice(0, maxChars);
+                }
+                case "anyclaw_github_repo": {
+                  const owner = String(args.owner || "").trim();
+                  const repo = String(args.repo || "").trim();
+                  if (!owner || !repo) throw new Error("owner and repo are required");
+                  const data = await requestJson("https://api.github.com/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo), ghHeaders());
+                  return JSON.stringify({
+                    full_name: data.full_name,
+                    description: data.description,
+                    stargazers_count: data.stargazers_count,
+                    forks_count: data.forks_count,
+                    open_issues_count: data.open_issues_count,
+                    default_branch: data.default_branch,
+                    html_url: data.html_url,
+                    updated_at: data.updated_at
+                  }, null, 2);
+                }
+                case "anyclaw_github_search_repositories": {
+                  const query = String(args.query || "").trim();
+                  if (!query) throw new Error("query is required");
+                  const perPage = Math.max(1, Math.min(30, Number(args.perPage || 8)));
+                  const data = await requestJson("https://api.github.com/search/repositories?q=" + encodeURIComponent(query) + "&per_page=" + perPage, ghHeaders());
+                  const items = Array.isArray(data.items) ? data.items : [];
+                  if (!items.length) return "No result";
+                  return items.map((item, idx) =>
+                    (idx + 1) + ". " + item.full_name + " | stars=" + item.stargazers_count + " | " + (item.description || "")
+                  ).join("\n");
+                }
+                case "anyclaw_github_search_code": {
+                  const query = String(args.query || "").trim();
+                  if (!query) throw new Error("query is required");
+                  const perPage = Math.max(1, Math.min(20, Number(args.perPage || 8)));
+                  const data = await requestJson("https://api.github.com/search/code?q=" + encodeURIComponent(query) + "&per_page=" + perPage, ghHeaders());
+                  const items = Array.isArray(data.items) ? data.items : [];
+                  if (!items.length) return "No result";
+                  return items.map((item, idx) =>
+                    (idx + 1) + ". " + item.repository?.full_name + " | " + item.path + " | " + item.html_url
+                  ).join("\n");
+                }
+                case "anyclaw_github_list_issues": {
+                  const owner = String(args.owner || "").trim();
+                  const repo = String(args.repo || "").trim();
+                  if (!owner || !repo) throw new Error("owner and repo are required");
+                  const state = String(args.state || "open");
+                  const perPage = Math.max(1, Math.min(30, Number(args.perPage || 10)));
+                  const url = "https://api.github.com/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) +
+                    "/issues?state=" + encodeURIComponent(state) + "&per_page=" + perPage;
+                  const data = await requestJson(url, ghHeaders());
+                  const items = Array.isArray(data) ? data.filter((x) => !x.pull_request) : [];
+                  if (!items.length) return "No result";
+                  return items.map((item) => "#" + item.number + " [" + item.state + "] " + item.title + " | " + item.html_url).join("\n");
+                }
+                default:
+                  throw new Error("unknown tool: " + name);
+              }
+            }
+            """.trimIndent() + "\n"
     }
 
     private fun restartWithAgent(next: ExternalAgentId, sessionId: String?) {
