@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       release_channel:
-        description: "Build channel (beta for internal testing, prod for official release)"
+        description: "Build channel (test for stable operator channel, beta for internal testing, prod for official release)"
         required: false
         default: "beta"
         type: choice
         options:
+          - test
           - beta
           - prod
 
@@ -110,6 +111,11 @@ jobs:
             APK_SOURCE="app/build/outputs/apk/prod/debug/app-prod-debug.apk"
             APK_NAME="pocket-lobster.apk"
             PACKAGE_ID="com.codex.mobile.pocketlobster"
+          elif [ "$CHANNEL" = "test" ]; then
+            ./gradlew assembleTestDebug
+            APK_SOURCE="app/build/outputs/apk/test/debug/app-test-debug.apk"
+            APK_NAME="pocket-lobster-test.apk"
+            PACKAGE_ID="com.codex.mobile.pocketlobster.test"
           else
             ./gradlew assembleBetaDebug
             APK_SOURCE="app/build/outputs/apk/beta/debug/app-beta-debug.apk"
