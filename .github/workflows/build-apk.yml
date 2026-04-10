@@ -112,8 +112,8 @@ jobs:
             APK_NAME="pocket-lobster.apk"
             PACKAGE_ID="com.codex.mobile.pocketlobster"
           elif [ "$CHANNEL" = "test" ]; then
-            ./gradlew assembleTestDebug
-            APK_SOURCE="app/build/outputs/apk/test/debug/app-test-debug.apk"
+            ./gradlew assembleOperatorDebug
+            APK_SOURCE="app/build/outputs/apk/operator/debug/app-operator-debug.apk"
             APK_NAME="pocket-lobster-test.apk"
             PACKAGE_ID="com.codex.mobile.pocketlobster.test"
           else

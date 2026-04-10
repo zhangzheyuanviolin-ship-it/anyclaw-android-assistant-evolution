@@ -57,7 +57,7 @@ android {
             applicationId = "com.codex.mobile.pocketlobster"
             resValue("string", "app_name", "\"口袋大龙虾\"")
         }
-        create("test") {
+        create("operator") {
             dimension = "channel"
             applicationId = "com.codex.mobile.pocketlobster.test"
             resValue("string", "app_name", "\"口袋大龙虾\"")
