@@ -32,18 +32,9 @@
 
         <Button
             android:id="@+id/btnClaudeModelManager"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
             android:text="@string/model_manager_claude_button_text" />
-
-        <Button
-            android:id="@+id/btnOpenCodeModelManager"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:text="@string/model_manager_opencode_button_text" />
     </LinearLayout>
 
     <LinearLayout

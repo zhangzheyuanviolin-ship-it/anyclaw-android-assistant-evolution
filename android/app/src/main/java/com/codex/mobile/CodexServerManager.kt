@@ -49,8 +49,6 @@ class CodexServerManager(private val context: Context) {
     private var proxyProcess: Process? = null
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
-    @Volatile
-    private var lastOpenCodeInstallError: String? = null
 
     /**
      * Use Android system shell for process bootstrap.
@@ -92,7 +90,7 @@ class CodexServerManager(private val context: Context) {
 
     /**
      * Run a command inside bundled Ubuntu runtime.
-     * Use this for binaries that require glibc (for example OpenCode native binary).
+     * Use this for binaries that require glibc.
      */
     fun runInUbuntu(
         command: String,
@@ -212,18 +210,6 @@ class CodexServerManager(private val context: Context) {
         if (pkg.exists()) return true
         return runCapture("command -v claude >/dev/null 2>&1 && echo yes || echo no") == "yes"
     }
-
-    fun isOpenCodeInstalled(): Boolean {
-        val paths = BootstrapInstaller.getPaths(context)
-        val nativeBin = File(paths.prefixDir, "lib/node_modules/opencode-ai/bin/.opencode")
-        if (!nativeBin.exists()) return false
-        // Validate the native OpenCode binary directly inside Ubuntu runtime.
-        // The JS wrapper depends on node and can fail even when binary is healthy.
-        val checkCmd = "${shellQuote(nativeBin.absolutePath)} --version >/dev/null 2>&1"
-        return runInUbuntu(checkCmd) == 0
-    }
-
-    fun getLastOpenCodeInstallError(): String? = lastOpenCodeInstallError
 
     fun isServerBundleInstalled(): Boolean = false
 
@@ -1489,7 +1475,6 @@ EOF
             JSONArray().also { agents.put("list", it) }
         }
         ensureAgentListEntry(agentList, "claude-code", "claude-cli/claude-sonnet-4-6")
-        ensureAgentListEntry(agentList, "opencode", "opencode/claude-opus-4-6")
 
         val acp = ensureObject(root, "acp")
         if (!acp.has("enabled")) acp.put("enabled", true)
@@ -1501,7 +1486,6 @@ EOF
         }
         ensureArrayValue(allowedAgents, "codex")
         ensureArrayValue(allowedAgents, "claude-code")
-        ensureArrayValue(allowedAgents, "opencode")
 
         val heartbeat = ensureObject(defaults, "heartbeat")
         // OpenClaw 2026.3.2 schema does not accept "enabled" in defaults.heartbeat.
@@ -2417,74 +2401,6 @@ EOF
             return false
         }
         return isClaudeCodeInstalled()
-    }
-
-    fun installOpenCode(onProgress: (String) -> Unit): Boolean {
-        val paths = BootstrapInstaller.getPaths(context)
-        val prefix = paths.prefixDir
-        val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
-        lastOpenCodeInstallError = null
-
-        onProgress("Installing OpenCode CLI package (ignore postinstall scripts)…")
-        val baseCode = runInPrefix(
-            "node $npmCli install -g --ignore-scripts opencode-ai@latest 2>&1",
-            onOutput = { onProgress(it) },
-        )
-        if (baseCode != 0) {
-            lastOpenCodeInstallError = "base_package_install_failed(code=$baseCode)"
-            Log.e(TAG, "npm install opencode-ai --ignore-scripts failed with code $baseCode")
-            return false
-        }
-
-        onProgress("Installing OpenCode linux-arm64 binary package (forced platform)…")
-        val linuxCode = runInPrefix(
-            "node $npmCli install -g --force opencode-linux-arm64@latest 2>&1",
-            onOutput = { onProgress(it) },
-        )
-        if (linuxCode != 0) {
-            onProgress("OpenCode linux binary package install returned non-zero: $linuxCode")
-        }
-
-        val repairCmd = """
-            set -e
-            BASE="$prefix/lib/node_modules/opencode-ai"
-            BIN_DIR="${'$'}BASE/bin"
-            WRAPPER="${'$'}BIN_DIR/opencode"
-            mkdir -p "${'$'}BIN_DIR"
-            if [ ! -f "${'$'}WRAPPER" ]; then
-              echo "OpenCode wrapper missing: ${'$'}WRAPPER"
-              exit 13
-            fi
-
-            SRC1="${'$'}BASE/node_modules/opencode-linux-arm64/bin/opencode"
-            SRC2="$prefix/lib/node_modules/opencode-linux-arm64/bin/opencode"
-            if [ -f "${'$'}SRC1" ]; then
-              cp -f "${'$'}SRC1" "${'$'}BIN_DIR/.opencode"
-            elif [ -f "${'$'}SRC2" ]; then
-              cp -f "${'$'}SRC2" "${'$'}BIN_DIR/.opencode"
-            fi
-
-            if [ ! -f "${'$'}BIN_DIR/.opencode" ]; then
-              echo "OpenCode binary source missing after install"
-              exit 14
-            fi
-
-            chmod 700 "${'$'}BIN_DIR/opencode" "${'$'}BIN_DIR/.opencode"
-        """.trimIndent()
-        val repairCode = runInPrefix(repairCmd, onOutput = { onProgress(it) })
-        if (repairCode != 0) {
-            lastOpenCodeInstallError = "binary_repair_failed(code=$repairCode)"
-            Log.e(TAG, "OpenCode binary repair failed with code $repairCode")
-            return false
-        }
-
-        val healthy = isOpenCodeInstalled()
-        if (!healthy) {
-            lastOpenCodeInstallError = "ubuntu_health_check_failed"
-            Log.e(TAG, "OpenCode install finished but ubuntu health check failed")
-            return false
-        }
-        return true
     }
 
     fun ensureCodexWrapperScript() {

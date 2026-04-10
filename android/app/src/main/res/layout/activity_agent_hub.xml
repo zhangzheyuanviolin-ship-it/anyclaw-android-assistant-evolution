@@ -57,15 +57,6 @@
             android:textAllCaps="false" />
 
         <Button
-            android:id="@+id/btnAgentHubOpenCode"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:minHeight="52dp"
-            android:text="@string/agent_hub_opencode"
-            android:textAllCaps="false" />
-
-        <Button
             android:id="@+id/btnAgentHubPermissionCenter"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

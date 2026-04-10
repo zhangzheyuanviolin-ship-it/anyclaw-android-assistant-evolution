@@ -133,7 +133,6 @@ object AgentSessionStore {
     fun displayAgentName(agentId: ExternalAgentId): String {
         return when (agentId) {
             ExternalAgentId.CLAUDE_CODE -> "Claude Code"
-            ExternalAgentId.OPEN_CODE -> "OpenCode"
         }
     }
 

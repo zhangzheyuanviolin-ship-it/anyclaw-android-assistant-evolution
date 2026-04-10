@@ -263,6 +263,6 @@ class AgentModelManagerActivity : AppCompatActivity() {
     }
 
     private fun parseAgent(raw: String?): ExternalAgentId {
-        return ExternalAgentId.entries.firstOrNull { it.value == raw?.trim() } ?: ExternalAgentId.OPEN_CODE
+        return ExternalAgentId.entries.firstOrNull { it.value == raw?.trim() } ?: ExternalAgentId.CLAUDE_CODE
     }
 }

@@ -31,14 +31,6 @@ class AgentHubActivity : AppCompatActivity() {
             )
         }
 
-        findViewById<Button>(R.id.btnAgentHubOpenCode).setOnClickListener {
-            startActivity(
-                Intent(this, CliAgentChatActivity::class.java).apply {
-                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.OPEN_CODE.value)
-                },
-            )
-        }
-
         findViewById<Button>(R.id.btnAgentHubPermissionCenter).setOnClickListener {
             startActivity(Intent(this, PermissionManagerActivity::class.java))
         }

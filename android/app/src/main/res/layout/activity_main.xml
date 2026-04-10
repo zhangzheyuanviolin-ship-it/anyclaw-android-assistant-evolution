@@ -144,15 +144,6 @@
             android:text="@string/agent_hub_claude"
             android:textAllCaps="false" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnTabOpenCode"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:minHeight="48dp"
-            android:text="@string/agent_hub_opencode"
-            android:textAllCaps="false" />
     </LinearLayout>
 
     <LinearLayout

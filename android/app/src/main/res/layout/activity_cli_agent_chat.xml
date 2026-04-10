@@ -145,13 +145,6 @@
             android:layout_weight="1"
             android:text="@string/agent_hub_claude" />
 
-        <Button
-            android:id="@+id/btnCliTabOpenCode"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:text="@string/agent_hub_opencode" />
     </LinearLayout>
 
 </LinearLayout>

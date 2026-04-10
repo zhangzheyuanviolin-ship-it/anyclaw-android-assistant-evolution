@@ -6,7 +6,6 @@ import org.json.JSONObject
 
 enum class ExternalAgentId(val value: String) {
     CLAUDE_CODE("claude-code"),
-    OPEN_CODE("open-code"),
 }
 
 enum class ProviderProtocol(val value: String) {
@@ -69,92 +68,6 @@ object AgentModelConfigStore {
                     protocol = ProviderProtocol.ANTHROPIC,
                     baseUrl = "",
                     note = "可接入任意 Anthropic 兼容网关",
-                ),
-            )
-            ExternalAgentId.OPEN_CODE -> listOf(
-                ProviderPreset(
-                    id = "openai",
-                    name = "OpenAI",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://api.openai.com/v1",
-                ),
-                ProviderPreset(
-                    id = "openrouter",
-                    name = "OpenRouter",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://openrouter.ai/api/v1",
-                ),
-                ProviderPreset(
-                    id = "deepseek",
-                    name = "DeepSeek",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://api.deepseek.com/v1",
-                ),
-                ProviderPreset(
-                    id = "xai",
-                    name = "xAI",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://api.x.ai/v1",
-                ),
-                ProviderPreset(
-                    id = "google_ai_studio",
-                    name = "Google AI Studio",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://generativelanguage.googleapis.com/v1beta/openai",
-                ),
-                ProviderPreset(
-                    id = "aliyun_dashscope_cn",
-                    name = "阿里云百炼（中国）",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                    note = "阿里云官方 OpenAI 兼容入口（中国）",
-                ),
-                ProviderPreset(
-                    id = "aliyun_dashscope_sg",
-                    name = "阿里云百炼（新加坡）",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                    note = "阿里云官方 OpenAI 兼容入口（新加坡）",
-                ),
-                ProviderPreset(
-                    id = "aliyun_coding_plan_cn_openai",
-                    name = "阿里云 Coding Plan（中国，OpenAI 兼容）",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://coding.dashscope.aliyuncs.com/v1",
-                    note = "阿里云 Coding Plan OpenAI 兼容端点",
-                ),
-                ProviderPreset(
-                    id = "aliyun_coding_plan_sg_openai",
-                    name = "阿里云 Coding Plan（新加坡，OpenAI 兼容）",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "https://coding-intl.dashscope.aliyuncs.com/v1",
-                    note = "阿里云 Coding Plan OpenAI 兼容端点",
-                ),
-                ProviderPreset(
-                    id = "aliyun_coding_plan_cn_anthropic",
-                    name = "阿里云 Coding Plan（中国，Anthropic 兼容）",
-                    protocol = ProviderProtocol.ANTHROPIC,
-                    baseUrl = "https://coding.dashscope.aliyuncs.com/apps/anthropic/v1",
-                    note = "阿里云 Coding Plan Anthropic 兼容端点",
-                ),
-                ProviderPreset(
-                    id = "aliyun_coding_plan_sg_anthropic",
-                    name = "阿里云 Coding Plan（新加坡，Anthropic 兼容）",
-                    protocol = ProviderProtocol.ANTHROPIC,
-                    baseUrl = "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
-                    note = "阿里云 Coding Plan Anthropic 兼容端点",
-                ),
-                ProviderPreset(
-                    id = "custom_openai",
-                    name = "自定义 OpenAI 兼容",
-                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
-                    baseUrl = "",
-                ),
-                ProviderPreset(
-                    id = "custom_anthropic",
-                    name = "自定义 Anthropic 兼容",
-                    protocol = ProviderProtocol.ANTHROPIC,
-                    baseUrl = "",
                 ),
             )
         }

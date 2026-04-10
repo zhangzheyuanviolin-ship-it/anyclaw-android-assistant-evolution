@@ -44,7 +44,6 @@ class MainActivity : AppCompatActivity() {
         const val OPEN_TARGET_CODEX_THREAD = "codex_thread"
         const val OPEN_TARGET_OPENCLAW_SESSION = "openclaw_session"
         const val OPEN_TARGET_CLAUDE_SESSION = "claude_session"
-        const val OPEN_TARGET_OPENCODE_SESSION = "opencode_session"
     }
 
     private lateinit var webView: WebView
@@ -63,7 +62,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabOpenClawButton: Button
     private lateinit var tabCodexButton: Button
     private lateinit var tabClaudeButton: Button
-    private lateinit var tabOpenCodeButton: Button
     private lateinit var serverManager: CodexServerManager
     private var setupStarted = false
     private var waitingForStorageGrant = false
@@ -147,7 +145,6 @@ class MainActivity : AppCompatActivity() {
         tabOpenClawButton = findViewById(R.id.btnTabOpenClaw)
         tabCodexButton = findViewById(R.id.btnTabCodex)
         tabClaudeButton = findViewById(R.id.btnTabClaude)
-        tabOpenCodeButton = findViewById(R.id.btnTabOpenCode)
 
         serverManager = CodexServerManager(this)
 
@@ -190,13 +187,6 @@ class MainActivity : AppCompatActivity() {
             startActivity(
                 Intent(this, CliAgentChatActivity::class.java).apply {
                     putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
-                },
-            )
-        }
-        tabOpenCodeButton.setOnClickListener {
-            startActivity(
-                Intent(this, CliAgentChatActivity::class.java).apply {
-                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.OPEN_CODE.value)
                 },
             )
         }
@@ -844,7 +834,6 @@ class MainActivity : AppCompatActivity() {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
         val nextAgent = when (target) {
             OPEN_TARGET_CLAUDE_SESSION -> ExternalAgentId.CLAUDE_CODE
-            OPEN_TARGET_OPENCODE_SESSION -> ExternalAgentId.OPEN_CODE
             else -> null
         } ?: return false
 
@@ -906,7 +895,6 @@ class MainActivity : AppCompatActivity() {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
                 buildClaudeChatPageUrl(sessionKey)
             }
-            OPEN_TARGET_OPENCODE_SESSION -> null
             else -> null
         }
     }

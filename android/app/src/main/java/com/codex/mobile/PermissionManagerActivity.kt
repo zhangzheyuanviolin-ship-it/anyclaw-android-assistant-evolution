@@ -15,7 +15,6 @@ class PermissionManagerActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var tvCodexAuthStatus: TextView
     private lateinit var tvClaudeInstallStatus: TextView
-    private lateinit var tvOpenCodeInstallStatus: TextView
     private lateinit var switchBridge: Switch
     private lateinit var btnRequest: Button
     private lateinit var btnOpenShizuku: Button
@@ -23,15 +22,12 @@ class PermissionManagerActivity : AppCompatActivity() {
     private lateinit var btnCodexAuthBrowser: Button
     private lateinit var btnCodexInstall: Button
     private lateinit var btnClaudeInstall: Button
-    private lateinit var btnOpenCodeInstall: Button
     @Volatile
     private var codexLoginRunning = false
     @Volatile
     private var codexInstallRunning = false
     @Volatile
     private var claudeInstallRunning = false
-    @Volatile
-    private var openCodeInstallRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,7 +38,6 @@ class PermissionManagerActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvShizukuStatus)
         tvCodexAuthStatus = findViewById(R.id.tvCodexAuthStatus)
         tvClaudeInstallStatus = findViewById(R.id.tvClaudeInstallStatus)
-        tvOpenCodeInstallStatus = findViewById(R.id.tvOpenCodeInstallStatus)
         switchBridge = findViewById(R.id.switchShizukuBridge)
         btnRequest = findViewById(R.id.btnRequestShizukuPermission)
         btnOpenShizuku = findViewById(R.id.btnOpenShizukuApp)
@@ -50,7 +45,6 @@ class PermissionManagerActivity : AppCompatActivity() {
         btnCodexAuthBrowser = findViewById(R.id.btnCodexAuthBrowser)
         btnCodexInstall = findViewById(R.id.btnCodexInstall)
         btnClaudeInstall = findViewById(R.id.btnClaudeInstall)
-        btnOpenCodeInstall = findViewById(R.id.btnOpenCodeInstall)
 
         switchBridge.isChecked = ShizukuController.isBridgeEnabled(this)
         switchBridge.setOnCheckedChangeListener { _, isChecked ->
@@ -93,7 +87,6 @@ class PermissionManagerActivity : AppCompatActivity() {
         btnCodexAuthBrowser.setOnClickListener { startCodexBrowserAuth() }
         btnCodexInstall.setOnClickListener { startCodexInstallRepair() }
         btnClaudeInstall.setOnClickListener { startClaudeInstallRepair() }
-        btnOpenCodeInstall.setOnClickListener { startOpenCodeInstallRepair() }
     }
 
     override fun onResume() {
@@ -272,13 +265,8 @@ class PermissionManagerActivity : AppCompatActivity() {
             R.string.optional_agent_status_template,
             getString(R.string.codex_auth_status_checking),
         )
-        tvOpenCodeInstallStatus.text = getString(
-            R.string.optional_agent_status_template,
-            getString(R.string.codex_auth_status_checking),
-        )
         Thread {
             val claudeInstalled = runCatching { serverManager.isClaudeCodeInstalled() }.getOrElse { false }
-            val openCodeInstalled = runCatching { serverManager.isOpenCodeInstalled() }.getOrElse { false }
             runOnUiThread {
                 tvClaudeInstallStatus.text = getString(
                     R.string.optional_agent_status_template,
@@ -288,16 +276,7 @@ class PermissionManagerActivity : AppCompatActivity() {
                         getString(R.string.optional_agent_not_installed)
                     },
                 )
-                tvOpenCodeInstallStatus.text = getString(
-                    R.string.optional_agent_status_template,
-                    if (openCodeInstalled) {
-                        getString(R.string.optional_agent_installed)
-                    } else {
-                        getString(R.string.optional_agent_not_installed)
-                    },
-                )
                 btnClaudeInstall.isEnabled = !claudeInstallRunning
-                btnOpenCodeInstall.isEnabled = !openCodeInstallRunning
             }
         }.start()
     }
@@ -316,32 +295,6 @@ class PermissionManagerActivity : AppCompatActivity() {
                     getString(R.string.claude_install_success)
                 } else {
                     getString(R.string.claude_install_failed)
-                }
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                refreshOptionalAgentInstallStatus()
-            }
-        }.start()
-    }
-
-    private fun startOpenCodeInstallRepair() {
-        if (openCodeInstallRunning) return
-        openCodeInstallRunning = true
-        btnOpenCodeInstall.isEnabled = false
-        Toast.makeText(this, getString(R.string.opencode_install_starting), Toast.LENGTH_SHORT).show()
-
-        Thread {
-            val installed = if (serverManager.isOpenCodeInstalled()) true else serverManager.installOpenCode { }
-            runOnUiThread {
-                openCodeInstallRunning = false
-                val message = if (installed) {
-                    getString(R.string.opencode_install_success)
-                } else {
-                    val detail = serverManager.getLastOpenCodeInstallError()?.trim().orEmpty()
-                    if (detail.isEmpty()) {
-                        getString(R.string.opencode_install_failed)
-                    } else {
-                        "${getString(R.string.opencode_install_failed)} ($detail)"
-                    }
                 }
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 refreshOptionalAgentInstallStatus()

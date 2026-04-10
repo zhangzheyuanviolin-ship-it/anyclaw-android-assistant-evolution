@@ -45,7 +45,6 @@ class ConversationManagerActivity : AppCompatActivity() {
         CODEX,
         OPENCLAW,
         CLAUDE_CODE,
-        OPEN_CODE,
     }
 
     private lateinit var spinnerSource: Spinner
@@ -78,7 +77,6 @@ class ConversationManagerActivity : AppCompatActivity() {
             getString(R.string.conversation_source_codex),
             getString(R.string.conversation_source_openclaw),
             getString(R.string.conversation_source_claude),
-            getString(R.string.conversation_source_opencode),
         )
         spinnerSource.adapter = ArrayAdapter(
             this,
@@ -110,7 +108,6 @@ class ConversationManagerActivity : AppCompatActivity() {
             1 -> SourceType.CODEX
             2 -> SourceType.OPENCLAW
             3 -> SourceType.CLAUDE_CODE
-            4 -> SourceType.OPEN_CODE
             else -> SourceType.ALL
         }
     }
@@ -137,13 +134,8 @@ class ConversationManagerActivity : AppCompatActivity() {
                     warnings += "Claude Code: ${normalizeLoadError(error)}"
                     emptyList()
                 }
-            val openCodeRows = runCatching { loadCliAgentRows(ExternalAgentId.OPEN_CODE, SourceType.OPEN_CODE) }
-                .getOrElse { error ->
-                    warnings += "OpenCode: ${normalizeLoadError(error)}"
-                    emptyList()
-                }
 
-            allRows = (codexRows + openClawRows + claudeRows + openCodeRows)
+            allRows = (codexRows + openClawRows + claudeRows)
                 .distinctBy { "${it.source}:${it.id}" }
                 .sortedByDescending { it.updatedAtMs }
                 .toMutableList()
@@ -338,7 +330,6 @@ class ConversationManagerActivity : AppCompatActivity() {
                     SourceType.CODEX -> getString(R.string.conversation_source_codex)
                     SourceType.OPENCLAW -> getString(R.string.conversation_source_openclaw)
                     SourceType.CLAUDE_CODE -> getString(R.string.conversation_source_claude)
-                    SourceType.OPEN_CODE -> getString(R.string.conversation_source_opencode)
                     SourceType.ALL -> getString(R.string.conversation_source_all)
                 }
                 val stateTag = if (row.source == SourceType.CODEX && row.archived) {
@@ -444,20 +435,15 @@ class ConversationManagerActivity : AppCompatActivity() {
                     putExtra(MainActivity.EXTRA_SESSION_KEY, row.id)
                 }
                 SourceType.CLAUDE_CODE -> Unit
-                SourceType.OPEN_CODE -> Unit
                 SourceType.ALL -> Unit
             }
         }
-        if (row.source == SourceType.CLAUDE_CODE || row.source == SourceType.OPEN_CODE) {
+        if (row.source == SourceType.CLAUDE_CODE) {
             startActivity(
                 Intent(this, CliAgentChatActivity::class.java).apply {
                     putExtra(
                         CliAgentChatActivity.EXTRA_AGENT_ID,
-                        if (row.source == SourceType.CLAUDE_CODE) {
-                            ExternalAgentId.CLAUDE_CODE.value
-                        } else {
-                            ExternalAgentId.OPEN_CODE.value
-                        },
+                        ExternalAgentId.CLAUDE_CODE.value,
                     )
                     putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, row.id)
                 },
@@ -489,9 +475,6 @@ class ConversationManagerActivity : AppCompatActivity() {
                     }
                     SourceType.CLAUDE_CODE -> {
                         AgentSessionStore.renameSession(this, ExternalAgentId.CLAUDE_CODE, row.id, newTitle)
-                    }
-                    SourceType.OPEN_CODE -> {
-                        AgentSessionStore.renameSession(this, ExternalAgentId.OPEN_CODE, row.id, newTitle)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -548,9 +531,6 @@ class ConversationManagerActivity : AppCompatActivity() {
                     }
                     SourceType.CLAUDE_CODE -> {
                         AgentSessionStore.deleteSession(this, ExternalAgentId.CLAUDE_CODE, row.id)
-                    }
-                    SourceType.OPEN_CODE -> {
-                        AgentSessionStore.deleteSession(this, ExternalAgentId.OPEN_CODE, row.id)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -667,7 +647,6 @@ class ConversationManagerActivity : AppCompatActivity() {
             SourceType.CODEX -> loadCodexTranscript(row)
             SourceType.OPENCLAW -> loadOpenClawTranscript(row)
             SourceType.CLAUDE_CODE -> loadCliAgentTranscript(ExternalAgentId.CLAUDE_CODE, row.id)
-            SourceType.OPEN_CODE -> loadCliAgentTranscript(ExternalAgentId.OPEN_CODE, row.id)
             SourceType.ALL -> ""
         }
     }

@@ -53,7 +53,6 @@ class CliAgentChatActivity : AppCompatActivity() {
     private lateinit var btnOpenClaw: Button
     private lateinit var btnCodex: Button
     private lateinit var btnClaude: Button
-    private lateinit var btnOpenCode: Button
 
     private lateinit var serverManager: CodexServerManager
     private lateinit var agentId: ExternalAgentId
@@ -154,7 +153,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         btnOpenClaw = findViewById(R.id.btnCliTabOpenClaw)
         btnCodex = findViewById(R.id.btnCliTabCodex)
         btnClaude = findViewById(R.id.btnCliTabClaude)
-        btnOpenCode = findViewById(R.id.btnCliTabOpenCode)
 
         listView.adapter = messageAdapter
         tvTitle.text = AgentSessionStore.displayAgentName(agentId)
@@ -205,10 +203,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         btnClaude.setOnClickListener {
             if (agentId == ExternalAgentId.CLAUDE_CODE) return@setOnClickListener
             restartWithAgent(ExternalAgentId.CLAUDE_CODE, null)
-        }
-        btnOpenCode.setOnClickListener {
-            if (agentId == ExternalAgentId.OPEN_CODE) return@setOnClickListener
-            restartWithAgent(ExternalAgentId.OPEN_CODE, null)
         }
     }
 
@@ -292,7 +286,6 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun renderBottomTabState() {
         btnClaude.isEnabled = agentId != ExternalAgentId.CLAUDE_CODE
-        btnOpenCode.isEnabled = agentId != ExternalAgentId.OPEN_CODE
     }
 
     private fun createNewSession() {
@@ -437,7 +430,6 @@ class CliAgentChatActivity : AppCompatActivity() {
                 val prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
                 when (agentId) {
                     ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, prompt, runtimeOptions)
-                    ExternalAgentId.OPEN_CODE -> runOpenCode(modelConfig, prompt, runtimeOptions)
                 }
             }.getOrElse { error ->
                 val processText = snapshotLiveProcessLines().joinToString("\n").trim()
@@ -484,7 +476,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         val recent = messages.takeLast(historyWindowSize.coerceIn(20, 120))
         val out = StringBuilder()
         out.appendLine("你正在继续已有会话。请结合上下文回答，并在需要时执行可用工具。")
-        if (agentId == ExternalAgentId.OPEN_CODE || agentId == ExternalAgentId.CLAUDE_CODE) {
+        if (agentId == ExternalAgentId.CLAUDE_CODE) {
             out.appendLine("高优先级运行规范（必须遵守）：")
             out.appendLine("1) 先阅读“自动注入预检结果”，再决定用哪条执行链路。")
             out.appendLine("2) Android 系统级命令必须使用 system-shell <command>。")
@@ -565,35 +557,6 @@ class CliAgentChatActivity : AppCompatActivity() {
             dirs += "/storage/emulated/0"
         }
         return dirs.joinToString(" ") { "--add-dir ${LocalBridgeClients.shellQuote(it)}" } + " "
-    }
-
-    private fun runOpenCode(
-        config: AgentModelConfig,
-        prompt: String,
-        options: AgentRuntimeOptions,
-    ): AgentRunResult {
-        val paths = BootstrapInstaller.getPaths(this)
-        val homeDir = paths.homeDir
-        val nativeBin = "${paths.prefixDir}/lib/node_modules/opencode-ai/bin/.opencode"
-        if (!File(nativeBin).exists()) {
-            throw IllegalStateException("OpenCode 组件未安装或损坏：缺少 .opencode 二进制")
-        }
-        val configFile = File(homeDir, ".pocketlobster/opencode/opencode-${activeSession.sessionId}.json")
-        configFile.parentFile?.mkdirs()
-        configFile.writeText(buildOpenCodeConfig(config).toString(2))
-        val bridgeDir = ensureOpenCodeBridgeScripts(homeDir)
-
-        val providerKey = normalizeProviderKey(config.providerId.ifBlank { "lobster" })
-        val modelRef = if (config.modelId.contains("/")) config.modelId else "$providerKey/${config.modelId}"
-        val workDir = if (options.allowSharedStorage) "/sdcard" else homeDir
-        val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
-        val cmd =
-            "export OPENCODE_CONFIG=${LocalBridgeClients.shellQuote(configFile.absolutePath)}; " +
-                "export PATH=${LocalBridgeClients.shellQuote("$bridgeDir:${paths.prefixDir}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}; " +
-                "cd ${LocalBridgeClients.shellQuote(workDir)} 2>/dev/null || cd ${LocalBridgeClients.shellQuote(homeDir)}; " +
-                "${LocalBridgeClients.shellQuote(nativeBin)} run --model ${LocalBridgeClients.shellQuote(modelRef)} " +
-                "--dir ${LocalBridgeClients.shellQuote(workDir)} ${dangerArg}--format default ${LocalBridgeClients.shellQuote(prompt)} 2>&1"
-        return runStreamingCommand(serverManager.startUbuntuProcess(cmd)) { raw -> raw.trim() }
     }
 
     private fun runStreamingCommand(
@@ -887,26 +850,31 @@ class CliAgentChatActivity : AppCompatActivity() {
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> launchFilePicker("*/*")
-                    1 -> launchFilePicker("image/*", galleryOnly = true)
+                    1 -> launchGalleryPicker()
                     2 -> launchCameraCapture()
                 }
             }
             .show()
     }
 
-    private fun launchFilePicker(mimeType: String, galleryOnly: Boolean = false) {
+    private fun launchFilePicker(mimeType: String) {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = mimeType
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-            if (galleryOnly) {
-                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*"))
-            }
         }
-        if (galleryOnly) {
+        filePickerLauncher.launch(intent)
+    }
+
+    private fun launchGalleryPicker() {
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+            type = "image/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        try {
             galleryPickerLauncher.launch(intent)
-        } else {
-            filePickerLauncher.launch(intent)
+        } catch (_: Exception) {
+            launchFilePicker("image/*")
         }
     }
 
@@ -1034,8 +1002,6 @@ class CliAgentChatActivity : AppCompatActivity() {
     }
 
     private fun buildRuntimeProbeBlock(options: AgentRuntimeOptions): String {
-        val paths = BootstrapInstaller.getPaths(this)
-        val openCodeBin = "${paths.prefixDir}/lib/node_modules/opencode-ai/bin/.opencode"
         val localCapability = runPrefixCapture("codex-capabilities --plain 2>&1 || true")
         val localChain = runPrefixCapture(
             "id 2>&1; pwd 2>&1; command -v system-shell 2>&1 || true; command -v ubuntu-shell 2>&1 || true",
@@ -1044,12 +1010,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         val ubuntuChain = runUbuntuCapture(
             "id 2>&1; pwd 2>&1; command -v system-shell 2>&1 || true; command -v ubuntu-shell 2>&1 || true; echo ANYCLAW_UBUNTU_BIN=${'$'}ANYCLAW_UBUNTU_BIN",
         )
-        val openCodeHealth = if (agentId == ExternalAgentId.OPEN_CODE) {
-            runUbuntuCapture("${LocalBridgeClients.shellQuote(openCodeBin)} --version 2>&1 || true")
-        } else {
-            ProbeResult(0, "skip")
-        }
-
         return buildString {
             appendLine("checked_at_ms=${System.currentTimeMillis()}")
             appendLine("allow_shared_storage=${if (options.allowSharedStorage) 1 else 0}")
@@ -1058,9 +1018,6 @@ class CliAgentChatActivity : AppCompatActivity() {
             appendLine(formatProbe("local_chain", localChain))
             appendLine(formatProbe("system_shell", systemChain))
             appendLine(formatProbe("ubuntu_chain", ubuntuChain))
-            if (agentId == ExternalAgentId.OPEN_CODE) {
-                appendLine(formatProbe("opencode_binary", openCodeHealth))
-            }
         }.trim()
     }
 
@@ -1146,37 +1103,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         return ProbeResult(code = code, output = output.toString().trim())
     }
 
-    private fun buildOpenCodeConfig(config: AgentModelConfig): JSONObject {
-        val providerKey = normalizeProviderKey(config.providerId.ifBlank { "lobster" })
-        val npmPackage = when (config.protocol) {
-            ProviderProtocol.ANTHROPIC -> "@ai-sdk/anthropic"
-            ProviderProtocol.OPENAI_COMPATIBLE -> "@ai-sdk/openai-compatible"
-        }
-        val providerJson = JSONObject()
-            .put("npm", npmPackage)
-            .put("name", config.providerName.ifBlank { providerKey })
-            .put(
-                "options",
-                JSONObject()
-                    .put("baseURL", config.baseUrl)
-                    .put("apiKey", config.apiKey),
-            )
-            .put(
-                "models",
-                JSONObject().put(
-                    config.modelId,
-                    JSONObject().put("name", config.modelId),
-                ),
-            )
-
-        return JSONObject()
-            .put("\$schema", "https://opencode.ai/config.json")
-            .put(
-                "provider",
-                JSONObject().put(providerKey, providerJson),
-            )
-    }
-
     private fun cleanClaudeOutput(raw: String): String {
         val filtered = raw.lineSequence()
             .filterNot { it.startsWith("Claude Code Warning: no stdin data received") }
@@ -1190,19 +1116,13 @@ class CliAgentChatActivity : AppCompatActivity() {
         return value.replace(Regex("\\u001B\\[[;\\d]*[A-Za-z]"), "")
     }
 
-    private fun normalizeProviderKey(raw: String): String {
-        val cleaned = raw.trim().lowercase(Locale.US).replace(Regex("[^a-z0-9._-]"), "-")
-        return cleaned.ifBlank { "lobster" }
-    }
-
     private fun runtimeOptionKey(name: String): String = "${agentId.value}_$name"
 
     private fun loadRuntimeOptions(): AgentRuntimeOptions {
         val prefs = getSharedPreferences(RUNTIME_PREFS, MODE_PRIVATE)
-        val defaultDangerous = agentId == ExternalAgentId.OPEN_CODE
         return AgentRuntimeOptions(
             allowSharedStorage = prefs.getBoolean(runtimeOptionKey("allow_shared_storage"), true),
-            dangerousAutoApprove = prefs.getBoolean(runtimeOptionKey("dangerous_mode"), defaultDangerous),
+            dangerousAutoApprove = prefs.getBoolean(runtimeOptionKey("dangerous_mode"), false),
         )
     }
 
@@ -1237,86 +1157,6 @@ class CliAgentChatActivity : AppCompatActivity() {
             .edit()
             .putBoolean(runtimeOptionKey("show_process"), value)
             .apply()
-    }
-
-    private fun ensureOpenCodeBridgeScripts(homeDir: String): String {
-        val bridgeDir = File(homeDir, ".pocketlobster/bridges")
-        if (!bridgeDir.exists()) bridgeDir.mkdirs()
-        val systemShellScript = File(bridgeDir, "system-shell")
-        val systemShellAliasScript = File(bridgeDir, "system_shell")
-        val ubuntuShellScript = File(bridgeDir, "ubuntu-shell")
-        val ubuntuShellAliasScript = File(bridgeDir, "ubuntu_shell")
-
-        val systemShellContent =
-            """
-            #!/usr/bin/env bash
-            set -euo pipefail
-            if [ "${'$'}#" -eq 0 ]; then
-              echo "Usage: system-shell <command>" >&2
-              exit 2
-            fi
-            cmd="${'$'}*"
-            payload=${'$'}(python3 - "${'$'}cmd" <<'PY'
-            import json,sys
-            print(json.dumps({"command": sys.argv[1]}))
-            PY
-            )
-            resp=${'$'}(curl -fsS --max-time 120 -H "Content-Type: application/json" -d "${'$'}payload" http://127.0.0.1:18926/exec || true)
-            if [ -z "${'$'}resp" ]; then
-              echo "Shizuku bridge unreachable" >&2
-              exit 3
-            fi
-            python3 - "${'$'}resp" <<'PY'
-            import json,sys
-            data={}
-            try:
-                data=json.loads(sys.argv[1])
-            except Exception:
-                sys.stderr.write("Invalid bridge response\n")
-                sys.exit(1)
-            out=data.get("stdout","")
-            err=data.get("stderr","")
-            if out:
-                sys.stdout.write(out)
-            if err:
-                sys.stderr.write(err)
-            code=data.get("exitCode", 0 if data.get("ok") else 1)
-            if (not data.get("ok")) and data.get("error"):
-                sys.stderr.write(str(data["error"]) + "\n")
-            if (not data.get("ok")) and data.get("error_code"):
-                sys.stderr.write("error_code=" + str(data["error_code"]) + "\n")
-            sys.exit(int(code))
-            PY
-            """.trimIndent() + "\n"
-        if (!systemShellScript.exists() || systemShellScript.readText() != systemShellContent) {
-            systemShellScript.writeText(systemShellContent)
-            systemShellScript.setExecutable(true)
-        }
-        val systemShellAliasContent = "#!/usr/bin/env bash\nexec \"${systemShellScript.absolutePath}\" \"\$@\"\n"
-        if (!systemShellAliasScript.exists() || systemShellAliasScript.readText() != systemShellAliasContent) {
-            systemShellAliasScript.writeText(systemShellAliasContent)
-            systemShellAliasScript.setExecutable(true)
-        }
-
-        val ubuntuShellContent =
-            """
-            #!/usr/bin/env bash
-            if [ "${'$'}#" -eq 0 ]; then
-              exec /bin/bash -il
-            fi
-            exec /bin/bash -lc "${'$'}*"
-            """.trimIndent() + "\n"
-        if (!ubuntuShellScript.exists() || ubuntuShellScript.readText() != ubuntuShellContent) {
-            ubuntuShellScript.writeText(ubuntuShellContent)
-            ubuntuShellScript.setExecutable(true)
-        }
-        val ubuntuShellAliasContent = "#!/usr/bin/env bash\nexec \"${ubuntuShellScript.absolutePath}\" \"\$@\"\n"
-        if (!ubuntuShellAliasScript.exists() || ubuntuShellAliasScript.readText() != ubuntuShellAliasContent) {
-            ubuntuShellAliasScript.writeText(ubuntuShellAliasContent)
-            ubuntuShellAliasScript.setExecutable(true)
-        }
-
-        return bridgeDir.absolutePath
     }
 
     private fun ensureClaudeAnyClawMcpConfig(options: AgentRuntimeOptions): File {
@@ -1396,7 +1236,7 @@ class CliAgentChatActivity : AppCompatActivity() {
     }
 
     private fun parseAgent(raw: String?): ExternalAgentId {
-        return ExternalAgentId.entries.firstOrNull { it.value == raw?.trim() } ?: ExternalAgentId.OPEN_CODE
+        return ExternalAgentId.entries.firstOrNull { it.value == raw?.trim() } ?: ExternalAgentId.CLAUDE_CODE
     }
 
     @Deprecated("Use onBackPressedDispatcher")
