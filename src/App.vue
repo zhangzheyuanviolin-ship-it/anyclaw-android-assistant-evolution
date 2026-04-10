@@ -298,6 +298,24 @@
                 <button
                   type="button"
                   class="openclaw-toolbar-button"
+                  :aria-label="t('openclaw_new_session')"
+                  :disabled="isOpenClawSessionCreating"
+                  @click="onCreateOpenClawSession"
+                >
+                  {{ t('openclaw_new_session') }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
+                  :aria-label="t('openclaw_reset_session')"
+                  :disabled="isOpenClawSessionCreating || !openClawSelectedSessionKey"
+                  @click="onResetOpenClawSession"
+                >
+                  {{ t('openclaw_reset_session') }}
+                </button>
+                <button
+                  type="button"
+                  class="openclaw-toolbar-button"
                   :aria-label="openClawProcessToggleLabel"
                   @click="toggleOpenClawProcessView"
                 >

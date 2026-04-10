@@ -3062,6 +3062,19 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
 
+        if (OPENCLAW_NATIVE_STRICT_MODE) {
+          setJson(res, 200, {
+            ok: false,
+            error: 'OpenClaw gateway unavailable',
+            code: 'openclaw_native_unavailable',
+            data: {
+              mode: 'lightweight-proxy',
+              gatewayRequired: true,
+            },
+          })
+          return
+        }
+
         setJson(res, 200, {
           ok: true,
           data: {

@@ -473,6 +473,18 @@ function createCodexMcpReloadTool(runtime: RuntimeConfig) {
   };
 }
 
+function isCrossAgentModelMethod(method: string): boolean {
+  const normalized = method.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes("model/list") ||
+    normalized.includes("models/list") ||
+    normalized.includes("model.get") ||
+    normalized.includes("models.get") ||
+    normalized.includes("meta/models")
+  );
+}
+
 function createCodexRpcTool(runtime: RuntimeConfig) {
   return {
     label: "AnyClaw Codex RPC",
@@ -490,6 +502,15 @@ function createCodexRpcTool(runtime: RuntimeConfig) {
     execute: async (_toolCallId: string, input: unknown) => {
       const args = asObject(input);
       const method = (readStringParam(args, "method", { required: true }) || "").trim();
+      if (isCrossAgentModelMethod(method)) {
+        return jsonResult({
+          ok: false,
+          tool: "codex_rpc",
+          method,
+          error: "cross_agent_model_access_disabled",
+          detail: "Cross-agent model surface is isolated in Pocket Lobster."
+        });
+      }
       const paramsJson = (readStringParam(args, "paramsJson") || "{}").trim();
       let params: unknown = {};
       try {

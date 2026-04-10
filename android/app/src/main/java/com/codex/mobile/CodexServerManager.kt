@@ -1469,23 +1469,6 @@ EOF
             // Keep legacy default for first install only; never override existing user model choice.
             model.put("primary", "openai-codex/gpt-5.3-codex")
         }
-        val agentList = if (agents.optJSONArray("list") != null) {
-            agents.optJSONArray("list")!!
-        } else {
-            JSONArray().also { agents.put("list", it) }
-        }
-        ensureAgentListEntry(agentList, "claude-code", "claude-cli/claude-sonnet-4-6")
-
-        val acp = ensureObject(root, "acp")
-        if (!acp.has("enabled")) acp.put("enabled", true)
-        if (acp.optString("defaultAgent", "").isBlank()) acp.put("defaultAgent", "codex")
-        val allowedAgents = if (acp.optJSONArray("allowedAgents") != null) {
-            acp.optJSONArray("allowedAgents")!!
-        } else {
-            JSONArray().also { acp.put("allowedAgents", it) }
-        }
-        ensureArrayValue(allowedAgents, "codex")
-        ensureArrayValue(allowedAgents, "claude-code")
 
         val heartbeat = ensureObject(defaults, "heartbeat")
         // OpenClaw 2026.3.2 schema does not accept "enabled" in defaults.heartbeat.
@@ -3793,28 +3776,6 @@ EOF
         val created = JSONObject()
         parent.put(key, created)
         return created
-    }
-
-    private fun ensureArrayValue(array: JSONArray, value: String) {
-        if (!jsonArrayContains(array, value)) {
-            array.put(value)
-        }
-    }
-
-    private fun ensureAgentListEntry(list: JSONArray, id: String, modelRef: String) {
-        for (i in 0 until list.length()) {
-            val item = list.optJSONObject(i) ?: continue
-            val existingId = item.optString("id", "").trim()
-            if (existingId != id) continue
-            val model = ensureObject(item, "model")
-            if (model.optString("primary", "").isBlank()) {
-                model.put("primary", modelRef)
-            }
-            return
-        }
-        val model = JSONObject().put("primary", modelRef)
-        val entry = JSONObject().put("id", id).put("model", model)
-        list.put(entry)
     }
 
     private fun sanitizeHeartbeatDefaults(root: JSONObject): Boolean {
