@@ -12,6 +12,7 @@
     <string name="api_key_hint">sk-…</string>
     <string name="ok">OK</string>
     <string name="cancel">Cancel</string>
+    <string name="close">关闭</string>
     <string name="storage_permission_required_title">存储权限 / Storage Permission</string>
     <string name="storage_permission_required_message_android_r">口袋大龙虾需要完整文件访问权限，用于读写共享存储（例如 /sdcard）。请授予“所有文件访问权限”后继续。&#10;&#10;Pocket Lobster needs full file access to read and write shared storage (for example /sdcard). Grant \"All files access\" to continue.</string>
     <string name="storage_permission_required_message_legacy">口袋大龙虾需要存储权限，用于读写共享存储（例如 /sdcard）。请授权后继续。&#10;&#10;Pocket Lobster needs storage permission to read and write shared storage (for example /sdcard). Grant permission to continue.</string>
@@ -33,9 +34,13 @@
     <string name="agent_hub_opencode">OpenCode 聊天</string>
     <string name="agent_hub_permission_center">权限管理中心</string>
     <string name="prompt_manager_title">提示词管理</string>
-    <string name="prompt_manager_subtitle">创建并选择会话初始化提示词。选中的提示词会在新会话或会话恢复时自动注入给 Codex。</string>
+    <string name="prompt_manager_subtitle">创建并选择会话初始化提示词。支持分别管理 Codex 与 Claude 的提示词。</string>
+    <string name="prompt_manager_subtitle_codex">管理 Codex 会话提示词。选中的提示词会同步到 Codex 注入配置。</string>
+    <string name="prompt_manager_subtitle_claude">管理 Claude 会话提示词。选中的提示词会在 Claude 命令执行时自动追加。</string>
     <string name="prompt_manager_button_text">提示词管理</string>
     <string name="prompt_manager_button_desc">打开提示词管理页面</string>
+    <string name="prompt_source_codex_button_text">Codex 提示词</string>
+    <string name="prompt_source_claude_button_text">Claude 提示词</string>
     <string name="conversation_manager_title">对话管理</string>
     <string name="conversation_manager_subtitle">统一管理 Codex 与大龙虾会话。支持重命名、删除、复制、导出，并可直接点按进入会话。</string>
     <string name="conversation_manager_button_text">对话管理</string>
@@ -202,6 +207,8 @@
     <string name="cli_option_allow_shared_storage">允许访问共享存储（/sdcard）</string>
     <string name="cli_option_dangerous_mode">高权限自动放行（谨慎使用）</string>
     <string name="cli_option_show_process">显示执行过程</string>
+    <string name="cli_settings_button_text">设置</string>
+    <string name="cli_settings_dialog_title">聊天设置</string>
     <string name="cli_attach_button_text">添加附件</string>
     <string name="cli_clear_attachments_button_text">清空附件</string>
     <string name="cli_abort_button_text">终止任务</string>

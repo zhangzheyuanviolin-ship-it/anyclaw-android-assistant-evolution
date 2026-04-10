@@ -26,127 +26,27 @@
         android:layout_marginTop="2dp"
         android:textSize="13sp" />
 
-    <HorizontalScrollView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:scrollbars="none">
+        android:orientation="horizontal">
 
-        <LinearLayout
-            android:layout_width="wrap_content"
+        <Button
+            android:id="@+id/btnCliSettings"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:layout_weight="1"
+            android:text="@string/cli_settings_button_text" />
 
-            <Button
-                android:id="@+id/btnCliPermissionCenter"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/permission_center_button_text" />
-
-            <Button
-                android:id="@+id/btnCliPromptManager"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/prompt_manager_button_text" />
-
-            <Button
-                android:id="@+id/btnCliConversationManager"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/conversation_manager_button_text" />
-
-            <Button
-                android:id="@+id/btnCliModelManager"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/model_manager_button_text" />
-
-            <Button
-                android:id="@+id/btnCliNewSession"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/chat_new_session_button_text" />
-        </LinearLayout>
-    </HorizontalScrollView>
-
-    <androidx.appcompat.widget.SwitchCompat
-        android:id="@+id/switchCliAllowSharedStorage"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:text="@string/cli_option_allow_shared_storage" />
-
-    <androidx.appcompat.widget.SwitchCompat
-        android:id="@+id/switchCliDangerousMode"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:text="@string/cli_option_dangerous_mode" />
-
-    <androidx.appcompat.widget.SwitchCompat
-        android:id="@+id/switchCliShowProcess"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:text="@string/cli_option_show_process" />
-
-    <HorizontalScrollView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:scrollbars="none">
-
-        <LinearLayout
-            android:layout_width="wrap_content"
+        <Button
+            android:id="@+id/btnCliNewSession"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnCliAttach"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/cli_attach_button_text" />
-
-            <Button
-                android:id="@+id/btnCliClearAttachments"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/cli_clear_attachments_button_text" />
-
-            <Button
-                android:id="@+id/btnCliAbort"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/cli_abort_button_text" />
-
-            <Button
-                android:id="@+id/btnCliLoadOlder"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/cli_load_older_button_text" />
-
-            <Button
-                android:id="@+id/btnCliRestoreLite"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:text="@string/cli_restore_lite_button_text" />
-        </LinearLayout>
-    </HorizontalScrollView>
-
-    <TextView
-        android:id="@+id/tvCliAttachmentSummary"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:textSize="13sp" />
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:text="@string/chat_new_session_button_text" />
+    </LinearLayout>
 
     <ListView
         android:id="@+id/listCliAgentMessages"
@@ -164,21 +64,57 @@
 
         <EditText
             android:id="@+id/etCliAgentInput"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
             android:hint="输入消息"
             android:inputType="textMultiLine"
             android:maxLines="6"
             android:minLines="2" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/btnCliAgentSend"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/chat_send_button_text" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal">
 
         <Button
-            android:id="@+id/btnCliAgentSend"
-            android:layout_width="wrap_content"
+            android:id="@+id/btnCliAbort"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="@string/chat_send_button_text" />
+            android:layout_weight="1"
+            android:text="@string/cli_abort_button_text" />
+
+        <Button
+            android:id="@+id/btnCliAttach"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:text="@string/cli_attach_button_text" />
+
+        <Button
+            android:id="@+id/btnCliClearAttachments"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:text="@string/cli_clear_attachments_button_text" />
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvCliAttachmentSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:textSize="13sp" />
 
     <LinearLayout
         android:layout_width="match_parent"

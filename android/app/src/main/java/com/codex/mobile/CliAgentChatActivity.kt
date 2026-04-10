@@ -42,16 +42,11 @@ class CliAgentChatActivity : AppCompatActivity() {
     private lateinit var tvSession: TextView
     private lateinit var tvStatus: TextView
     private lateinit var tvAttachmentSummary: TextView
-    private lateinit var btnPermissionCenter: Button
-    private lateinit var btnPromptManager: Button
-    private lateinit var btnConversationManager: Button
-    private lateinit var btnModelManager: Button
+    private lateinit var btnSettings: Button
     private lateinit var btnNewSession: Button
     private lateinit var btnAttach: Button
     private lateinit var btnClearAttachments: Button
     private lateinit var btnAbort: Button
-    private lateinit var btnLoadOlder: Button
-    private lateinit var btnRestoreLite: Button
     private lateinit var listView: ListView
     private lateinit var inputMessage: EditText
     private lateinit var btnSend: Button
@@ -59,9 +54,6 @@ class CliAgentChatActivity : AppCompatActivity() {
     private lateinit var btnCodex: Button
     private lateinit var btnClaude: Button
     private lateinit var btnOpenCode: Button
-    private lateinit var switchAllowSharedStorage: SwitchCompat
-    private lateinit var switchDangerousMode: SwitchCompat
-    private lateinit var switchShowProcess: SwitchCompat
 
     private lateinit var serverManager: CodexServerManager
     private lateinit var agentId: ExternalAgentId
@@ -151,16 +143,11 @@ class CliAgentChatActivity : AppCompatActivity() {
         tvSession = findViewById(R.id.tvCliAgentSession)
         tvStatus = findViewById(R.id.tvCliAgentStatus)
         tvAttachmentSummary = findViewById(R.id.tvCliAttachmentSummary)
-        btnPermissionCenter = findViewById(R.id.btnCliPermissionCenter)
-        btnPromptManager = findViewById(R.id.btnCliPromptManager)
-        btnConversationManager = findViewById(R.id.btnCliConversationManager)
-        btnModelManager = findViewById(R.id.btnCliModelManager)
+        btnSettings = findViewById(R.id.btnCliSettings)
         btnNewSession = findViewById(R.id.btnCliNewSession)
         btnAttach = findViewById(R.id.btnCliAttach)
         btnClearAttachments = findViewById(R.id.btnCliClearAttachments)
         btnAbort = findViewById(R.id.btnCliAbort)
-        btnLoadOlder = findViewById(R.id.btnCliLoadOlder)
-        btnRestoreLite = findViewById(R.id.btnCliRestoreLite)
         listView = findViewById(R.id.listCliAgentMessages)
         inputMessage = findViewById(R.id.etCliAgentInput)
         btnSend = findViewById(R.id.btnCliAgentSend)
@@ -168,9 +155,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         btnCodex = findViewById(R.id.btnCliTabCodex)
         btnClaude = findViewById(R.id.btnCliTabClaude)
         btnOpenCode = findViewById(R.id.btnCliTabOpenCode)
-        switchAllowSharedStorage = findViewById(R.id.switchCliAllowSharedStorage)
-        switchDangerousMode = findViewById(R.id.switchCliDangerousMode)
-        switchShowProcess = findViewById(R.id.switchCliShowProcess)
 
         listView.adapter = messageAdapter
         tvTitle.text = AgentSessionStore.displayAgentName(agentId)
@@ -179,41 +163,8 @@ class CliAgentChatActivity : AppCompatActivity() {
         historyWindowSize = loadHistoryWindowSize()
         showProcess = loadShowProcess()
 
-        switchAllowSharedStorage.isChecked = runtimeOptions.allowSharedStorage
-        switchDangerousMode.isChecked = runtimeOptions.dangerousAutoApprove
-        switchShowProcess.isChecked = showProcess
-
-        switchAllowSharedStorage.setOnCheckedChangeListener { _, checked ->
-            runtimeOptions = runtimeOptions.copy(allowSharedStorage = checked)
-            saveRuntimeOptions(runtimeOptions)
-            renderSession()
-        }
-        switchDangerousMode.setOnCheckedChangeListener { _, checked ->
-            runtimeOptions = runtimeOptions.copy(dangerousAutoApprove = checked)
-            saveRuntimeOptions(runtimeOptions)
-            renderSession()
-        }
-        switchShowProcess.setOnCheckedChangeListener { _, checked ->
-            showProcess = checked
-            saveShowProcess(checked)
-            renderSession()
-        }
-
-        btnPermissionCenter.setOnClickListener {
-            startActivity(Intent(this, PermissionManagerActivity::class.java))
-        }
-        btnPromptManager.setOnClickListener {
-            startActivity(Intent(this, PromptManagerActivity::class.java))
-        }
-        btnConversationManager.setOnClickListener {
-            startActivity(Intent(this, ConversationManagerActivity::class.java))
-        }
-        btnModelManager.setOnClickListener {
-            startActivity(
-                Intent(this, AgentModelManagerActivity::class.java).apply {
-                    putExtra(AgentModelManagerActivity.EXTRA_AGENT_ID, agentId.value)
-                },
-            )
+        btnSettings.setOnClickListener {
+            showSettingsDialog()
         }
         btnNewSession.setOnClickListener {
             createNewSession()
@@ -226,12 +177,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
         btnAbort.setOnClickListener {
             abortRunningTask()
-        }
-        btnLoadOlder.setOnClickListener {
-            loadOlderMessages()
-        }
-        btnRestoreLite.setOnClickListener {
-            restoreLiteHistory()
         }
         btnSend.setOnClickListener {
             sendMessage()
@@ -305,8 +250,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         inputMessage.isEnabled = !sending
 
         val storedMessages = filteredMessagesForDisplay()
-        btnLoadOlder.isEnabled = activeSession.messages.size > storedMessages.size
-        btnRestoreLite.isEnabled = historyWindowSize > DEFAULT_VISIBLE_HISTORY
 
         val displayItems = mutableListOf<DisplayMessage>()
         storedMessages.forEach { msg ->
@@ -378,6 +321,88 @@ class CliAgentChatActivity : AppCompatActivity() {
         saveHistoryWindowSize(historyWindowSize)
         renderSession()
         Toast.makeText(this, getString(R.string.cli_history_restored), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showSettingsDialog() {
+        val view = layoutInflater.inflate(R.layout.dialog_cli_chat_settings, null)
+        val switchAllow = view.findViewById<SwitchCompat>(R.id.switchCliSettingAllowSharedStorage)
+        val switchDanger = view.findViewById<SwitchCompat>(R.id.switchCliSettingDangerousMode)
+        val switchProcess = view.findViewById<SwitchCompat>(R.id.switchCliSettingShowProcess)
+        val btnPermission = view.findViewById<Button>(R.id.btnCliSettingPermissionCenter)
+        val btnPrompt = view.findViewById<Button>(R.id.btnCliSettingPromptManager)
+        val btnConversation = view.findViewById<Button>(R.id.btnCliSettingConversationManager)
+        val btnModel = view.findViewById<Button>(R.id.btnCliSettingModelManager)
+        val btnLoadOlder = view.findViewById<Button>(R.id.btnCliSettingLoadOlder)
+        val btnRestoreLite = view.findViewById<Button>(R.id.btnCliSettingRestoreLite)
+
+        switchAllow.isChecked = runtimeOptions.allowSharedStorage
+        switchDanger.isChecked = runtimeOptions.dangerousAutoApprove
+        switchProcess.isChecked = showProcess
+
+        switchAllow.setOnCheckedChangeListener { _, checked ->
+            runtimeOptions = runtimeOptions.copy(allowSharedStorage = checked)
+            saveRuntimeOptions(runtimeOptions)
+            renderSession()
+        }
+        switchDanger.setOnCheckedChangeListener { _, checked ->
+            runtimeOptions = runtimeOptions.copy(dangerousAutoApprove = checked)
+            saveRuntimeOptions(runtimeOptions)
+            renderSession()
+        }
+        switchProcess.setOnCheckedChangeListener { _, checked ->
+            showProcess = checked
+            saveShowProcess(checked)
+            renderSession()
+        }
+
+        val visible = filteredMessagesForDisplay()
+        btnLoadOlder.isEnabled = activeSession.messages.size > visible.size
+        btnRestoreLite.isEnabled = historyWindowSize > DEFAULT_VISIBLE_HISTORY
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.cli_settings_dialog_title))
+            .setView(view)
+            .setPositiveButton(getString(R.string.close), null)
+            .create()
+
+        btnPermission.setOnClickListener {
+            startActivity(Intent(this, PermissionManagerActivity::class.java))
+            dialog.dismiss()
+        }
+        btnPrompt.setOnClickListener {
+            val target = if (agentId == ExternalAgentId.CLAUDE_CODE) {
+                PromptProfileTarget.CLAUDE.value
+            } else {
+                PromptProfileTarget.CODEX.value
+            }
+            startActivity(
+                Intent(this, PromptManagerActivity::class.java).apply {
+                    putExtra(PromptManagerActivity.EXTRA_PROMPT_TARGET, target)
+                },
+            )
+            dialog.dismiss()
+        }
+        btnConversation.setOnClickListener {
+            startActivity(Intent(this, ConversationManagerActivity::class.java))
+            dialog.dismiss()
+        }
+        btnModel.setOnClickListener {
+            startActivity(
+                Intent(this, AgentModelManagerActivity::class.java).apply {
+                    putExtra(AgentModelManagerActivity.EXTRA_AGENT_ID, agentId.value)
+                },
+            )
+            dialog.dismiss()
+        }
+        btnLoadOlder.setOnClickListener {
+            loadOlderMessages()
+            dialog.dismiss()
+        }
+        btnRestoreLite.setOnClickListener {
+            restoreLiteHistory()
+            dialog.dismiss()
+        }
+        dialog.show()
     }
 
     private fun sendMessage() {
@@ -510,11 +535,26 @@ class CliAgentChatActivity : AppCompatActivity() {
         val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
         val mcpArg =
             "--mcp-config ${LocalBridgeClients.shellQuote(mcpConfigPath)} --strict-mcp-config "
+        val promptArg = buildClaudeSystemPromptArg()
         val cmd =
-            "${baseEnv}${keyEnv}claude -p --verbose ${dangerArg}${addDirArg}${mcpArg}${modelArg}" +
+            "${baseEnv}${keyEnv}claude -p --verbose ${dangerArg}${addDirArg}${mcpArg}${promptArg}${modelArg}" +
                 "--output-format stream-json --include-partial-messages --include-hook-events " +
                 "${LocalBridgeClients.shellQuote(prompt)} < /dev/null 2>&1"
         return runClaudeStreamJson(serverManager.startPrefixProcess(cmd))
+    }
+
+    private fun buildClaudeSystemPromptArg(): String {
+        val selected = PromptProfileStore.loadSelectedProfile(this, PromptProfileTarget.CLAUDE)
+        val content = selected?.content?.trim().orEmpty()
+        if (content.isBlank()) return ""
+        val paths = BootstrapInstaller.getPaths(this)
+        val mcpDir = File(paths.homeDir, ".pocketlobster/mcp")
+        if (!mcpDir.exists()) {
+            mcpDir.mkdirs()
+        }
+        val promptFile = File(mcpDir, "claude-system-prompt.txt")
+        writeTextIfChanged(promptFile, content + "\n")
+        return "--append-system-prompt-file ${LocalBridgeClients.shellQuote(promptFile.absolutePath)} "
     }
 
     private fun buildClaudeDirArgs(options: AgentRuntimeOptions): String {

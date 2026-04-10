@@ -15,21 +15,46 @@ import java.util.UUID
 
 class PromptManagerActivity : AppCompatActivity() {
 
+    companion object {
+        const val EXTRA_PROMPT_TARGET = "com.codex.mobile.extra.PROMPT_TARGET"
+    }
+
+    private lateinit var tvTitle: android.widget.TextView
+    private lateinit var tvSubtitle: android.widget.TextView
+    private lateinit var btnSourceCodex: Button
+    private lateinit var btnSourceClaude: Button
     private lateinit var listView: ListView
     private lateinit var btnAddPrompt: Button
     private lateinit var btnClearSelectedPrompt: Button
     private lateinit var btnDeleteSelectedPrompt: Button
     private var profiles = mutableListOf<PromptProfile>()
+    private var currentTarget = PromptProfileTarget.CODEX
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_prompt_manager)
 
+        tvTitle = findViewById(R.id.tvPromptManagerTitle)
+        tvSubtitle = findViewById(R.id.tvPromptManagerSubtitle)
+        btnSourceCodex = findViewById(R.id.btnPromptSourceCodex)
+        btnSourceClaude = findViewById(R.id.btnPromptSourceClaude)
         listView = findViewById(R.id.listPromptProfiles)
         btnAddPrompt = findViewById(R.id.btnAddPrompt)
         btnClearSelectedPrompt = findViewById(R.id.btnClearSelectedPrompt)
         btnDeleteSelectedPrompt = findViewById(R.id.btnDeleteSelectedPrompt)
 
+        currentTarget = parseTarget(intent.getStringExtra(EXTRA_PROMPT_TARGET))
+
+        btnSourceCodex.setOnClickListener {
+            if (currentTarget == PromptProfileTarget.CODEX) return@setOnClickListener
+            currentTarget = PromptProfileTarget.CODEX
+            refreshList()
+        }
+        btnSourceClaude.setOnClickListener {
+            if (currentTarget == PromptProfileTarget.CLAUDE) return@setOnClickListener
+            currentTarget = PromptProfileTarget.CLAUDE
+            refreshList()
+        }
         btnAddPrompt.setOnClickListener { openEditDialog(null) }
         btnClearSelectedPrompt.setOnClickListener { clearSelectedProfile() }
         btnDeleteSelectedPrompt.setOnClickListener { confirmDeleteSelectedProfile() }
@@ -52,7 +77,14 @@ class PromptManagerActivity : AppCompatActivity() {
     }
 
     private fun refreshList() {
-        profiles = PromptProfileStore.loadProfiles(this)
+        profiles = PromptProfileStore.loadProfiles(this, currentTarget)
+        btnSourceCodex.isEnabled = currentTarget != PromptProfileTarget.CODEX
+        btnSourceClaude.isEnabled = currentTarget != PromptProfileTarget.CLAUDE
+        tvTitle.text = getString(R.string.prompt_manager_title)
+        tvSubtitle.text = when (currentTarget) {
+            PromptProfileTarget.CODEX -> getString(R.string.prompt_manager_subtitle_codex)
+            PromptProfileTarget.CLAUDE -> getString(R.string.prompt_manager_subtitle_claude)
+        }
         val displayRows = if (profiles.isEmpty()) {
             listOf(getString(R.string.prompt_empty_text))
         } else {
@@ -78,7 +110,7 @@ class PromptManagerActivity : AppCompatActivity() {
                 row.copy(selected = false)
             }
         }.toMutableList()
-        PromptProfileStore.saveProfiles(this, profiles)
+        PromptProfileStore.saveProfiles(this, currentTarget, profiles)
         val selected = profiles.firstOrNull { it.id == profileId }?.selected == true
         val toast = if (selected) {
             getString(R.string.prompt_selected_toast)
@@ -100,7 +132,7 @@ class PromptManagerActivity : AppCompatActivity() {
             }
         }.toMutableList()
         if (!changed) return
-        PromptProfileStore.saveProfiles(this, profiles)
+        PromptProfileStore.saveProfiles(this, currentTarget, profiles)
         Toast.makeText(this, getString(R.string.prompt_selection_cleared_toast), Toast.LENGTH_SHORT).show()
         refreshList()
     }
@@ -116,7 +148,7 @@ class PromptManagerActivity : AppCompatActivity() {
             .setNegativeButton(getString(R.string.cancel), null)
             .setPositiveButton(getString(R.string.prompt_delete_text)) { _, _ ->
                 profiles = profiles.filterNot { it.id == selected.id }.toMutableList()
-                PromptProfileStore.saveProfiles(this, profiles)
+                PromptProfileStore.saveProfiles(this, currentTarget, profiles)
                 Toast.makeText(this, getString(R.string.prompt_deleted_toast), Toast.LENGTH_SHORT).show()
                 refreshList()
             }
@@ -146,7 +178,7 @@ class PromptManagerActivity : AppCompatActivity() {
             .setNegativeButton(getString(R.string.cancel), null)
             .setPositiveButton(getString(R.string.prompt_delete_text)) { _, _ ->
                 profiles = profiles.filterNot { it.id == profileId }.toMutableList()
-                PromptProfileStore.saveProfiles(this, profiles)
+                PromptProfileStore.saveProfiles(this, currentTarget, profiles)
                 Toast.makeText(this, getString(R.string.prompt_deleted_toast), Toast.LENGTH_SHORT).show()
                 refreshList()
             }
@@ -182,7 +214,7 @@ class PromptManagerActivity : AppCompatActivity() {
         container.addView(contentInput)
 
         val dialog = AlertDialog.Builder(this)
-            .setTitle(getString(R.string.prompt_manager_title))
+            .setTitle(getManagerTitle())
             .setView(container)
             .setNegativeButton(getString(R.string.cancel), null)
             .setPositiveButton(getString(R.string.prompt_save_text), null)
@@ -226,7 +258,7 @@ class PromptManagerActivity : AppCompatActivity() {
                     }.toMutableList()
                 }
 
-                PromptProfileStore.saveProfiles(this, profiles)
+                PromptProfileStore.saveProfiles(this, currentTarget, profiles)
                 Toast.makeText(this, getString(R.string.prompt_saved_toast), Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
                 refreshList()
@@ -234,5 +266,16 @@ class PromptManagerActivity : AppCompatActivity() {
         }
 
         dialog.show()
+    }
+
+    private fun getManagerTitle(): String {
+        return when (currentTarget) {
+            PromptProfileTarget.CODEX -> getString(R.string.prompt_source_codex_button_text)
+            PromptProfileTarget.CLAUDE -> getString(R.string.prompt_source_claude_button_text)
+        }
+    }
+
+    private fun parseTarget(raw: String?): PromptProfileTarget {
+        return PromptProfileTarget.entries.firstOrNull { it.value == raw?.trim() } ?: PromptProfileTarget.CODEX
     }
 }

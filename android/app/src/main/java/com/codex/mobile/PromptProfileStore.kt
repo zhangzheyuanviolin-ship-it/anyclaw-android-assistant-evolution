@@ -15,10 +15,17 @@ data class PromptProfile(
     val updatedAtMs: Long,
 )
 
+enum class PromptProfileTarget(val value: String) {
+    CODEX("codex"),
+    CLAUDE("claude"),
+}
+
 object PromptProfileStore {
     private const val TAG = "PromptProfileStore"
     private const val PREFS = "anyclaw_prompt_profiles"
-    private const val KEY_PROFILES_JSON = "profiles_json"
+    private const val KEY_PROFILES_JSON_LEGACY = "profiles_json"
+    private const val KEY_PROFILES_JSON_CODEX = "profiles_json_codex"
+    private const val KEY_PROFILES_JSON_CLAUDE = "profiles_json_claude"
     private const val PROMPT_INJECTION_FILE = ".openclaw-android/state/prompt-injection.json"
     private const val MAX_CONTENT_PREVIEW = 120
 
@@ -33,13 +40,26 @@ object PromptProfileStore {
     """.trimIndent()
 
     fun loadProfiles(context: Context): MutableList<PromptProfile> {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_PROFILES_JSON, "[]")
-            ?: "[]"
+        return loadProfiles(context, PromptProfileTarget.CODEX)
+    }
+
+    fun loadProfiles(context: Context, target: PromptProfileTarget): MutableList<PromptProfile> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val key = keyForTarget(target)
+        val rawFromTarget = prefs.getString(key, null)
+        val raw = when {
+            rawFromTarget != null -> rawFromTarget
+            target == PromptProfileTarget.CODEX -> prefs.getString(KEY_PROFILES_JSON_LEGACY, "[]")
+            else -> "[]"
+        } ?: "[]"
         return parseProfiles(raw)
     }
 
     fun saveProfiles(context: Context, profiles: List<PromptProfile>) {
+        saveProfiles(context, PromptProfileTarget.CODEX, profiles)
+    }
+
+    fun saveProfiles(context: Context, target: PromptProfileTarget, profiles: List<PromptProfile>) {
         val normalized = normalizeSelection(profiles)
         val json = JSONArray()
         for (profile in normalized) {
@@ -54,14 +74,20 @@ object PromptProfileStore {
         }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_PROFILES_JSON, json.toString())
+            .putString(keyForTarget(target), json.toString())
             .apply()
-        syncPromptInjectionFile(context, normalized)
+        if (target == PromptProfileTarget.CODEX) {
+            syncPromptInjectionFile(context, normalized)
+        }
     }
 
     fun ensureSynced(context: Context) {
-        val profiles = loadProfiles(context)
+        val profiles = loadProfiles(context, PromptProfileTarget.CODEX)
         syncPromptInjectionFile(context, normalizeSelection(profiles))
+    }
+
+    fun loadSelectedProfile(context: Context, target: PromptProfileTarget): PromptProfile? {
+        return loadProfiles(context, target).firstOrNull { it.selected }
     }
 
     private fun parseProfiles(raw: String): MutableList<PromptProfile> {
@@ -101,6 +127,13 @@ object PromptProfileStore {
             } else {
                 profile
             }
+        }
+    }
+
+    private fun keyForTarget(target: PromptProfileTarget): String {
+        return when (target) {
+            PromptProfileTarget.CODEX -> KEY_PROFILES_JSON_CODEX
+            PromptProfileTarget.CLAUDE -> KEY_PROFILES_JSON_CLAUDE
         }
     }
 

@@ -24,10 +24,34 @@
         android:importantForAccessibility="yes" />
 
     <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnPromptSourceCodex"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/prompt_source_codex_button_text"
+            android:importantForAccessibility="yes" />
+
+        <Button
+            android:id="@+id/btnPromptSourceClaude"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/prompt_source_claude_button_text"
+            android:importantForAccessibility="yes" />
+    </LinearLayout>
+
+    <LinearLayout
         android:id="@+id/layoutPromptActions"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="10dp"
         android:orientation="horizontal">
 
         <Button

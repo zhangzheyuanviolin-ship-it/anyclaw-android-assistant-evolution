@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingBottom="8dp">
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchCliSettingAllowSharedStorage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/cli_option_allow_shared_storage" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchCliSettingDangerousMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/cli_option_dangerous_mode" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchCliSettingShowProcess"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/cli_option_show_process" />
+
+        <Button
+            android:id="@+id/btnCliSettingPermissionCenter"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/permission_center_button_text" />
+
+        <Button
+            android:id="@+id/btnCliSettingPromptManager"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/prompt_manager_button_text" />
+
+        <Button
+            android:id="@+id/btnCliSettingConversationManager"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/conversation_manager_button_text" />
+
+        <Button
+            android:id="@+id/btnCliSettingModelManager"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/model_manager_button_text" />
+
+        <Button
+            android:id="@+id/btnCliSettingLoadOlder"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/cli_load_older_button_text" />
+
+        <Button
+            android:id="@+id/btnCliSettingRestoreLite"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/cli_restore_lite_button_text" />
+    </LinearLayout>
+</ScrollView>
