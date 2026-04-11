@@ -1517,10 +1517,14 @@ EOF
         val plugins = ensureObject(root, "plugins")
         plugins.put("enabled", true)
         val entries = ensureObject(plugins, "entries")
+        val skillhubExtensionDir = File(paths.homeDir, ".openclaw/extensions/skillhub")
+        if (!skillhubExtensionDir.exists() && entries.has("skillhub")) {
+            entries.remove("skillhub")
+        }
         val searchSuiteEntry = ensureObject(entries, ANYCLAW_SEARCH_PLUGIN_ID)
         searchSuiteEntry.put("enabled", true)
         val searchSuiteConfig = ensureObject(searchSuiteEntry, "config")
-        if (!searchSuiteConfig.has("timeoutSeconds")) searchSuiteConfig.put("timeoutSeconds", 45)
+        ensureConfigNumberAtLeast(searchSuiteConfig, "timeoutSeconds", 60)
         if (!searchSuiteConfig.has("maxResults")) searchSuiteConfig.put("maxResults", 6)
         if (!searchSuiteConfig.has("maxChars")) searchSuiteConfig.put("maxChars", 12000)
         if (!searchSuiteConfig.has("webBridgeUrl")) searchSuiteConfig.put("webBridgeUrl", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
@@ -1533,10 +1537,10 @@ EOF
         val githubSuiteEntry = ensureObject(entries, ANYCLAW_GITHUB_PLUGIN_ID)
         githubSuiteEntry.put("enabled", true)
         val githubSuiteConfig = ensureObject(githubSuiteEntry, "config")
-        if (!githubSuiteConfig.has("timeoutSeconds")) githubSuiteConfig.put("timeoutSeconds", 60)
+        ensureConfigNumberAtLeast(githubSuiteConfig, "timeoutSeconds", 120)
         if (!githubSuiteConfig.has("githubApiBaseUrl")) githubSuiteConfig.put("githubApiBaseUrl", "https://api.github.com")
         if (!githubSuiteConfig.has("allowTerminal")) githubSuiteConfig.put("allowTerminal", true)
-        if (!githubSuiteConfig.has("terminalTimeoutMs")) githubSuiteConfig.put("terminalTimeoutMs", 30000)
+        ensureConfigNumberAtLeast(githubSuiteConfig, "terminalTimeoutMs", 120000)
         if (!githubSuiteConfig.has("workspaceRoot")) githubSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
         val githubUa = githubSuiteConfig.optString("userAgent", "").trim()
         if (githubUa.isEmpty() || githubUa.startsWith("AnyClawGithubSuite/0.")) {
@@ -1546,7 +1550,7 @@ EOF
         val deviceSuiteEntry = ensureObject(entries, ANYCLAW_DEVICE_PLUGIN_ID)
         deviceSuiteEntry.put("enabled", true)
         val deviceSuiteConfig = ensureObject(deviceSuiteEntry, "config")
-        if (!deviceSuiteConfig.has("timeoutSeconds")) deviceSuiteConfig.put("timeoutSeconds", 35)
+        ensureConfigNumberAtLeast(deviceSuiteConfig, "timeoutSeconds", 45)
         if (!deviceSuiteConfig.has("screenshotDir")) deviceSuiteConfig.put("screenshotDir", "/sdcard/Download/AnyClawShots")
         if (!deviceSuiteConfig.has("uiDumpPath")) deviceSuiteConfig.put("uiDumpPath", "/sdcard/Download/AnyClawShots/ui_dump.xml")
         if (!deviceSuiteConfig.has("maxUiNodes")) deviceSuiteConfig.put("maxUiNodes", 180)
@@ -1563,7 +1567,7 @@ EOF
         val runtimeSuiteEntry = ensureObject(entries, ANYCLAW_RUNTIME_PLUGIN_ID)
         runtimeSuiteEntry.put("enabled", true)
         val runtimeSuiteConfig = ensureObject(runtimeSuiteEntry, "config")
-        if (!runtimeSuiteConfig.has("timeoutSeconds")) runtimeSuiteConfig.put("timeoutSeconds", 90)
+        ensureConfigNumberAtLeast(runtimeSuiteConfig, "timeoutSeconds", 120)
         if (!runtimeSuiteConfig.has("codexApiBaseUrl")) runtimeSuiteConfig.put("codexApiBaseUrl", "http://127.0.0.1:$SERVER_PORT")
         if (!runtimeSuiteConfig.has("runtimeDoctorPath")) {
             runtimeSuiteConfig.put(
@@ -1575,7 +1579,7 @@ EOF
         val ubuntuSuiteEntry = ensureObject(entries, ANYCLAW_UBUNTU_PLUGIN_ID)
         ubuntuSuiteEntry.put("enabled", true)
         val ubuntuSuiteConfig = ensureObject(ubuntuSuiteEntry, "config")
-        if (!ubuntuSuiteConfig.has("timeoutSeconds")) ubuntuSuiteConfig.put("timeoutSeconds", 120)
+        ensureConfigNumberAtLeast(ubuntuSuiteConfig, "timeoutSeconds", 300)
         if (!ubuntuSuiteConfig.has("installTimeoutSeconds")) ubuntuSuiteConfig.put("installTimeoutSeconds", 1800)
         val linuxRuntimePaths = OfflineLinuxRuntimeInstaller.getRuntimePaths(context)
         if (!ubuntuSuiteConfig.has("runtimeRoot")) {
@@ -1591,7 +1595,7 @@ EOF
             ubuntuSuiteConfig.put("fakeSysdataPath", linuxRuntimePaths.fakeSysdataScript.absolutePath)
         }
         if (!ubuntuSuiteConfig.has("workspaceRoot")) ubuntuSuiteConfig.put("workspaceRoot", "${paths.homeDir}/.openclaw/workspace")
-        if (!ubuntuSuiteConfig.has("sessionTimeoutSeconds")) ubuntuSuiteConfig.put("sessionTimeoutSeconds", 600)
+        ensureConfigNumberAtLeast(ubuntuSuiteConfig, "sessionTimeoutSeconds", 900)
         if (!ubuntuSuiteConfig.has("maxSessionOutputBytes")) ubuntuSuiteConfig.put("maxSessionOutputBytes", 524288)
 
         val allow = plugins.optJSONArray("allow")
@@ -3808,6 +3812,19 @@ EOF
         val created = JSONObject()
         parent.put(key, created)
         return created
+    }
+
+    private fun ensureConfigNumberAtLeast(parent: JSONObject, key: String, minValue: Int) {
+        val raw = parent.opt(key)
+        val current =
+            when (raw) {
+                is Number -> raw.toInt()
+                is String -> raw.toIntOrNull()
+                else -> null
+            }
+        if (current == null || current < minValue) {
+            parent.put(key, minValue)
+        }
     }
 
     private fun sanitizeHeartbeatDefaults(root: JSONObject): Boolean {

@@ -40,6 +40,8 @@ const OPENCLAW_GATEWAY_CALL_TIMEOUT_MS = 90_000
 const OPENCLAW_HISTORY_CALL_TIMEOUT_MS = 75_000
 const OPENCLAW_CHAT_SEND_TIMEOUT_MS = 45_000
 const OPENCLAW_RUN_WAIT_TIMEOUT_MS = 12_000
+const OPENCLAW_RUN_WAIT_GATEWAY_GRACE_MS = 8_000
+const OPENCLAW_RUN_WAIT_ATTEMPTS = 2
 const OPENCLAW_GATEWAY_CALL_MAX_RETRIES = 4
 const OPENCLAW_GATEWAY_RETRY_BACKOFF_MS = [300, 700, 1200, 1800]
 const OPENCLAW_NATIVE_STRICT_MODE = true
@@ -3279,16 +3281,20 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         )
 
         if (await isNativeOpenClawReady()) {
-          const waitAttempts = 3
+          const waitAttempts = OPENCLAW_RUN_WAIT_ATTEMPTS
           for (let attempt = 0; attempt < waitAttempts; attempt += 1) {
             try {
+              const gatewayWaitTimeoutMs = Math.min(
+                waitTimeoutMs + OPENCLAW_RUN_WAIT_GATEWAY_GRACE_MS,
+                45_000,
+              )
               const nativeWait = await runOpenClawGatewayCall(
                 'agent.wait',
                 {
                   runId,
                   timeoutMs: waitTimeoutMs,
                 },
-                waitTimeoutMs + 30_000,
+                gatewayWaitTimeoutMs,
               )
               const record = asRecord(nativeWait) ?? {}
               const rawStatus = normalizeText(record.status).toLowerCase()
@@ -3315,7 +3321,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
               const retryable = isOpenClawGatewayRetryableError(errorMessage)
               updateOpenClawNativeRun(runId, 'reconnecting', errorMessage)
               if (retryable && attempt < waitAttempts - 1) {
-                await sleepMs(500 + attempt * 800)
+                await sleepMs(350 + attempt * 500)
                 continue
               }
               const probe = await probeOpenClawRunCompletionByHistory(runId)

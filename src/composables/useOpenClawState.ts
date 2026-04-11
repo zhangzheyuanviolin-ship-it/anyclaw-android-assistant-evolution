@@ -28,9 +28,10 @@ const HISTORY_DEFAULT = 60
 const HISTORY_MIN = 20
 const HISTORY_MAX = 400
 const HISTORY_STEP = 40
-const POLL_INTERVAL_MS = 4200
-const RUN_WAIT_INTERVAL_MS = 7000
-const RUN_WAIT_TIMEOUT_MS = 25000
+const POLL_INTERVAL_MS = 2800
+const RUN_WAIT_INTERVAL_MS = 1800
+const RUN_WAIT_TIMEOUT_MS = 6500
+const RUN_WAIT_MIN_GAP_MS = 1200
 const OPENCLAW_BOOTSTRAP_RETRY_LIMIT = 3
 const OPENCLAW_BOOTSTRAP_COOLDOWN_MS = 1_500
 const OPENCLAW_OPTIMISTIC_MESSAGE_TTL_MS = 10 * 60_000
@@ -327,6 +328,7 @@ export function useOpenClawState() {
   const optimisticUserMessages = ref<OptimisticOpenClawMessage[]>([])
 
   let pollTimer: number | null = null
+  let runWaitTimer: number | null = null
   let pollInFlight = false
   let runWaitInFlight = false
   let lastRunWaitAtMs = 0
@@ -367,6 +369,30 @@ export function useOpenClawState() {
 
   function setPendingRunStatus(status: string): void {
     pendingRunStatus.value = status.trim()
+  }
+
+  function startRunWaitPolling(): void {
+    if (runWaitTimer !== null || typeof window === 'undefined') return
+    runWaitTimer = window.setInterval(() => {
+      void waitPendingRun()
+    }, RUN_WAIT_INTERVAL_MS)
+  }
+
+  function stopRunWaitPolling(): void {
+    if (runWaitTimer === null || typeof window === 'undefined') return
+    window.clearInterval(runWaitTimer)
+    runWaitTimer = null
+  }
+
+  function clearPendingRunState(sessionKeyForOptimisticCleanup = ''): void {
+    pendingRun.value = false
+    pendingRunId.value = ''
+    setPendingRunStatus('')
+    const normalizedSession = sessionKeyForOptimisticCleanup.trim()
+    if (normalizedSession) {
+      optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== normalizedSession)
+    }
+    stopRunWaitPolling()
   }
 
   function pruneOptimisticMessages(sessionKey: string, historyMessages: OpenClawHistoryMessage[]): void {
@@ -458,10 +484,7 @@ export function useOpenClawState() {
       pruneOptimisticMessages(sessionKey, payload.messages)
       renderMessagesFromHistory(payload.messages)
       if (pendingRun.value && hasAssistantTextAfter(payload.messages, lastSendAtMs)) {
-        pendingRun.value = false
-        pendingRunId.value = ''
-        setPendingRunStatus('')
-        optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.sessionKey !== sessionKey)
+        clearPendingRunState(sessionKey)
       }
       lastError.value = ''
     } catch (error) {
@@ -484,9 +507,7 @@ export function useOpenClawState() {
 
     selectedSessionKey.value = nextSession
     messages.value = []
-    pendingRun.value = false
-    pendingRunId.value = ''
-    setPendingRunStatus('')
+    clearPendingRunState()
     await refreshHistory()
   }
 
@@ -597,6 +618,7 @@ export function useOpenClawState() {
     pendingRun.value = true
     pendingRunId.value = ''
     setPendingRunStatus('queued')
+    startRunWaitPolling()
     lastSendAtMs = Date.now()
     let optimisticMessage: OptimisticOpenClawMessage | null = null
 
@@ -681,9 +703,7 @@ export function useOpenClawState() {
         optimisticUserMessages.value = optimisticUserMessages.value.filter((row) => row.id !== optimisticMessage?.id)
         messages.value = messages.value.filter((row) => row.id !== optimisticMessage?.id)
       }
-      pendingRun.value = false
-      pendingRunId.value = ''
-      setPendingRunStatus('')
+      clearPendingRunState()
       lastError.value = error instanceof Error ? error.message : '发送消息失败'
       throw error
     } finally {
@@ -729,6 +749,7 @@ export function useOpenClawState() {
         pendingRun.value = true
         pendingRunId.value = result.runId.trim()
         setPendingRunStatus(result.status.trim() || 'submitted')
+        startRunWaitPolling()
         lastSendAtMs = Date.now()
         void waitPendingRun({ force: true })
       } else {
@@ -760,8 +781,7 @@ export function useOpenClawState() {
       if (!result.aborted) {
         throw new Error('终止任务失败：网关未确认中止')
       }
-      pendingRun.value = false
-      pendingRunId.value = ''
+      clearPendingRunState()
       setPendingRunStatus('aborted')
       await refreshHistory({ silent: true })
       await refreshSessions(sessionKey)
@@ -776,14 +796,17 @@ export function useOpenClawState() {
   }
 
   async function waitPendingRun(options: { force?: boolean } = {}): Promise<void> {
-    if (!pendingRun.value) return
+    if (!pendingRun.value) {
+      stopRunWaitPolling()
+      return
+    }
 
     const runId = pendingRunId.value.trim()
     if (!runId) return
     if (runWaitInFlight) return
 
     const now = Date.now()
-    if (!options.force && now - lastRunWaitAtMs < RUN_WAIT_INTERVAL_MS) return
+    if (!options.force && now - lastRunWaitAtMs < RUN_WAIT_MIN_GAP_MS) return
 
     runWaitInFlight = true
     lastRunWaitAtMs = now
@@ -794,9 +817,7 @@ export function useOpenClawState() {
       })
       setPendingRunStatus(statusPayload.status.trim() || pendingRunStatus.value || 'running')
       if (statusPayload.completed) {
-        pendingRun.value = false
-        pendingRunId.value = ''
-        setPendingRunStatus('')
+        clearPendingRunState()
         await refreshHistory({ silent: true })
       }
     } catch {
@@ -805,6 +826,9 @@ export function useOpenClawState() {
       }
     } finally {
       runWaitInFlight = false
+      if (!pendingRun.value) {
+        stopRunWaitPolling()
+      }
     }
   }
 
@@ -823,7 +847,9 @@ export function useOpenClawState() {
         await refreshHealth()
       }
       await refreshHistory({ silent: true })
-      await waitPendingRun()
+      if (pendingRun.value) {
+        void waitPendingRun()
+      }
     } finally {
       pollInFlight = false
     }
@@ -834,12 +860,17 @@ export function useOpenClawState() {
     pollTimer = window.setInterval(() => {
       void pollOnce()
     }, POLL_INTERVAL_MS)
+    void pollOnce()
+    if (pendingRun.value) {
+      startRunWaitPolling()
+    }
   }
 
   function stopPolling(): void {
     if (pollTimer === null || typeof window === 'undefined') return
     window.clearInterval(pollTimer)
     pollTimer = null
+    stopRunWaitPolling()
   }
 
   return {
