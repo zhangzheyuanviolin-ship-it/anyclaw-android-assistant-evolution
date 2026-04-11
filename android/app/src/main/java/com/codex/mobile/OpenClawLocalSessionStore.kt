@@ -135,7 +135,8 @@ object OpenClawLocalSessionStore {
 
     fun createIndependentSessionKey(currentSessionKey: String?): String {
         val now = System.currentTimeMillis().toString(36)
-        val rand = Math.random().toString(36).removePrefix("0.").take(6)
+        val randSeed = System.nanoTime() xor (Math.random() * Long.MAX_VALUE).toLong()
+        val rand = randSeed.toString(36).replace("-", "").takeLast(6).ifEmpty { "mobile" }
         val normalized = currentSessionKey?.trim().orEmpty()
         if (normalized.startsWith("agent:")) {
             val parts = normalized.split(":")
@@ -230,4 +231,3 @@ object OpenClawLocalSessionStore {
         return String.format(Locale.getDefault(), "会话 %s", suffix)
     }
 }
-

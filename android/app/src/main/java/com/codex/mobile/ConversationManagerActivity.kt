@@ -369,6 +369,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                     putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_CODEX_THREAD)
                     putExtra(MainActivity.EXTRA_THREAD_ID, row.id)
                 }
+                SourceType.OPENCLAW -> Unit
                 SourceType.CLAUDE_CODE -> Unit
                 SourceType.ALL -> Unit
             }
