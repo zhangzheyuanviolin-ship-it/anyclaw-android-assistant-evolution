@@ -231,6 +231,11 @@ class MainActivity : AppCompatActivity() {
             else -> OPEN_TARGET_CODEX_HOME
         }
         if (setupStarted && webView.visibility == View.VISIBLE) {
+            if (isOpenClawChatUrl(targetUrl)) {
+                openNativeOpenClawChat(extractSessionFromUrl(targetUrl))
+                pendingLaunchUrl = null
+                return
+            }
             webView.loadUrl(targetUrl)
             pendingLaunchUrl = null
         }
@@ -256,6 +261,11 @@ class MainActivity : AppCompatActivity() {
                     isOpenClawChatUrl(targetUrl) -> OPEN_TARGET_OPENCLAW_SESSION
                     isClaudeChatUrl(targetUrl) -> OPEN_TARGET_CLAUDE_SESSION
                     else -> OPEN_TARGET_CODEX_HOME
+                }
+                if (isOpenClawChatUrl(targetUrl)) {
+                    openNativeOpenClawChat(extractSessionFromUrl(targetUrl))
+                    pendingLaunchUrl = null
+                    return
                 }
                 webView.loadUrl(targetUrl)
                 pendingLaunchUrl = null
@@ -817,6 +827,11 @@ class MainActivity : AppCompatActivity() {
             isClaudeChatUrl(launchUrl) -> OPEN_TARGET_CLAUDE_SESSION
             else -> OPEN_TARGET_CODEX_HOME
         }
+        if (isOpenClawChatUrl(launchUrl)) {
+            openNativeOpenClawChat(extractSessionFromUrl(launchUrl))
+            finish()
+            return
+        }
         updateUiForCurrentTarget()
         webView.loadUrl(launchUrl)
     }
@@ -874,19 +889,31 @@ class MainActivity : AppCompatActivity() {
                     },
                 )
             }
-            OPEN_TARGET_OPENCLAW_SESSION -> {
-                startActivity(
-                    Intent(this, OpenClawChatActivity::class.java).apply {
-                        if (sessionId.isNotEmpty()) {
-                            putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionId)
-                        }
-                    },
-                )
-            }
             else -> return false
         }
         finish()
         return true
+    }
+
+    private fun extractSessionFromUrl(url: String?): String? {
+        val raw = url?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        return try {
+            Uri.parse(raw).getQueryParameter("session")?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun openNativeOpenClawChat(sessionKey: String?) {
+        startActivity(
+            Intent(this, OpenClawChatActivity::class.java).apply {
+                val normalized = sessionKey?.trim().orEmpty()
+                if (normalized.isNotEmpty()) {
+                    putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, normalized)
+                }
+            },
+        )
     }
 
     private fun hasExplicitTargetIntent(intent: Intent?): Boolean {

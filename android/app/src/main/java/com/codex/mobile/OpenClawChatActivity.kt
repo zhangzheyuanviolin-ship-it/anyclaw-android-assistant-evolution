@@ -596,18 +596,17 @@ class OpenClawChatActivity : AppCompatActivity() {
         if (!needRecovery || recoverDialogShown) return
         recoverDialogShown = true
         runOnUiThread {
-            AlertDialog.Builder(this)
-                .setTitle(getString(R.string.error_title))
-                .setMessage(getString(R.string.openclaw_native_waiting_server))
-                .setNegativeButton(getString(R.string.cancel), null)
-                .setPositiveButton(getString(R.string.openclaw_native_server_recover)) { _, _ ->
-                    startActivity(
-                        Intent(this, MainActivity::class.java).apply {
-                            putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_CODEX_HOME)
-                        },
-                    )
-                }
-                .show()
+            Toast.makeText(this, getString(R.string.openclaw_native_waiting_server), Toast.LENGTH_LONG).show()
+            startActivity(
+                Intent(this, MainActivity::class.java).apply {
+                    putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
+                    val key = sessionKey.trim()
+                    if (key.isNotEmpty()) {
+                        putExtra(MainActivity.EXTRA_SESSION_KEY, key)
+                    }
+                },
+            )
+            finish()
         }
     }
 

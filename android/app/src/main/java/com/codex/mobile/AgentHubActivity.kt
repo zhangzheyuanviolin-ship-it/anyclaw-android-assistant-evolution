@@ -12,7 +12,7 @@ class AgentHubActivity : AppCompatActivity() {
         setContentView(R.layout.activity_agent_hub)
 
         findViewById<Button>(R.id.btnAgentHubOpenClaw).setOnClickListener {
-            startActivity(Intent(this, OpenClawChatActivity::class.java))
+            startMainWithTarget(MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
         }
 
         findViewById<Button>(R.id.btnAgentHubCodex).setOnClickListener {
