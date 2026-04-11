@@ -2411,14 +2411,23 @@ WEOF
     fun installServerBundle(onProgress: (String) -> Unit): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
         val targetDir = File(paths.prefixDir, "lib/node_modules/codex-web-local")
+        val stateDir = File(paths.homeDir, ".openclaw-android/state").apply { mkdirs() }
+        val markerFile = File(stateDir, "server-bundle.marker")
+        val markerValue = buildServerBundleMarker()
 
         try {
             val assetFiles = context.assets.list("server-bundle") ?: emptyArray()
             if (assetFiles.isNotEmpty()) {
+                val indexFile = File(targetDir, "dist-cli/index.js")
+                if (indexFile.exists() && markerFile.exists() && markerFile.readText() == markerValue) {
+                    onProgress("Web UI already up to date")
+                    return true
+                }
                 onProgress("Installing server bundle from APK…")
                 targetDir.deleteRecursively()
                 targetDir.mkdirs()
                 extractAssetDir("server-bundle", targetDir)
+                markerFile.writeText(markerValue)
                 Log.i(TAG, "Server bundle extracted to $targetDir")
                 return true
             }
@@ -2427,6 +2436,15 @@ WEOF
         }
 
         return false
+    }
+
+    private fun buildServerBundleMarker(): String {
+        val versionName =
+            runCatching {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+            }.getOrElse { "" }
+        return "${context.packageName}:$versionName"
     }
 
     /**
@@ -2894,7 +2912,21 @@ EOF
             fi
 
             if [ -x "${paths.prefixDir}/bin/apt.real" ]; then
-              "${paths.prefixDir}/bin/apt.real" update >/dev/null 2>&1 || true
+              if command -v timeout >/dev/null 2>&1; then
+                timeout 20 "${paths.prefixDir}/bin/apt.real" update >/dev/null 2>&1 || true
+              else
+                "${paths.prefixDir}/bin/apt.real" update >/dev/null 2>&1 &
+                apt_pid="${'$'}!"
+                waited=0
+                while kill -0 "${'$'}apt_pid" 2>/dev/null; do
+                  if [ "${'$'}waited" -ge 20 ]; then
+                    kill -9 "${'$'}apt_pid" 2>/dev/null || true
+                    break
+                  fi
+                  waited="${'$'}((waited + 1))"
+                  sleep 1
+                done
+              fi
             fi
 
             echo "apt-trust-chain-ready"

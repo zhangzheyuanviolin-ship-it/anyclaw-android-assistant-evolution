@@ -127,6 +127,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!hasExplicitTargetIntent(intent) && BootstrapInstaller.isBootstrapInstalled(this)) {
+            startActivity(Intent(this, AgentHubActivity::class.java))
+            finish()
+            return
+        }
         setContentView(R.layout.activity_main)
 
         webView = findViewById(R.id.webView)
@@ -254,8 +259,6 @@ class MainActivity : AppCompatActivity() {
         stopGatewayStatusMonitor()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
-        serverManager.stopServer()
-        stopService(Intent(this, CodexForegroundService::class.java))
     }
 
     private fun requestBatteryOptimizationExemption() {
@@ -599,6 +602,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runSetup() {
+        val explicitTarget = hasExplicitTargetIntent(intent)
+        if (explicitTarget) {
+            updateStatus("Checking local server…")
+            val warmReady = serverManager.waitForServer(timeoutMs = 3500)
+            if (warmReady) {
+                runOnUiThread {
+                    showReadyUi(explicitTarget = true)
+                }
+                return
+            }
+        }
+
         val hadOpenClawAtStart = serverManager.isOpenClawInstalled()
 
         // Step 1: Extract bootstrap
@@ -629,9 +644,13 @@ class MainActivity : AppCompatActivity() {
         updateStatus("proot ready")
 
         // Step 1c: Repair apt trust chain, then prepare resilient package manager scripts/wrappers.
+        updateStatus("Repairing package manager…")
         serverManager.ensureAptTrustChain()
+        updateStatus("Preparing package recovery…")
         serverManager.ensurePackageRecoveryScripts()
+        updateStatus("Preparing package wrappers…")
         serverManager.ensurePackageManagerWrappers()
+        updateStatus("Package manager ready")
 
         // Step 2: Install Node.js
         if (!serverManager.isNodeInstalled()) {
@@ -765,30 +784,31 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Step 10: Show web UI
-        runOnUiThread {
-            showLoading(false)
-            webView.visibility = View.VISIBLE
-            permissionCenterButton.visibility = View.VISIBLE
-            promptManagerButton.visibility = View.VISIBLE
-            conversationManagerButton.visibility = View.VISIBLE
-            modelManagerButton.visibility = View.VISIBLE
-            bottomAgentTabs.visibility = View.VISIBLE
-            applyGatewayConnectedState(false, announce = false)
-            val explicitTarget = hasExplicitTargetIntent(intent)
-            if (!explicitTarget) {
-                startActivity(Intent(this, AgentHubActivity::class.java))
-                finish()
-            } else {
-                val launchUrl = consumeLaunchUrlOrDefault()
-                currentUiTarget = when {
-                    isOpenClawChatUrl(launchUrl) -> OPEN_TARGET_OPENCLAW_SESSION
-                    isClaudeChatUrl(launchUrl) -> OPEN_TARGET_CLAUDE_SESSION
-                    else -> OPEN_TARGET_CODEX_HOME
-                }
-                updateUiForCurrentTarget()
-                webView.loadUrl(launchUrl)
-            }
+        runOnUiThread { showReadyUi(explicitTarget) }
+    }
+
+    private fun showReadyUi(explicitTarget: Boolean) {
+        showLoading(false)
+        webView.visibility = View.VISIBLE
+        permissionCenterButton.visibility = View.VISIBLE
+        promptManagerButton.visibility = View.VISIBLE
+        conversationManagerButton.visibility = View.VISIBLE
+        modelManagerButton.visibility = View.VISIBLE
+        bottomAgentTabs.visibility = View.VISIBLE
+        applyGatewayConnectedState(false, announce = false)
+        if (!explicitTarget) {
+            startActivity(Intent(this, AgentHubActivity::class.java))
+            finish()
+            return
         }
+        val launchUrl = consumeLaunchUrlOrDefault()
+        currentUiTarget = when {
+            isOpenClawChatUrl(launchUrl) -> OPEN_TARGET_OPENCLAW_SESSION
+            isClaudeChatUrl(launchUrl) -> OPEN_TARGET_CLAUDE_SESSION
+            else -> OPEN_TARGET_CODEX_HOME
+        }
+        updateUiForCurrentTarget()
+        webView.loadUrl(launchUrl)
     }
 
     private fun startOpenClawServicesAsync() {
