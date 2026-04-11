@@ -139,7 +139,7 @@ function resolveRuntimeConfig(rawConfig: unknown): RuntimeConfig {
     typeof cfg.maxSessionOutputBytes === "number" ? cfg.maxSessionOutputBytes : DEFAULT_MAX_SESSION_OUTPUT_BYTES;
 
   return {
-    timeoutMs: clampNumber(timeoutSecondsRaw, 10, 300) * 1000,
+    timeoutMs: clampNumber(timeoutSecondsRaw, 10, 3600) * 1000,
     installTimeoutMs: clampNumber(installTimeoutSecondsRaw, 60, 3600) * 1000,
     sessionTimeoutMs: clampNumber(sessionTimeoutSecondsRaw, 30, 3600) * 1000,
     runtimeRoot,
@@ -318,6 +318,22 @@ function composeGuestCommand(command: string, workingDir: string): string {
     `cd ${shellSingleQuote(workingDir)} 2>/dev/null || cd /`,
     command
   ].join("; ");
+}
+
+function isLikelyLongInstallCommand(command: string): boolean {
+  const text = command.trim().toLowerCase();
+  if (!text) return false;
+  const patterns = [
+    /\bapt(-get)?\s+(update|install|upgrade|dist-upgrade|full-upgrade)\b/,
+    /\bpip3?\s+install\b/,
+    /\bplaywright\s+install\b/,
+    /\bnpm\s+(install|ci)\b/,
+    /\bpnpm\s+install\b/,
+    /\byarn\s+install\b/,
+    /\bgit\s+clone\b/,
+    /\bcurl\b.+\|\s*(bash|sh)\b/
+  ];
+  return patterns.some((pattern) => pattern.test(text));
 }
 
 function trimSessionBuffer(session: UbuntuSession, maxBytes: number) {
@@ -669,14 +685,15 @@ function createExecTool(runtime: RuntimeConfig) {
   return {
     label: "AnyClaw Ubuntu Exec",
     name: "anyclaw_ubuntu_exec",
-    description: "Execute a one-shot shell command inside the bundled Ubuntu runtime.",
+    description: "Execute a one-shot shell command inside the bundled Ubuntu runtime. Long install commands auto-use extended timeout.",
     parameters: {
       type: "object",
       additionalProperties: false,
       required: ["command"],
       properties: {
         command: { type: "string" },
-        workingDir: { type: "string" }
+        workingDir: { type: "string" },
+        timeoutSeconds: { type: "number" }
       }
     },
     execute: async (_toolCallId: string, input: unknown) => {
@@ -684,8 +701,13 @@ function createExecTool(runtime: RuntimeConfig) {
       const command = (readStringParam(args, "command", { required: true }) || "").trim();
       const rawWorkingDir = (readStringParam(args, "workingDir") || runtime.workspaceRoot).trim();
       const workingDir = rawWorkingDir || runtime.workspaceRoot;
+      const requestedTimeoutSeconds = readNumberParam(args, "timeoutSeconds");
+      const useInstallTimeout = requestedTimeoutSeconds === undefined && isLikelyLongInstallCommand(command);
+      const timeoutMs = requestedTimeoutSeconds !== undefined
+        ? clampNumber(requestedTimeoutSeconds, 10, 3600) * 1000
+        : (useInstallTimeout ? runtime.installTimeoutMs : runtime.timeoutMs);
 
-      const result = await runLinuxCommand(runtime, composeGuestCommand(command, workingDir), runtime.timeoutMs);
+      const result = await runLinuxCommand(runtime, composeGuestCommand(command, workingDir), timeoutMs);
 
       return jsonResult({
         tool: "anyclaw_ubuntu_exec",
@@ -694,6 +716,8 @@ function createExecTool(runtime: RuntimeConfig) {
         workingDir,
         command,
         runtimeRoot: runtime.runtimeRoot,
+        timeoutMs,
+        longInstallHeuristic: useInstallTimeout,
         stdout: result.stdout,
         stderr: result.stderr,
         error: result.error

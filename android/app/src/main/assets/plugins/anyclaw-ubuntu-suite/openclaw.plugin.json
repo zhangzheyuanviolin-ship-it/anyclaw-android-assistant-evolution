@@ -10,7 +10,7 @@
       "timeoutSeconds": {
         "type": "number",
         "minimum": 10,
-        "maximum": 300
+        "maximum": 3600
       },
       "installTimeoutSeconds": {
         "type": "number",

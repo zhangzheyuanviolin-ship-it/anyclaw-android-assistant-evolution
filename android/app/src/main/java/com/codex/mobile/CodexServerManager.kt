@@ -1477,7 +1477,8 @@ EOF
         if (heartbeat.has("enabled")) {
             heartbeat.remove("enabled")
         }
-        heartbeat.put("every", "20m")
+        // Preserve user-defined heartbeat interval across restarts.
+        // Do not force override with a hardcoded fallback here.
         if (heartbeat.optString("target", "").isBlank()) {
             heartbeat.put("target", "none")
         }
