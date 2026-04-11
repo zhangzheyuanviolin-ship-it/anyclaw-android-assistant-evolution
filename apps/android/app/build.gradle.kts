@@ -65,8 +65,8 @@ android {
         applicationId = "com.codex.mobile.pocketlobster.beta"
         minSdk = 31
         targetSdk = 36
-        versionCode = 2026040801
-        versionName = "2026.4.8"
+        versionCode = 2026041101
+        versionName = "2026.4.11"
         ndk {
             // Support all major ABIs — native libs are tiny (~47 KB per ABI)
             abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")

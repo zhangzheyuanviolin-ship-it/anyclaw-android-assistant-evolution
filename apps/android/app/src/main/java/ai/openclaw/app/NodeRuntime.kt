@@ -272,6 +272,7 @@ class NodeRuntime(
         updateStatus()
         micCapture.onGatewayConnectionChanged(true)
         scope.launch {
+          chat.refresh()
           refreshHomeCanvasOverviewIfConnected()
           refreshProviderConfigFromGateway()
           if (voiceReplySpeakerLazy.isInitialized()) {
@@ -350,7 +351,7 @@ class NodeRuntime(
       scope = scope,
       session = operatorSession,
       json = json,
-      supportsChatSubscribe = false,
+      supportsChatSubscribe = true,
     ).also {
       it.applyMainSessionKey(_mainSessionKey.value)
     }

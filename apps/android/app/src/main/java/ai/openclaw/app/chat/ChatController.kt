@@ -6,6 +6,8 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -58,15 +60,23 @@ class ChatController(
 
   private val pendingRuns = mutableSetOf<String>()
   private val pendingRunTimeoutJobs = ConcurrentHashMap<String, Job>()
+  private val pendingRunStartedAtMs = ConcurrentHashMap<String, Long>()
+  private val pendingRunAssistantBaseline = ConcurrentHashMap<String, Int>()
   private val pendingRunTimeoutMs = 120_000L
+  private val pendingReconcileLock = Mutex()
+  private var lastPendingReconcileAtMs: Long? = null
+  private val pendingReconcileMinIntervalMs = 3_000L
 
   private var lastHealthPollAtMs: Long? = null
 
   fun onDisconnected(message: String) {
     _healthOk.value = false
-    // Not an error; keep connection status in the UI pill.
-    _errorText.value = null
-    clearPendingRuns()
+    _errorText.value =
+      if (hasPendingRuns()) {
+        "Gateway disconnected; reconnecting and recovering run state…"
+      } else {
+        null
+      }
     pendingToolCallsById.clear()
     publishPendingToolCalls()
     _streamingAssistantText.value = null
@@ -75,6 +85,9 @@ class ChatController(
 
   fun load(sessionKey: String) {
     val key = normalizeRequestedSessionKey(sessionKey)
+    if (key != _sessionKey.value) {
+      clearPendingRuns()
+    }
     _sessionKey.value = key
     scope.launch { bootstrap(forceHealth = true, refreshSessions = true) }
   }
@@ -90,6 +103,7 @@ class ChatController(
       )
     appliedMainSessionKey = nextState.appliedMainSessionKey
     if (_sessionKey.value == nextState.currentSessionKey) return
+    clearPendingRuns()
     _sessionKey.value = nextState.currentSessionKey
     scope.launch { bootstrap(forceHealth = true, refreshSessions = true) }
   }
@@ -112,6 +126,7 @@ class ChatController(
     val key = normalizeRequestedSessionKey(sessionKey)
     if (key.isEmpty()) return
     if (key == _sessionKey.value) return
+    clearPendingRuns()
     _sessionKey.value = key
     // Keep the thread switch path lean: history + health are needed immediately,
     // but the session list is usually unchanged and can refresh on explicit pull-to-refresh.
@@ -180,11 +195,7 @@ class ChatController(
           timestampMs = System.currentTimeMillis(),
         )
 
-    armPendingRunTimeout(runId)
-    synchronized(pendingRuns) {
-      pendingRuns.add(runId)
-      _pendingRunCount.value = pendingRuns.size
-    }
+    registerPendingRun(runId)
 
     _errorText.value = null
     _streamingAssistantText.value = null
@@ -219,11 +230,7 @@ class ChatController(
       val actualRunId = parseRunId(res) ?: runId
       if (actualRunId != runId) {
         clearPendingRun(runId)
-        armPendingRunTimeout(actualRunId)
-        synchronized(pendingRuns) {
-          pendingRuns.add(actualRunId)
-          _pendingRunCount.value = pendingRuns.size
-        }
+        registerPendingRun(actualRunId)
       }
       true
     } catch (err: Throwable) {
@@ -263,10 +270,11 @@ class ChatController(
       "health" -> {
         // If we receive a health snapshot, the gateway is reachable.
         _healthOk.value = true
+        scope.launch { reconcilePendingRunsFromHistory(force = true) }
       }
       "seqGap" -> {
-        _errorText.value = "Event stream interrupted; try refreshing."
-        clearPendingRuns()
+        _errorText.value = "Event stream interrupted; recovering state…"
+        scope.launch { reconcilePendingRunsFromHistory(force = true) }
       }
       "chat" -> {
         if (payloadJson.isNullOrBlank()) return
@@ -282,7 +290,6 @@ class ChatController(
   private suspend fun bootstrap(forceHealth: Boolean, refreshSessions: Boolean) {
     _errorText.value = null
     _healthOk.value = false
-    clearPendingRuns()
     pendingToolCallsById.clear()
     publishPendingToolCalls()
     _streamingAssistantText.value = null
@@ -294,16 +301,13 @@ class ChatController(
         session.sendNodeEvent("chat.subscribe", """{"sessionKey":"$key"}""")
       }
 
-      val historyJson = session.request("chat.history", """{"sessionKey":"$key"}""")
-      val history = parseHistory(historyJson, sessionKey = key, previousMessages = _messages.value)
-      _messages.value = history.messages
-      _sessionId.value = history.sessionId
-      history.thinkingLevel?.trim()?.takeIf { it.isNotEmpty() }?.let { _thinkingLevel.value = it }
+      refreshHistorySnapshot(key)
 
       pollHealthIfNeeded(force = forceHealth)
       if (refreshSessions) {
         fetchSessions(limit = 50)
       }
+      reconcilePendingRunsFromHistory(force = true)
     } catch (err: Throwable) {
       _errorText.value = err.message
     }
@@ -366,12 +370,7 @@ class ChatController(
         _streamingAssistantText.value = null
         scope.launch {
           try {
-            val historyJson =
-              session.request("chat.history", """{"sessionKey":"${_sessionKey.value}"}""")
-            val history = parseHistory(historyJson, sessionKey = _sessionKey.value, previousMessages = _messages.value)
-            _messages.value = history.messages
-            _sessionId.value = history.sessionId
-            history.thinkingLevel?.trim()?.takeIf { it.isNotEmpty() }?.let { _thinkingLevel.value = it }
+            refreshHistorySnapshot(_sessionKey.value)
           } catch (_: Throwable) {
             // best-effort
           }
@@ -419,11 +418,11 @@ class ChatController(
         }
       }
       "error" -> {
-        _errorText.value = "Event stream interrupted; try refreshing."
-        clearPendingRuns()
+        _errorText.value = "Event stream interrupted; recovering state…"
         pendingToolCallsById.clear()
         publishPendingToolCalls()
         _streamingAssistantText.value = null
+        scope.launch { reconcilePendingRunsFromHistory(force = true) }
       }
     }
   }
@@ -448,6 +447,16 @@ class ChatController(
       pendingToolCallsById.values.sortedBy { it.startedAtMs }
   }
 
+  private fun registerPendingRun(runId: String) {
+    pendingRunStartedAtMs[runId] = System.currentTimeMillis()
+    pendingRunAssistantBaseline[runId] = countAssistantMessages(_messages.value)
+    armPendingRunTimeout(runId)
+    synchronized(pendingRuns) {
+      pendingRuns.add(runId)
+      _pendingRunCount.value = pendingRuns.size
+    }
+  }
+
   private fun armPendingRunTimeout(runId: String) {
     pendingRunTimeoutJobs[runId]?.cancel()
     pendingRunTimeoutJobs[runId] =
@@ -458,13 +467,16 @@ class ChatController(
             pendingRuns.contains(runId)
           }
         if (!stillPending) return@launch
-        clearPendingRun(runId)
-        _errorText.value = "Timed out waiting for a reply; try again or refresh."
+        _errorText.value = "Run is still executing. Waiting for gateway updates…"
+        reconcilePendingRunsFromHistory(force = true)
+        armPendingRunTimeout(runId)
       }
   }
 
   private fun clearPendingRun(runId: String) {
     pendingRunTimeoutJobs.remove(runId)?.cancel()
+    pendingRunStartedAtMs.remove(runId)
+    pendingRunAssistantBaseline.remove(runId)
     synchronized(pendingRuns) {
       pendingRuns.remove(runId)
       _pendingRunCount.value = pendingRuns.size
@@ -476,10 +488,78 @@ class ChatController(
       job.cancel()
     }
     pendingRunTimeoutJobs.clear()
+    pendingRunStartedAtMs.clear()
+    pendingRunAssistantBaseline.clear()
     synchronized(pendingRuns) {
       pendingRuns.clear()
       _pendingRunCount.value = 0
     }
+  }
+
+  private fun hasPendingRuns(): Boolean {
+    return synchronized(pendingRuns) { pendingRuns.isNotEmpty() }
+  }
+
+  private suspend fun refreshHistorySnapshot(sessionKey: String) {
+    val historyJson = session.request("chat.history", """{"sessionKey":"$sessionKey"}""")
+    val history = parseHistory(historyJson, sessionKey = sessionKey, previousMessages = _messages.value)
+    _messages.value = history.messages
+    _sessionId.value = history.sessionId
+    history.thinkingLevel?.trim()?.takeIf { it.isNotEmpty() }?.let { _thinkingLevel.value = it }
+  }
+
+  private suspend fun reconcilePendingRunsFromHistory(force: Boolean) {
+    if (!hasPendingRuns()) return
+    val now = System.currentTimeMillis()
+    if (!force) {
+      val last = lastPendingReconcileAtMs
+      if (last != null && now - last < pendingReconcileMinIntervalMs) return
+    }
+    pendingReconcileLock.withLock {
+      if (!hasPendingRuns()) return
+      val lockedNow = System.currentTimeMillis()
+      if (!force) {
+        val last = lastPendingReconcileAtMs
+        if (last != null && lockedNow - last < pendingReconcileMinIntervalMs) return
+      }
+      lastPendingReconcileAtMs = lockedNow
+      try {
+        refreshHistorySnapshot(_sessionKey.value)
+        if (!hasPendingRuns()) return
+        val shouldClearByTimestamp = shouldClearPendingByAssistantTimestamp(_messages.value)
+        val shouldClearByAssistantGrowth = shouldClearPendingByAssistantGrowth(_messages.value)
+        if (shouldClearByTimestamp || shouldClearByAssistantGrowth) {
+          clearPendingRuns()
+          pendingToolCallsById.clear()
+          publishPendingToolCalls()
+          _streamingAssistantText.value = null
+          _errorText.value = null
+        }
+      } catch (_: Throwable) {
+        // best-effort reconciliation
+      }
+    }
+  }
+
+  private fun shouldClearPendingByAssistantTimestamp(messages: List<ChatMessage>): Boolean {
+    val oldestPendingStart = pendingRunStartedAtMs.values.minOrNull() ?: return false
+    val latestAssistantTimestamp =
+      messages
+        .asSequence()
+        .filter { it.role.equals("assistant", ignoreCase = true) }
+        .mapNotNull { it.timestampMs }
+        .maxOrNull()
+        ?: return false
+    return latestAssistantTimestamp >= oldestPendingStart - 2_000
+  }
+
+  private fun shouldClearPendingByAssistantGrowth(messages: List<ChatMessage>): Boolean {
+    val baseline = pendingRunAssistantBaseline.values.minOrNull() ?: return false
+    return countAssistantMessages(messages) > baseline
+  }
+
+  private fun countAssistantMessages(messages: List<ChatMessage>): Int {
+    return messages.count { it.role.equals("assistant", ignoreCase = true) }
   }
 
   private fun parseHistory(
