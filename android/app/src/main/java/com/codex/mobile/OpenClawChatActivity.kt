@@ -15,6 +15,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -22,11 +25,27 @@ class OpenClawChatActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.OPENCLAW_SESSION_KEY"
+        private const val HEARTBEAT_PROMPT =
+            "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. " +
+                "Do not infer or repeat old tasks from prior chats. " +
+                "If nothing needs attention, reply HEARTBEAT_OK."
     }
 
     private data class DisplayMessage(
         val role: String,
         val text: String,
+    )
+
+    private data class SessionRow(
+        val key: String,
+        val sessionId: String,
+        val title: String,
+        val updatedAtMs: Long,
+    )
+
+    private data class LocalRunResult(
+        val success: Boolean,
+        val message: String,
     )
 
     private lateinit var tvSession: TextView
@@ -47,24 +66,33 @@ class OpenClawChatActivity : AppCompatActivity() {
     private val uiHandler = Handler(Looper.getMainLooper())
     private val adapter = MessageAdapter()
     private val messages = mutableListOf<DisplayMessage>()
-    private val sessionTitleByKey = linkedMapOf<String, String>()
+    private val sessionsByKey = linkedMapOf<String, SessionRow>()
+    private val liveProcessLines = mutableListOf<String>()
+    private val serverManager by lazy { CodexServerManager(this) }
 
     @Volatile
     private var destroyed = false
+
     @Volatile
     private var refreshInFlight = false
-    @Volatile
-    private var waitInFlight = false
+
     @Volatile
     private var sendingInFlight = false
 
+    @Volatile
+    private var abortRequested = false
+
+    @Volatile
+    private var activeProcess: Process? = null
+
+    @Volatile
+    private var lastLiveRenderAtMs = 0L
+
     private var pollRunnable: Runnable? = null
-    private var pollTick = 0
     private var sessionKey: String = ""
+    private var sessionId: String = ""
     private var sessionTitle: String = ""
-    private var pendingRunId: String = ""
-    private var pendingRunStatus: String = ""
-    private var recoverDialogShown = false
+    private var pendingRunStatus: String = "idle"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -127,6 +155,8 @@ class OpenClawChatActivity : AppCompatActivity() {
         super.onDestroy()
         destroyed = true
         stopPolling()
+        runCatching { activeProcess?.destroy() }
+        activeProcess = null
     }
 
     private fun startPolling() {
@@ -137,11 +167,7 @@ class OpenClawChatActivity : AppCompatActivity() {
                 if (!refreshInFlight) {
                     refreshNow(showErrors = false)
                 }
-                if (pendingRunId.isNotBlank() && !waitInFlight) {
-                    waitPendingRun()
-                }
-                pollTick += 1
-                val delayMs = if (pendingRunId.isNotBlank()) 2500L else 5000L
+                val delayMs = if (sendingInFlight) 2500L else 5000L
                 uiHandler.postDelayed(this, delayMs)
             }
         }
@@ -160,29 +186,30 @@ class OpenClawChatActivity : AppCompatActivity() {
         refreshInFlight = true
         Thread {
             try {
-                val sessions = fetchSessions(limit = 200)
-                if (sessions.isNotEmpty()) {
-                    sessionTitleByKey.clear()
-                    sessions.forEach { row -> sessionTitleByKey[row.first] = row.second }
-                }
+                // OpenClaw native mode must not compete with gateway lock ownership.
+                runCatching { serverManager.disconnectOpenClawGateway() }
 
+                refreshSessionIndex(limit = 300)
                 val resolved = when {
-                    !preferredSession.isNullOrBlank() -> preferredSession
-                    sessionKey.isNotBlank() -> sessionKey
-                    sessions.isNotEmpty() -> sessions.first().first
-                    else -> createIndependentSession(currentSessionKey = null)
+                    !preferredSession.isNullOrBlank() && sessionsByKey.containsKey(preferredSession) -> preferredSession
+                    sessionKey.isNotBlank() && sessionsByKey.containsKey(sessionKey) -> sessionKey
+                    sessionsByKey.isNotEmpty() -> sessionsByKey.values.sortedByDescending { it.updatedAtMs }.first().key
+                    else -> {
+                        val fallback = OpenClawLocalSessionStore.createIndependentSessionKey("agent:main:main")
+                        sessionTitle = OpenClawLocalSessionStore.buildFallbackTitle(fallback)
+                        fallback
+                    }
                 }
                 sessionKey = resolved
-                sessionTitle = sessionTitleByKey[resolved].orEmpty().ifBlank { getString(R.string.openclaw_native_session_unknown) }
-                refreshHistoryInternal(limit = 120)
-                refreshSessionTitle()
-                if (pendingRunId.isNotBlank()) {
-                    waitPendingRun()
+                val row = sessionsByKey[resolved]
+                sessionId = row?.sessionId.orEmpty()
+                sessionTitle = row?.title.orEmpty().ifBlank {
+                    OpenClawLocalSessionStore.buildFallbackTitle(resolved)
                 }
+                pendingRunStatus = if (sendingInFlight) "running" else "ready"
+                refreshHistoryInternal(limit = 120)
             } catch (error: Exception) {
-                val message = getErrorMessage(error)
-                postErrorToast(getString(R.string.openclaw_native_refresh_failed) + message)
-                maybePromptServerRecovery(message)
+                postErrorToast(getString(R.string.openclaw_native_refresh_failed) + getErrorMessage(error))
             } finally {
                 refreshInFlight = false
                 postRender()
@@ -191,19 +218,19 @@ class OpenClawChatActivity : AppCompatActivity() {
     }
 
     private fun refreshNow(showErrors: Boolean) {
+        if (refreshInFlight) return
         if (sessionKey.isBlank()) {
             ensureSessionReady(preferredSession = intent.getStringExtra(EXTRA_SESSION_KEY)?.trim())
             return
         }
-        if (refreshInFlight) return
         refreshInFlight = true
         Thread {
             try {
-                if (pollTick % 4 == 0) {
-                    val sessions = fetchSessions(limit = 200)
-                    sessionTitleByKey.clear()
-                    sessions.forEach { row -> sessionTitleByKey[row.first] = row.second }
-                    refreshSessionTitle()
+                refreshSessionIndex(limit = 300)
+                val row = sessionsByKey[sessionKey]
+                if (row != null) {
+                    sessionId = row.sessionId
+                    sessionTitle = row.title
                 }
                 refreshHistoryInternal(limit = 120)
             } catch (error: Exception) {
@@ -217,8 +244,17 @@ class OpenClawChatActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun refreshSessionTitle() {
-        sessionTitle = sessionTitleByKey[sessionKey].orEmpty().ifBlank { getString(R.string.openclaw_native_session_unknown) }
+    private fun refreshSessionIndex(limit: Int) {
+        val sessions = OpenClawLocalSessionStore.listSessions(this, limit)
+        sessionsByKey.clear()
+        sessions.forEach { session ->
+            sessionsByKey[session.key] = SessionRow(
+                key = session.key,
+                sessionId = session.sessionId,
+                title = session.displayName,
+                updatedAtMs = session.updatedAtMs,
+            )
+        }
     }
 
     private fun onSendPressed() {
@@ -227,91 +263,39 @@ class OpenClawChatActivity : AppCompatActivity() {
             Toast.makeText(this, getString(R.string.openclaw_native_send_empty), Toast.LENGTH_SHORT).show()
             return
         }
-        if (sessionKey.isBlank() || sendingInFlight) return
-
-        sendingInFlight = true
-        appendLocalMessage("您", text)
-        inputMessage.setText("")
-        renderUi()
-
-        Thread {
-            try {
-                val response = LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/send",
-                    method = "POST",
-                    body = JSONObject()
-                        .put("sessionKey", sessionKey)
-                        .put("message", text)
-                        .put("deliver", true),
-                    readTimeoutMs = 280_000,
-                )
-                val runId = response.optString("runId", "").trim()
-                if (runId.isNotBlank()) {
-                    pendingRunId = runId
-                    pendingRunStatus = "submitted"
-                }
-                refreshHistoryInternal(limit = 120)
-            } catch (error: Exception) {
-                postErrorToast(getString(R.string.openclaw_native_send_failed) + getErrorMessage(error))
-            } finally {
-                sendingInFlight = false
-                postRender()
-            }
-        }.start()
+        submitPrompt(text = text, echoAsUser = true)
     }
 
     private fun onCreateSessionPressed() {
         if (sendingInFlight || refreshInFlight) return
-        refreshInFlight = true
-        Thread {
-            try {
-                val created = createIndependentSession(sessionKey.ifBlank { null })
-                sessionKey = created
-                pendingRunId = ""
-                pendingRunStatus = ""
-                val sessions = fetchSessions(limit = 200)
-                sessionTitleByKey.clear()
-                sessions.forEach { row -> sessionTitleByKey[row.first] = row.second }
-                refreshSessionTitle()
-                refreshHistoryInternal(limit = 80)
-            } catch (error: Exception) {
-                postErrorToast(getString(R.string.openclaw_native_create_failed) + getErrorMessage(error))
-            } finally {
-                refreshInFlight = false
-                postRender()
-            }
-        }.start()
+        val base = sessionKey.ifBlank { "agent:main:main" }
+        val next = OpenClawLocalSessionStore.createIndependentSessionKey(base)
+        sessionKey = next
+        sessionId = ""
+        sessionTitle = OpenClawLocalSessionStore.buildFallbackTitle(next)
+        pendingRunStatus = "ready"
+        messages.clear()
+        messages += DisplayMessage(
+            role = "OpenClaw",
+            text = "已创建本地新会话，首次发送后将自动写入会话历史。",
+        )
+        postRender()
     }
 
     private fun onResetSessionPressed() {
-        if (sessionKey.isBlank() || sendingInFlight || refreshInFlight) return
-        refreshInFlight = true
-        Thread {
-            try {
-                val response = LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/sessions/reset",
-                    method = "POST",
-                    body = JSONObject().put("currentSessionKey", sessionKey),
-                    readTimeoutMs = 60_000,
-                )
-                val next = response.optString("sessionKey", "").trim()
-                if (next.isNotBlank()) {
-                    sessionKey = next
-                }
-                pendingRunId = ""
-                pendingRunStatus = ""
-                val sessions = fetchSessions(limit = 200)
-                sessionTitleByKey.clear()
-                sessions.forEach { row -> sessionTitleByKey[row.first] = row.second }
-                refreshSessionTitle()
-                refreshHistoryInternal(limit = 80)
-            } catch (error: Exception) {
-                postErrorToast(getString(R.string.openclaw_native_reset_failed) + getErrorMessage(error))
-            } finally {
-                refreshInFlight = false
-                postRender()
-            }
-        }.start()
+        if (sendingInFlight || refreshInFlight) return
+        val base = sessionKey.ifBlank { "agent:main:main" }
+        val next = OpenClawLocalSessionStore.createIndependentSessionKey(base)
+        sessionKey = next
+        sessionId = ""
+        sessionTitle = OpenClawLocalSessionStore.buildFallbackTitle(next)
+        pendingRunStatus = "ready"
+        messages.clear()
+        messages += DisplayMessage(
+            role = "OpenClaw",
+            text = "已重置为新会话，后续消息不会继承当前上下文。",
+        )
+        postRender()
     }
 
     private fun onRenamePressed() {
@@ -325,149 +309,202 @@ class OpenClawChatActivity : AppCompatActivity() {
             .setView(input)
             .setNegativeButton(getString(R.string.cancel), null)
             .setPositiveButton(getString(R.string.ok)) { _, _ ->
-                val nextTitle = input.text?.toString()?.trim().orEmpty()
+                val nextTitle = OpenClawLocalSessionStore.sanitizeLabel(input.text?.toString().orEmpty())
                 if (nextTitle.isBlank()) return@setPositiveButton
-                Thread {
-                    try {
-                        LocalBridgeClients.callOpenClawApi(
-                            path = "/openclaw-api/sessions/rename",
-                            method = "POST",
-                            body = JSONObject()
-                                .put("sessionKey", sessionKey)
-                                .put("label", nextTitle),
-                            readTimeoutMs = 30_000,
-                        )
-                        sessionTitleByKey[sessionKey] = nextTitle
-                        refreshSessionTitle()
-                        postRender()
-                    } catch (error: Exception) {
-                        postErrorToast(getString(R.string.openclaw_native_rename_failed) + getErrorMessage(error))
-                    }
-                }.start()
+                OpenClawLocalSessionStore.setAlias(this, sessionKey, nextTitle)
+                sessionTitle = nextTitle
+                val existing = sessionsByKey[sessionKey]
+                if (existing != null) {
+                    sessionsByKey[sessionKey] = existing.copy(title = nextTitle)
+                }
+                postRender()
             }
             .show()
     }
 
     private fun onHeartbeatPressed() {
-        if (sessionKey.isBlank() || sendingInFlight) return
-        Thread {
-            try {
-                val response = LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/heartbeat/trigger",
-                    method = "POST",
-                    body = JSONObject().put("sessionKey", sessionKey),
-                    readTimeoutMs = 45_000,
-                )
-                val runId = response.optString("runId", "").trim()
-                if (runId.isNotBlank()) {
-                    pendingRunId = runId
-                    pendingRunStatus = response.optString("status", "running").trim().ifBlank { "running" }
-                    waitPendingRun()
-                }
-                postRender()
-            } catch (error: Exception) {
-                postErrorToast(getString(R.string.openclaw_native_heartbeat_failed) + getErrorMessage(error))
-            }
-        }.start()
+        if (sendingInFlight) {
+            Toast.makeText(this, getString(R.string.openclaw_native_status_running), Toast.LENGTH_SHORT).show()
+            return
+        }
+        submitPrompt(text = HEARTBEAT_PROMPT, echoAsUser = false)
     }
 
     private fun onAbortPressed() {
-        if (sessionKey.isBlank() || pendingRunId.isBlank()) return
+        val process = activeProcess
+        if (!sendingInFlight || process == null) return
+        abortRequested = true
+        runCatching { process.destroy() }
         Thread {
-            try {
-                LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/run/abort",
-                    method = "POST",
-                    body = JSONObject()
-                        .put("sessionKey", sessionKey)
-                        .put("runId", pendingRunId),
-                    readTimeoutMs = 30_000,
-                )
-                pendingRunId = ""
-                pendingRunStatus = "aborted"
-                refreshHistoryInternal(limit = 120)
-                postRender()
-            } catch (error: Exception) {
-                postErrorToast(getString(R.string.openclaw_native_abort_failed) + getErrorMessage(error))
-            }
+            Thread.sleep(180)
+            runCatching { process.destroyForcibly() }
         }.start()
+        pendingRunStatus = "aborted"
+        postRender()
     }
 
-    private fun waitPendingRun() {
-        val runId = pendingRunId.trim()
-        if (runId.isBlank() || waitInFlight) return
-        waitInFlight = true
-        Thread {
-            try {
-                val response = LocalBridgeClients.callOpenClawApi(
-                    path = "/openclaw-api/run/wait",
-                    method = "POST",
-                    body = JSONObject()
-                        .put("runId", runId)
-                        .put("timeoutMs", 12_000),
-                    readTimeoutMs = 40_000,
-                )
-                val status = response.optString("status", "running").trim().ifBlank { "running" }
-                val completed = response.optBoolean("completed", false)
-                pendingRunStatus = status
-                if (completed) {
-                    pendingRunId = ""
-                    refreshHistoryInternal(limit = 120)
-                }
-            } catch (_: Exception) {
-                pendingRunStatus = "reconnecting"
-            } finally {
-                waitInFlight = false
-                postRender()
-            }
-        }.start()
-    }
-
-    private fun fetchSessions(limit: Int): List<Pair<String, String>> {
-        val response = LocalBridgeClients.callOpenClawApi(
-            path = "/openclaw-api/sessions?limit=$limit",
-            method = "GET",
-            body = null,
-            readTimeoutMs = 40_000,
-        )
-        val sessions = response.optJSONArray("sessions") ?: JSONArray()
-        val output = mutableListOf<Pair<String, String>>()
-        for (index in 0 until sessions.length()) {
-            val row = sessions.optJSONObject(index) ?: continue
-            val key = row.optString("key", "").trim()
-            if (key.isBlank()) continue
-            val title = row.optString("displayName", "").trim()
-                .ifBlank { row.optString("label", "").trim() }
-                .ifBlank { key }
-            output += key to title
+    private fun submitPrompt(text: String, echoAsUser: Boolean) {
+        if (sendingInFlight) return
+        if (sessionKey.isBlank()) {
+            ensureSessionReady(preferredSession = intent.getStringExtra(EXTRA_SESSION_KEY)?.trim())
+            return
         }
-        return output
+
+        val message = text.trim()
+        if (message.isBlank()) return
+
+        if (echoAsUser) {
+            appendLocalMessage("您", message)
+            inputMessage.setText("")
+        }
+        clearLiveProcessLines()
+        sendingInFlight = true
+        abortRequested = false
+        pendingRunStatus = "running"
+        renderUi()
+
+        Thread {
+            try {
+                val result = runLocalAgentTurn(message, retryOnLock = true)
+                if (!result.success) {
+                    throw IllegalStateException(result.message)
+                }
+                refreshSessionIndex(limit = 300)
+                if (sessionId.isBlank()) {
+                    val latest = sessionsByKey.values.sortedByDescending { it.updatedAtMs }.firstOrNull()
+                    if (latest != null) {
+                        sessionKey = latest.key
+                        sessionId = latest.sessionId
+                        sessionTitle = latest.title
+                    }
+                } else {
+                    val bySessionId = sessionsByKey.values.firstOrNull { it.sessionId == sessionId }
+                    if (bySessionId != null) {
+                        sessionKey = bySessionId.key
+                        sessionTitle = bySessionId.title
+                    }
+                }
+                refreshHistoryInternal(limit = 120)
+                pendingRunStatus = if (abortRequested) "aborted" else "completed"
+            } catch (error: Exception) {
+                pendingRunStatus = if (abortRequested) "aborted" else "failed"
+                postErrorToast(
+                    (if (abortRequested) getString(R.string.cli_task_aborted) else getString(R.string.openclaw_native_send_failed)) +
+                        getErrorMessage(error),
+                )
+            } finally {
+                sendingInFlight = false
+                activeProcess = null
+                postRender()
+            }
+        }.start()
     }
 
-    private fun createIndependentSession(currentSessionKey: String?): String {
-        val payload = JSONObject()
-            .put("label", "")
-            .put("currentSessionKey", currentSessionKey.orEmpty())
-        val response = LocalBridgeClients.callOpenClawApi(
-            path = "/openclaw-api/sessions/new-independent",
-            method = "POST",
-            body = payload,
-            readTimeoutMs = 60_000,
+    private fun runLocalAgentTurn(text: String, retryOnLock: Boolean): LocalRunResult {
+        val command = buildOpenClawAgentCommand(text)
+        val process = serverManager.startPrefixProcess(command)
+        activeProcess = process
+
+        val output = StringBuilder()
+        BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+            var line = reader.readLine()
+            while (line != null) {
+                val clean = stripAnsi(line).trim()
+                if (clean.isNotEmpty()) {
+                    if (output.length < 240_000) {
+                        output.appendLine(clean)
+                    }
+                    if (!isNoisyCliLine(clean)) {
+                        recordLiveProcessLine(clean)
+                    }
+                }
+                line = reader.readLine()
+            }
+        }
+
+        val exitCode = process.waitFor()
+        activeProcess = null
+        val raw = output.toString().trim()
+        if (abortRequested) {
+            return LocalRunResult(success = false, message = getString(R.string.cli_task_aborted))
+        }
+
+        if (exitCode == 0) {
+            return LocalRunResult(success = true, message = "ok")
+        }
+
+        if (retryOnLock && isSessionLockError(raw)) {
+            runCatching { serverManager.disconnectOpenClawGateway() }
+            Thread.sleep(320)
+            return runLocalAgentTurn(text, retryOnLock = false)
+        }
+
+        val fallback = raw.lineSequence().lastOrNull()?.trim().orEmpty()
+        return LocalRunResult(
+            success = false,
+            message = fallback.ifEmpty { "exit code=$exitCode" },
         )
-        return response.optString("sessionKey", "").trim()
-            .ifBlank { throw IllegalStateException("missing sessionKey") }
+    }
+
+    private fun buildOpenClawAgentCommand(message: String): String {
+        val quotedMessage = LocalBridgeClients.shellQuote(message)
+        val normalizedSessionId = sessionId.trim().ifEmpty {
+            sessionsByKey[sessionKey]?.sessionId?.trim().orEmpty()
+        }
+        return if (normalizedSessionId.isNotEmpty()) {
+            "openclaw agent --local --session-id ${LocalBridgeClients.shellQuote(normalizedSessionId)} --message $quotedMessage --json 2>&1"
+        } else {
+            val pseudoTarget = "+1555" + System.currentTimeMillis().toString().takeLast(7)
+            "openclaw agent --local --to ${LocalBridgeClients.shellQuote(pseudoTarget)} --message $quotedMessage --json 2>&1"
+        }
+    }
+
+    private fun isSessionLockError(raw: String): Boolean {
+        val normalized = raw.lowercase(Locale.getDefault())
+        return normalized.contains("session file locked") || normalized.contains(".jsonl.lock")
+    }
+
+    private fun stripAnsi(text: String): String {
+        return text.replace(Regex("\\u001B\\[[0-9;]*[A-Za-z]"), "")
+    }
+
+    private fun isNoisyCliLine(line: String): Boolean {
+        val normalized = line.lowercase(Locale.getDefault())
+        return normalized.startsWith("config warnings") ||
+            normalized.startsWith("[plugins]") ||
+            normalized.contains("stale config entry ignored")
+    }
+
+    private fun recordLiveProcessLine(line: String) {
+        synchronized(liveProcessLines) {
+            if (liveProcessLines.lastOrNull() == line) return
+            liveProcessLines += line
+            while (liveProcessLines.size > 120) {
+                liveProcessLines.removeAt(0)
+            }
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastLiveRenderAtMs >= 450) {
+            lastLiveRenderAtMs = now
+            postRender()
+        }
+    }
+
+    private fun clearLiveProcessLines() {
+        synchronized(liveProcessLines) {
+            liveProcessLines.clear()
+        }
+    }
+
+    private fun snapshotLiveProcessLine(): String {
+        synchronized(liveProcessLines) {
+            return liveProcessLines.lastOrNull().orEmpty()
+        }
     }
 
     private fun refreshHistoryInternal(limit: Int) {
         if (sessionKey.isBlank()) return
-        val response = LocalBridgeClients.callOpenClawApi(
-            path = "/openclaw-api/history",
-            method = "POST",
-            body = JSONObject()
-                .put("sessionKey", sessionKey)
-                .put("limit", limit),
-            readTimeoutMs = 80_000,
-        )
+        val response = OpenClawLocalSessionStore.loadHistoryPayload(this, sessionKey, limit)
         val history = response.optJSONArray("messages") ?: JSONArray()
         val next = mutableListOf<DisplayMessage>()
         for (index in 0 until history.length()) {
@@ -475,25 +512,25 @@ class OpenClawChatActivity : AppCompatActivity() {
             val role = row.optString("role", "").trim()
             val content = row.optJSONArray("content")
             val text = extractTextContent(content)
-            if (role == "user") {
-                if (text.isNotBlank()) {
-                    next += DisplayMessage(role = "您", text = text)
+            when {
+                role.equals("user", ignoreCase = true) -> {
+                    if (text.isNotBlank()) {
+                        next += DisplayMessage(role = "您", text = text)
+                    }
                 }
-                continue
-            }
-            if (role == "assistant") {
-                if (text.isNotBlank()) {
-                    next += DisplayMessage(role = "OpenClaw", text = text)
+                role.equals("assistant", ignoreCase = true) -> {
+                    if (text.isNotBlank()) {
+                        next += DisplayMessage(role = "OpenClaw", text = text)
+                    }
+                    val processLines = extractProcessContent(content)
+                    processLines.forEach { line ->
+                        next += DisplayMessage(role = getString(R.string.cli_process_role), text = line)
+                    }
                 }
-                val processLines = extractProcessContent(content)
-                processLines.forEach { line ->
-                    next += DisplayMessage(role = getString(R.string.cli_process_role), text = line)
+                role.equals("toolResult", ignoreCase = true) || role.equals("toolUse", ignoreCase = true) -> {
+                    val fallback = text.ifBlank { row.toString() }
+                    next += DisplayMessage(role = getString(R.string.cli_process_role), text = fallback)
                 }
-                continue
-            }
-            if (role.equals("toolResult", ignoreCase = true) || role.equals("toolUse", ignoreCase = true)) {
-                val fallback = text.ifBlank { row.toString() }
-                next += DisplayMessage(role = getString(R.string.cli_process_role), text = fallback)
             }
         }
         if (next.isEmpty()) {
@@ -508,7 +545,7 @@ class OpenClawChatActivity : AppCompatActivity() {
         val rows = mutableListOf<String>()
         for (index in 0 until content.length()) {
             val item = content.optJSONObject(index) ?: continue
-            val type = item.optString("type", "").trim()
+            val type = item.optString("type", "").trim().lowercase(Locale.getDefault())
             when (type) {
                 "text" -> {
                     val text = item.optString("text", "").trim()
@@ -525,18 +562,23 @@ class OpenClawChatActivity : AppCompatActivity() {
         val rows = mutableListOf<String>()
         for (index in 0 until content.length()) {
             val item = content.optJSONObject(index) ?: continue
-            val type = item.optString("type", "").trim()
+            val type = item.optString("type", "").trim().lowercase(Locale.getDefault())
             when (type) {
                 "thinking" -> {
                     val text = item.optString("thinking", "").trim()
                     if (text.isNotBlank()) rows += "思考: $text"
                 }
-                "tool_use" -> {
+                "redacted_thinking" -> {
+                    rows += "思考: [模型返回了加密思考片段]"
+                }
+                "toolcall", "tool_use" -> {
                     val name = item.optString("name", "").trim().ifBlank { "unknown_tool" }
                     rows += "工具调用: $name"
                 }
-                "tool_result" -> {
-                    val text = item.optString("text", "").trim()
+                "toolresult", "tool_result" -> {
+                    val text = item.optString("text", "").trim().ifBlank {
+                        item.opt("content")?.toString()?.trim().orEmpty()
+                    }
                     rows += if (text.isBlank()) "工具结果已返回" else "工具结果: $text"
                 }
             }
@@ -557,24 +599,28 @@ class OpenClawChatActivity : AppCompatActivity() {
         tvSession.text = getString(R.string.openclaw_native_session_prefix) + sessionTitle.ifBlank {
             if (sessionKey.isBlank()) getString(R.string.openclaw_native_session_unknown) else sessionKey
         }
+
+        val live = snapshotLiveProcessLine()
         val statusText = when {
-            pendingRunId.isBlank() -> getString(R.string.openclaw_native_status_ready)
-            pendingRunStatus.equals("reconnecting", ignoreCase = true) -> getString(R.string.openclaw_native_status_reconnecting)
+            sendingInFlight && live.isNotBlank() -> getString(R.string.openclaw_native_status_running) + " · " + live
+            sendingInFlight -> getString(R.string.openclaw_native_status_running)
             pendingRunStatus.equals("failed", ignoreCase = true) ||
                 pendingRunStatus.equals("error", ignoreCase = true) -> getString(R.string.openclaw_native_status_failed)
+            pendingRunStatus.equals("aborted", ignoreCase = true) -> getString(R.string.cli_task_aborted)
             pendingRunStatus.equals("completed", ignoreCase = true) ||
                 pendingRunStatus.equals("ok", ignoreCase = true) -> getString(R.string.openclaw_native_status_completed)
-            else -> getString(R.string.openclaw_native_status_running)
+            else -> getString(R.string.openclaw_native_status_ready)
         }
-        val rawStatus = pendingRunStatus.ifBlank { "idle" }
+        val rawStatus = if (sendingInFlight) "running" else pendingRunStatus.ifBlank { "idle" }
         tvStatus.text = getString(R.string.openclaw_native_run_status_prefix) + "$statusText ($rawStatus)"
 
         btnSend.isEnabled = !sendingInFlight && sessionKey.isNotBlank()
         inputMessage.isEnabled = !sendingInFlight && sessionKey.isNotBlank()
-        btnAbort.isEnabled = pendingRunId.isNotBlank()
+        btnAbort.isEnabled = sendingInFlight
         btnHeartbeat.isEnabled = sessionKey.isNotBlank()
         btnRename.isEnabled = sessionKey.isNotBlank()
-        btnReset.isEnabled = sessionKey.isNotBlank()
+        btnReset.isEnabled = !sendingInFlight
+        btnNewSession.isEnabled = !sendingInFlight
 
         adapter.notifyDataSetChanged()
         if (messages.isNotEmpty()) {
@@ -585,28 +631,6 @@ class OpenClawChatActivity : AppCompatActivity() {
     private fun postErrorToast(message: String) {
         runOnUiThread {
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun maybePromptServerRecovery(message: String) {
-        val normalized = message.lowercase()
-        val needRecovery = normalized.contains("connection refused") ||
-            normalized.contains("failed to connect") ||
-            normalized.contains("http 503")
-        if (!needRecovery || recoverDialogShown) return
-        recoverDialogShown = true
-        runOnUiThread {
-            Toast.makeText(this, getString(R.string.openclaw_native_waiting_server), Toast.LENGTH_LONG).show()
-            startActivity(
-                Intent(this, MainActivity::class.java).apply {
-                    putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
-                    val key = sessionKey.trim()
-                    if (key.isNotEmpty()) {
-                        putExtra(MainActivity.EXTRA_SESSION_KEY, key)
-                    }
-                },
-            )
-            finish()
         }
     }
 

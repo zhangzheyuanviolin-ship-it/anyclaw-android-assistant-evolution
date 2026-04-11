@@ -777,16 +777,16 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Codex not installed", "Continuing in OpenClaw mode")
         }
 
-        // Step 7: On a fresh install, complete one full OpenClaw bring-up pass
-        // before showing the UI so users do not need to restart the app to get
-        // a working gateway. Existing installs still use the async fast path.
-        val needsBlockingOpenClawBootstrap = !hadOpenClawAtStart && openClawAvailable
-        if (needsBlockingOpenClawBootstrap) {
-            updateStatus("Finalizing OpenClaw…", "Completing first-run gateway setup")
+        // Step 7: Prepare OpenClaw local runtime and force-disconnect gateway to
+        // avoid session lock contention in native chat mode.
+        if (openClawAvailable) {
+            val isFreshOpenClawInstall = !hadOpenClawAtStart
+            if (isFreshOpenClawInstall) {
+                updateStatus("Finalizing OpenClaw…", "Preparing local runtime")
+            } else {
+                updateStatus("Refreshing OpenClaw runtime…", "Switching to local mode")
+            }
             startOpenClawServicesSync()
-        } else {
-            // Existing installs keep Codex page availability as the first priority.
-            startOpenClawServicesAsync()
         }
 
         // Step 8: Start web server
@@ -857,18 +857,9 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Configuring OpenClaw…")
             serverManager.configureOpenClawAuth()
 
-            updateStatus("Starting OpenClaw gateway…")
-            var gatewayOk = serverManager.startOpenClawGateway()
-            if (!gatewayOk) {
-                Log.w(TAG, "OpenClaw gateway did not become responsive on first attempt; retrying once")
-                updateDetail("Gateway retrying once…")
-                Thread.sleep(1200)
-                gatewayOk = serverManager.startOpenClawGateway()
-            }
-
-            updateStatus("Starting OpenClaw Control UI…")
-            serverManager.startOpenClawControlUiServer()
-            gatewayOk
+            updateStatus("Stopping OpenClaw gateway…", "Using Android native local session mode")
+            serverManager.disconnectOpenClawGateway()
+            true
         } catch (error: Exception) {
             Log.e(TAG, "OpenClaw startup failed", error)
             false
@@ -879,6 +870,15 @@ class MainActivity : AppCompatActivity() {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
         when (target) {
+            OPEN_TARGET_OPENCLAW_SESSION -> {
+                startActivity(
+                    Intent(this, OpenClawChatActivity::class.java).apply {
+                        if (sessionId.isNotEmpty()) {
+                            putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionId)
+                        }
+                    },
+                )
+            }
             OPEN_TARGET_CLAUDE_SESSION -> {
                 startActivity(
                     Intent(this, CliAgentChatActivity::class.java).apply {
