@@ -34,6 +34,11 @@
             android:windowSoftInputMode="adjustResize" />
 
         <activity
+            android:name=".OpenClawChatActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".AgentModelManagerActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />

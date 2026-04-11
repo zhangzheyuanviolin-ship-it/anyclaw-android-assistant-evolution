@@ -423,6 +423,15 @@ class ConversationManagerActivity : AppCompatActivity() {
     }
 
     private fun openConversation(row: ConversationRow) {
+        if (row.source == SourceType.OPENCLAW) {
+            startActivity(
+                Intent(this, OpenClawChatActivity::class.java).apply {
+                    putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, row.id)
+                },
+            )
+            Toast.makeText(this, getString(R.string.conversation_opening_toast), Toast.LENGTH_SHORT).show()
+            return
+        }
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             when (row.source) {
@@ -430,10 +439,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                     putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_CODEX_THREAD)
                     putExtra(MainActivity.EXTRA_THREAD_ID, row.id)
                 }
-                SourceType.OPENCLAW -> {
-                    putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
-                    putExtra(MainActivity.EXTRA_SESSION_KEY, row.id)
-                }
+                SourceType.OPENCLAW -> Unit
                 SourceType.CLAUDE_CODE -> Unit
                 SourceType.ALL -> Unit
             }

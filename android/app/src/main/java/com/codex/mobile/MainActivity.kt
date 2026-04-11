@@ -174,14 +174,24 @@ class MainActivity : AppCompatActivity() {
             updateUiForCurrentTarget()
         }
         openClawNewChatButton.setOnClickListener {
-            currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
-            webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
-            updateUiForCurrentTarget()
+            startActivity(
+                Intent(this, OpenClawChatActivity::class.java).apply {
+                    val sessionKey = extractSessionFromCurrentUrl()
+                    if (!sessionKey.isNullOrBlank()) {
+                        putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionKey)
+                    }
+                },
+            )
         }
         tabOpenClawButton.setOnClickListener {
-            currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
-            webView.loadUrl(buildOpenClawChatPageUrl(extractSessionFromCurrentUrl()))
-            updateUiForCurrentTarget()
+            startActivity(
+                Intent(this, OpenClawChatActivity::class.java).apply {
+                    val sessionKey = extractSessionFromCurrentUrl()
+                    if (!sessionKey.isNullOrBlank()) {
+                        putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionKey)
+                    }
+                },
+            )
         }
         tabCodexButton.setOnClickListener {
             currentUiTarget = OPEN_TARGET_CODEX_HOME
@@ -852,20 +862,29 @@ class MainActivity : AppCompatActivity() {
 
     private fun redirectToExternalAgentIfNeeded(intent: Intent?): Boolean {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
-        val nextAgent = when (target) {
-            OPEN_TARGET_CLAUDE_SESSION -> ExternalAgentId.CLAUDE_CODE
-            else -> null
-        } ?: return false
-
-        startActivity(
-            Intent(this, CliAgentChatActivity::class.java).apply {
-                putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, nextAgent.value)
-                val sessionId = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
-                if (sessionId.isNotEmpty()) {
-                    putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, sessionId)
-                }
-            },
-        )
+        val sessionId = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
+        when (target) {
+            OPEN_TARGET_CLAUDE_SESSION -> {
+                startActivity(
+                    Intent(this, CliAgentChatActivity::class.java).apply {
+                        putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
+                        if (sessionId.isNotEmpty()) {
+                            putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, sessionId)
+                        }
+                    },
+                )
+            }
+            OPEN_TARGET_OPENCLAW_SESSION -> {
+                startActivity(
+                    Intent(this, OpenClawChatActivity::class.java).apply {
+                        if (sessionId.isNotEmpty()) {
+                            putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionId)
+                        }
+                    },
+                )
+            }
+            else -> return false
+        }
         finish()
         return true
     }
