@@ -12,6 +12,7 @@ const WEB_BRIDGE_URL = process.env.ANYCLAW_WEB_BRIDGE_URL || "http://127.0.0.1:1
 const TAVILY_BASE_URL = process.env.ANYCLAW_TAVILY_BASE_URL || "https://api.tavily.com/search";
 const GITHUB_API_BASE = (process.env.ANYCLAW_GITHUB_API_BASE_URL || "https://api.github.com").replace(/\/$/, "");
 const WORKSPACE_ROOT = path.resolve(process.env.ANYCLAW_WORKSPACE_ROOT || path.join(process.env.HOME || "/tmp", ".openclaw", "workspace"));
+const MCP_CONFIG_PATH = process.env.ANYCLAW_MCP_CONFIG_PATH || "";
 
 const SEARCH_URLS = {
   google: (query) => "https://www.google.com/search?q=" + encodeURIComponent(query) + "&hl=en",
@@ -820,10 +821,35 @@ function normalizeHttpMethod(raw, fallback = "GET") {
   return fallback;
 }
 
+function readMcpConfigEnvValue(keys) {
+  if (!MCP_CONFIG_PATH || !Array.isArray(keys) || keys.length === 0) return null;
+  try {
+    const root = asObject(JSON.parse(fs.readFileSync(MCP_CONFIG_PATH, "utf8")));
+    const mcpServers = asObject(root.mcpServers);
+    const toolbox = asObject(mcpServers.anyclaw_toolbox);
+    const env = asObject(toolbox.env);
+    for (const key of keys) {
+      const value = String(env[key] || "").trim();
+      if (value) return value;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveGithubToken(args) {
   const fromArgs = toStringSafe(args.token, "").trim();
   if (fromArgs) return fromArgs;
-  const fromEnv = String(process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "").trim();
+  const fromEnv = String(
+    process.env.ANYCLAW_GITHUB_TOKEN ||
+      process.env.GITHUB_TOKEN ||
+      process.env.GH_TOKEN ||
+      "",
+  ).trim();
+  if (fromEnv) return fromEnv;
+  const fromConfig = readMcpConfigEnvValue(["ANYCLAW_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"]);
+  if (fromConfig) return fromConfig;
   return fromEnv || null;
 }
 
@@ -1138,7 +1164,13 @@ async function callTool(name, args) {
       const maxResults = clampInt(toInt(args.maxResults, DEFAULT_SEARCH_LIMIT), 1, 10);
       const depthRaw = toStringSafe(args.searchDepth, "advanced").trim().toLowerCase();
       const searchDepth = depthRaw === "basic" ? "basic" : "advanced";
-      const apiKey = toStringSafe(args.apiKey, "").trim() || String(process.env.TAVILY_API_KEY || process.env.ANYCLAW_TAVILY_API_KEY || "").trim();
+      const apiKey = toStringSafe(args.apiKey, "").trim() ||
+        String(
+          process.env.TAVILY_API_KEY ||
+            process.env.ANYCLAW_TAVILY_API_KEY ||
+            readMcpConfigEnvValue(["ANYCLAW_TAVILY_API_KEY", "TAVILY_API_KEY"]) ||
+            "",
+        ).trim();
       if (!apiKey) {
         return {
           ok: false,

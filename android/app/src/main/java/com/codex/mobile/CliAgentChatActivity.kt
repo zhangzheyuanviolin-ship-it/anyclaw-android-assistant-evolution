@@ -484,8 +484,8 @@ class CliAgentChatActivity : AppCompatActivity() {
             out.appendLine("4) 先做必要验证再给结论，且不要复述整段预检文本。")
             out.appendLine("5) 若某链路失败，需明确失败原因并自动切换可用链路继续。")
             if (agentId == ExternalAgentId.CLAUDE_CODE) {
-                out.appendLine("6) 本会话已注入 AnyClaw MCP 工具箱，工具主要为 anyclaw_*，网页自动化为 start_web/stop_web/web_*。")
-                out.appendLine("7) 用户要求验证工具时，先尝试列出或调用 anyclaw_* 与 web_* 工具，不得只依据内置工具列表给结论。")
+                out.appendLine("6) 本会话已注入 AnyClaw MCP 工具箱，调用时优先使用 mcp__anyclaw_toolbox__ 前缀工具名。")
+                out.appendLine("7) 网页自动化调用请使用 mcp__anyclaw_toolbox__start_web/stop_web/web_*，避免裸 start_web/web_*。")
                 out.appendLine("8) 若 anyclaw_ 工具不可见或调用失败，必须输出 MCP_TOOLBOX_STATUS=UNAVAILABLE，并给出 reason 与 step。")
             }
             out.appendLine()
@@ -1165,14 +1165,22 @@ class CliAgentChatActivity : AppCompatActivity() {
         if (!mcpDir.exists()) {
             mcpDir.mkdirs()
         }
+        val configFile = File(mcpDir, "claude-anyclaw-mcp.json")
 
         val serverFile = File(mcpDir, "anyclaw-toolbox-server.cjs")
         val serverScript = buildAnyClawToolboxServerScript()
         writeTextIfChanged(serverFile, serverScript)
         serverFile.setExecutable(true)
 
+        val existingRoot = readJsonObjectSafely(configFile)
+        val existingServers = existingRoot?.optJSONObject("mcpServers")
+        val existingServerConfig = existingServers?.optJSONObject("anyclaw_toolbox")
+        val existingEnv = existingServerConfig?.optJSONObject("env")
+
         val systemShellPath = File(paths.prefixDir, "bin/system-shell")
         val envJson = JSONObject()
+        copyJsonProperties(existingEnv, envJson)
+        envJson
             .put("HOME", paths.homeDir)
             .put("PREFIX", paths.prefixDir)
             .put("PATH", "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin")
@@ -1181,7 +1189,14 @@ class CliAgentChatActivity : AppCompatActivity() {
             .put("ANYCLAW_GITHUB_API_BASE_URL", "https://api.github.com")
             .put("ANYCLAW_WORKSPACE_ROOT", "${paths.homeDir}/.openclaw/workspace")
             .put("ANYCLAW_ALLOW_SHARED_STORAGE", if (options.allowSharedStorage) "1" else "0")
-        val passThroughEnv = listOf("GITHUB_TOKEN", "GH_TOKEN", "TAVILY_API_KEY", "ANYCLAW_TAVILY_API_KEY")
+            .put("ANYCLAW_MCP_CONFIG_PATH", configFile.absolutePath)
+        val passThroughEnv = listOf(
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "ANYCLAW_GITHUB_TOKEN",
+            "TAVILY_API_KEY",
+            "ANYCLAW_TAVILY_API_KEY",
+        )
         passThroughEnv.forEach { key ->
             val value = System.getenv(key)?.trim()
             if (!value.isNullOrBlank()) {
@@ -1193,14 +1208,19 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
 
         val serverConfig = JSONObject()
+        copyJsonProperties(existingServerConfig, serverConfig)
+        serverConfig
             .put("command", "${paths.prefixDir}/bin/node")
             .put("args", JSONArray().put(serverFile.absolutePath))
             .put("env", envJson)
 
+        val mcpServers = JSONObject()
+        copyJsonProperties(existingServers, mcpServers)
+        mcpServers.put("anyclaw_toolbox", serverConfig)
         val root = JSONObject()
-            .put("mcpServers", JSONObject().put("anyclaw_toolbox", serverConfig))
+        copyJsonProperties(existingRoot, root)
+        root.put("mcpServers", mcpServers)
 
-        val configFile = File(mcpDir, "claude-anyclaw-mcp.json")
         writeTextIfChanged(configFile, root.toString(2) + "\n")
         return configFile
     }
@@ -1210,6 +1230,20 @@ class CliAgentChatActivity : AppCompatActivity() {
         if (current == content) return
         target.parentFile?.mkdirs()
         target.writeText(content)
+    }
+
+    private fun readJsonObjectSafely(file: File): JSONObject? {
+        if (!file.exists()) return null
+        return runCatching { JSONObject(file.readText()) }.getOrNull()
+    }
+
+    private fun copyJsonProperties(from: JSONObject?, to: JSONObject) {
+        if (from == null) return
+        val keys = from.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            to.put(key, from.opt(key))
+        }
     }
 
     private fun buildAnyClawToolboxServerScript(): String {
