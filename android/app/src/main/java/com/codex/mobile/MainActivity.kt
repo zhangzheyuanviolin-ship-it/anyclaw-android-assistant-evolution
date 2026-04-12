@@ -623,6 +623,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     return
                 }
+                throw RuntimeException("OpenClaw local service did not start in lightweight mode")
             }
         }
 
@@ -858,14 +859,26 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Updating web UI…")
             serverManager.installServerBundle { msg -> updateDetail(msg) }
 
-            updateStatus("Starting server…")
-            val started = serverManager.startServer()
-            if (!started) {
-                return false
-            }
+            for (attempt in 0 until 2) {
+                updateStatus("Starting server…")
+                val started = serverManager.startServer()
+                if (!started) {
+                    updateDetail("Server start attempt ${attempt + 1} failed")
+                    Thread.sleep(350L + attempt * 250L)
+                    continue
+                }
 
-            updateStatus("Waiting for server…")
-            serverManager.waitForServer(timeoutMs = 45_000)
+                updateStatus("Waiting for server…")
+                val ready = serverManager.waitForServer(
+                    timeoutMs = if (attempt == 0) 30_000 else 45_000,
+                )
+                if (ready) {
+                    return true
+                }
+                updateDetail("Local server not ready after attempt ${attempt + 1}, retrying…")
+                Thread.sleep(400L + attempt * 350L)
+            }
+            false
         } catch (error: Exception) {
             Log.w(TAG, "OpenClaw lightweight quick start failed: ${error.message}")
             false

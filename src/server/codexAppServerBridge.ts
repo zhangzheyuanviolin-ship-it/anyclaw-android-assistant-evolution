@@ -32,6 +32,9 @@ const LIGHTWEIGHT_STATE_PATH = homeDir
 const LIGHTWEIGHT_MAX_CONTEXT_MESSAGES = 80
 const LIGHTWEIGHT_MAX_TOOL_STEPS = 32
 const LIGHTWEIGHT_COMMAND_TIMEOUT_MS = 180_000
+const LIGHTWEIGHT_MODEL_REQUEST_TIMEOUT_MS = 95_000
+const LIGHTWEIGHT_MODEL_REQUEST_MAX_RETRIES = 3
+const LIGHTWEIGHT_RUN_HARD_TIMEOUT_MS = 15 * 60_000
 const LIGHTWEIGHT_OUTPUT_LIMIT = 120_000
 const LIGHTWEIGHT_BOOTSTRAP_TARGET_VERSION = '2026.3.2'
 const LIGHTWEIGHT_DOC_MAX_CHARS = 4_000
@@ -829,8 +832,8 @@ function findLatestRunningLightweightRun(sessionKey: string): string {
 }
 
 function toLightweightRunWaitPayload(runId: string): Record<string, unknown> {
-  const context = lightweightRuns.get(runId)
-  if (!context) {
+  const original = lightweightRuns.get(runId)
+  if (!original) {
     return {
       ok: false,
       runId,
@@ -841,6 +844,18 @@ function toLightweightRunWaitPayload(runId: string): Record<string, unknown> {
       error: 'Run state unavailable, retry wait or refresh history',
     }
   }
+  if (
+    !original.completed &&
+    Date.now() - original.startedAtMs > LIGHTWEIGHT_RUN_HARD_TIMEOUT_MS
+  ) {
+    updateLightweightRun(
+      runId,
+      'failed',
+      true,
+      `任务执行超时（>${Math.floor(LIGHTWEIGHT_RUN_HARD_TIMEOUT_MS / 1000)}秒）`,
+    )
+  }
+  const context = lightweightRuns.get(runId) ?? original
   return {
     ok: context.completed ? context.status === 'completed' : true,
     runId,
@@ -1442,32 +1457,70 @@ async function callProviderChatCompletions(
     tool_choice: 'auto',
   }
 
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${model.apiKey}`,
-    },
-    body: JSON.stringify(payload),
-  })
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < LIGHTWEIGHT_MODEL_REQUEST_MAX_RETRIES; attempt += 1) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const timer = controller
+      ? setTimeout(() => controller.abort(), LIGHTWEIGHT_MODEL_REQUEST_TIMEOUT_MS)
+      : null
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${model.apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller?.signal,
+      })
 
-  const raw = await response.text()
-  let parsed: unknown = null
-  try {
-    parsed = raw ? JSON.parse(raw) : null
-  } catch {
-    parsed = null
+      const raw = await response.text()
+      let parsed: unknown = null
+      try {
+        parsed = raw ? JSON.parse(raw) : null
+      } catch {
+        parsed = null
+      }
+
+      if (!response.ok) {
+        const record = asRecord(parsed)
+        const errorMessage = normalizeText(record?.error) ||
+          normalizeText(asRecord(record?.error)?.message) ||
+          `HTTP ${response.status}`
+        throw new Error(`Model request failed: ${errorMessage}`)
+      }
+
+      return asRecord(parsed) ?? {}
+    } catch (error) {
+      lastError = error
+      const message = getErrorMessage(error, 'Model request failed')
+      const normalized = message.toLowerCase()
+      const isTimeoutAbort = error instanceof DOMException && error.name === 'AbortError'
+      const retryable = isTimeoutAbort ||
+        normalized.includes('timeout') ||
+        normalized.includes('timed out') ||
+        normalized.includes('failed to fetch') ||
+        normalized.includes('network') ||
+        normalized.includes('socket') ||
+        normalized.includes('econnreset') ||
+        normalized.includes('503') ||
+        normalized.includes('429')
+      if (attempt < LIGHTWEIGHT_MODEL_REQUEST_MAX_RETRIES - 1 && retryable) {
+        await sleepMs(350 + attempt * 450)
+        continue
+      }
+      if (isTimeoutAbort) {
+        throw new Error(`Model request timeout after ${Math.floor(LIGHTWEIGHT_MODEL_REQUEST_TIMEOUT_MS / 1000)}s`)
+      }
+      throw (error instanceof Error ? error : new Error(message))
+    } finally {
+      if (timer) {
+        clearTimeout(timer)
+      }
+    }
   }
 
-  if (!response.ok) {
-    const record = asRecord(parsed)
-    const errorMessage = normalizeText(record?.error) ||
-      normalizeText(asRecord(record?.error)?.message) ||
-      `HTTP ${response.status}`
-    throw new Error(`Model request failed: ${errorMessage}`)
-  }
-
-  return asRecord(parsed) ?? {}
+  throw (lastError instanceof Error ? lastError : new Error('Model request failed'))
 }
 
 async function runLightweightTurn(
@@ -2015,9 +2068,11 @@ function normalizeImageAttachmentsForLightweight(value: unknown): LightweightCon
 }
 
 async function runLightweightMessageInBackground(runId: string, sessionKey: string): Promise<void> {
-  const state = await readLightweightState()
-  const session = await ensureLightweightSession(state, sessionKey)
+  let state: LightweightState | null = null
+  let session: LightweightSession | null = null
   try {
+    state = await readLightweightState()
+    session = await ensureLightweightSession(state, sessionKey)
     await runLightweightTurn(session, {
       isAborted: () => isLightweightRunAbortRequested(runId),
     })
@@ -2032,14 +2087,32 @@ async function runLightweightMessageInBackground(runId: string, sessionKey: stri
     const message = getErrorMessage(error, '轻量调度执行失败')
     const aborted = message === 'lightweight-run-aborted' || isLightweightRunAbortRequested(runId)
     const renderedError = aborted ? '任务已中止。' : `任务执行失败：${message}`
-    session.messages.push({
-      role: 'assistant',
-      timestamp: Date.now(),
-      content: toTextContent(renderedError),
-    })
-    session.updatedAt = Date.now()
-    session.lastMessagePreview = buildSessionPreview(session.messages)
-    await writeLightweightState(state)
+    if (state && session) {
+      session.messages.push({
+        role: 'assistant',
+        timestamp: Date.now(),
+        content: toTextContent(renderedError),
+      })
+      session.updatedAt = Date.now()
+      session.lastMessagePreview = buildSessionPreview(session.messages)
+      await writeLightweightState(state)
+    } else {
+      // Best effort fallback: avoid leaving run state at running forever when bootstrap fails before session load.
+      try {
+        const fallbackState = await readLightweightState()
+        const fallbackSession = await ensureLightweightSession(fallbackState, sessionKey)
+        fallbackSession.messages.push({
+          role: 'assistant',
+          timestamp: Date.now(),
+          content: toTextContent(renderedError),
+        })
+        fallbackSession.updatedAt = Date.now()
+        fallbackSession.lastMessagePreview = buildSessionPreview(fallbackSession.messages)
+        await writeLightweightState(fallbackState)
+      } catch {
+        // Ignore secondary persistence failures.
+      }
+    }
     updateLightweightRun(runId, aborted ? 'aborted' : 'failed', true, renderedError)
   }
 }
