@@ -355,8 +355,9 @@ class ConversationManagerActivity : AppCompatActivity() {
     private fun openConversation(row: ConversationRow) {
         if (row.source == SourceType.OPENCLAW) {
             startActivity(
-                Intent(this, OpenClawChatActivity::class.java).apply {
-                    putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, row.id)
+                Intent(this, MainActivity::class.java).apply {
+                    putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
+                    putExtra(MainActivity.EXTRA_SESSION_KEY, row.id)
                 },
             )
             Toast.makeText(this, getString(R.string.conversation_opening_toast), Toast.LENGTH_SHORT).show()

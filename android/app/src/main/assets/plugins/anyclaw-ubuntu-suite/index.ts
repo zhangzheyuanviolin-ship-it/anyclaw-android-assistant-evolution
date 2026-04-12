@@ -36,6 +36,12 @@ type UbuntuSession = {
   activeProcess: ReturnType<typeof spawn> | null;
 };
 
+type CommandSerializationMeta = {
+  serialized: boolean;
+  queueDepth: number;
+  queueWaitMs: number;
+};
+
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_INSTALL_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60_000;
@@ -45,6 +51,8 @@ const DEFAULT_WORKSPACE_ROOT = "~/.openclaw/workspace";
 const DEFAULT_MAX_SESSION_OUTPUT_BYTES = 512 * 1024;
 
 const sessions = new Map<string, UbuntuSession>();
+let heavyCommandQueueTail: Promise<void> = Promise.resolve();
+let heavyCommandQueueDepth = 0;
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -334,6 +342,58 @@ function isLikelyLongInstallCommand(command: string): boolean {
     /\bcurl\b.+\|\s*(bash|sh)\b/
   ];
   return patterns.some((pattern) => pattern.test(text));
+}
+
+function wrapNonInteractiveInstallCommand(command: string): string {
+  const text = command.trim();
+  if (!text || !isLikelyLongInstallCommand(text)) return text;
+  return [
+    "export DEBIAN_FRONTEND=noninteractive",
+    "export NEEDRESTART_MODE=a",
+    "export APT_LISTCHANGES_FRONTEND=none",
+    "export PIP_DISABLE_PIP_VERSION_CHECK=1",
+    "export PIP_NO_INPUT=1",
+    text
+  ].join("; ");
+}
+
+async function runWithHeavyCommandSerialization<T>(
+  command: string,
+  execute: (meta: CommandSerializationMeta) => Promise<T>
+): Promise<T> {
+  if (!isLikelyLongInstallCommand(command)) {
+    return execute({
+      serialized: false,
+      queueDepth: 0,
+      queueWaitMs: 0
+    });
+  }
+
+  const enqueuedAtMs = Date.now();
+  const queueDepth = heavyCommandQueueDepth + 1;
+  heavyCommandQueueDepth += 1;
+
+  let releaseTurn = () => {};
+  const turn = new Promise<void>((resolve) => {
+    releaseTurn = resolve;
+  });
+
+  const previousTurn = heavyCommandQueueTail;
+  heavyCommandQueueTail = heavyCommandQueueTail.then(() => turn, () => turn);
+
+  await previousTurn;
+  const queueWaitMs = Math.max(0, Date.now() - enqueuedAtMs);
+
+  try {
+    return await execute({
+      serialized: true,
+      queueDepth,
+      queueWaitMs
+    });
+  } finally {
+    heavyCommandQueueDepth = Math.max(0, heavyCommandQueueDepth - 1);
+    releaseTurn();
+  }
 }
 
 function trimSessionBuffer(session: UbuntuSession, maxBytes: number) {
@@ -706,21 +766,27 @@ function createExecTool(runtime: RuntimeConfig) {
       const timeoutMs = requestedTimeoutSeconds !== undefined
         ? clampNumber(requestedTimeoutSeconds, 10, 3600) * 1000
         : (useInstallTimeout ? runtime.installTimeoutMs : runtime.timeoutMs);
+      const commandToRun = wrapNonInteractiveInstallCommand(command);
 
-      const result = await runLinuxCommand(runtime, composeGuestCommand(command, workingDir), timeoutMs);
-
-      return jsonResult({
-        tool: "anyclaw_ubuntu_exec",
-        ok: result.ok,
-        code: result.code,
-        workingDir,
-        command,
-        runtimeRoot: runtime.runtimeRoot,
-        timeoutMs,
-        longInstallHeuristic: useInstallTimeout,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        error: result.error
+      return runWithHeavyCommandSerialization(command, async (queueMeta) => {
+        const result = await runLinuxCommand(runtime, composeGuestCommand(commandToRun, workingDir), timeoutMs);
+        return jsonResult({
+          tool: "anyclaw_ubuntu_exec",
+          ok: result.ok,
+          code: result.code,
+          workingDir,
+          command,
+          runtimeRoot: runtime.runtimeRoot,
+          timeoutMs,
+          longInstallHeuristic: useInstallTimeout,
+          serializedHeavyCommand: queueMeta.serialized,
+          queueDepthAtEnqueue: queueMeta.queueDepth,
+          queueWaitMs: queueMeta.queueWaitMs,
+          nonInteractiveInstallMode: queueMeta.serialized,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          error: result.error
+        });
       });
     }
   };
@@ -809,13 +875,26 @@ function createSessionExecTool(runtime: RuntimeConfig) {
       const session = getSession(sessionId);
       const rawWorkingDir = (readStringParam(args, "workingDir") || session.workingDir || runtime.workspaceRoot).trim();
       const workingDir = rawWorkingDir || runtime.workspaceRoot;
-      const timeoutSeconds = readNumberParam(args, "timeoutSeconds") || runtime.sessionTimeoutMs / 1000;
-      const timeoutMs = clampNumber(timeoutSeconds, 10, 3600) * 1000;
-      const result = await execInSession(session, runtime, command, workingDir, timeoutMs);
-      return jsonResult({
-        tool: "anyclaw_ubuntu_session_exec",
-        ...result,
-        command
+      const requestedTimeoutSeconds = readNumberParam(args, "timeoutSeconds");
+      const useInstallTimeout = requestedTimeoutSeconds === undefined && isLikelyLongInstallCommand(command);
+      const timeoutMs = requestedTimeoutSeconds !== undefined
+        ? clampNumber(requestedTimeoutSeconds, 10, 3600) * 1000
+        : (useInstallTimeout ? runtime.installTimeoutMs : runtime.sessionTimeoutMs);
+      const commandToRun = wrapNonInteractiveInstallCommand(command);
+
+      return runWithHeavyCommandSerialization(command, async (queueMeta) => {
+        const result = await execInSession(session, runtime, commandToRun, workingDir, timeoutMs);
+        return jsonResult({
+          tool: "anyclaw_ubuntu_session_exec",
+          ...result,
+          command,
+          timeoutMs,
+          longInstallHeuristic: useInstallTimeout,
+          serializedHeavyCommand: queueMeta.serialized,
+          queueDepthAtEnqueue: queueMeta.queueDepth,
+          queueWaitMs: queueMeta.queueWaitMs,
+          nonInteractiveInstallMode: queueMeta.serialized
+        });
       });
     }
   };

@@ -44,7 +44,7 @@ const OPENCLAW_RUN_WAIT_GATEWAY_GRACE_MS = 8_000
 const OPENCLAW_RUN_WAIT_ATTEMPTS = 2
 const OPENCLAW_GATEWAY_CALL_MAX_RETRIES = 4
 const OPENCLAW_GATEWAY_RETRY_BACKOFF_MS = [300, 700, 1200, 1800]
-const OPENCLAW_NATIVE_STRICT_MODE = true
+const OPENCLAW_NATIVE_STRICT_MODE = false
 const OPENCLAW_RUN_CONTEXT_TTL_MS = 6 * 60 * 60_000
 const OPENCLAW_RUN_CONTEXT_MAX = 400
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
@@ -52,6 +52,9 @@ const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace con
 const CLAUDE_STATE_PATH = homeDir
   ? join(homeDir, '.pocketlobster', 'claude-web', 'sessions.json')
   : join(process.cwd(), '.pocketlobster', 'claude-web', 'sessions.json')
+const CLAUDE_RUNS_STATE_PATH = homeDir
+  ? join(homeDir, '.pocketlobster', 'claude-web', 'runs.json')
+  : join(process.cwd(), '.pocketlobster', 'claude-web', 'runs.json')
 const CLAUDE_UPLOAD_DIR = homeDir
   ? join(homeDir, '.pocketlobster', 'claude-web', 'uploads')
   : join(process.cwd(), '.pocketlobster', 'claude-web', 'uploads')
@@ -62,6 +65,7 @@ const CLAUDE_RUN_CONTEXT_TTL_MS = 2 * 60 * 60_000
 const CLAUDE_PROCESS_LINES_MAX = 240
 const CLAUDE_OUTPUT_CHARS_MAX = 240_000
 const CLAUDE_SESSION_HISTORY_DEFAULT = 60
+const CLAUDE_NO_OUTPUT_WARN_MS = 25_000
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -188,6 +192,7 @@ type ClaudeRunContext = {
   status: string
   startedAtMs: number
   updatedAtMs: number
+  lastOutputAtMs: number
   completed: boolean
   processLines: string[]
   rawOutput: string
@@ -197,10 +202,25 @@ type ClaudeRunContext = {
   process: ChildProcess | null
 }
 
+type ClaudePersistedRun = {
+  runId: string
+  sessionKey: string
+  status: string
+  startedAtMs: number
+  updatedAtMs: number
+  lastOutputAtMs: number
+  completed: boolean
+  processLines: string[]
+  assistantText: string
+  errorText: string
+  exitCode: number | null
+}
+
 let openClawNativeReadyCacheValue: boolean | null = null
 let openClawNativeReadyCacheAtMs = 0
 const openClawNativeRuns = new Map<string, OpenClawNativeRunContext>()
 const claudeRuns = new Map<string, ClaudeRunContext>()
+let claudeRunsPersistTimer: NodeJS.Timeout | null = null
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -2298,13 +2318,109 @@ function collectClaudeProcessLines(raw: string): string[] {
   return trimClaudeProcessLines(lines)
 }
 
+function toPersistedClaudeRun(run: ClaudeRunContext): ClaudePersistedRun {
+  return {
+    runId: run.runId,
+    sessionKey: run.sessionKey,
+    status: run.status,
+    startedAtMs: run.startedAtMs,
+    updatedAtMs: run.updatedAtMs,
+    lastOutputAtMs: run.lastOutputAtMs,
+    completed: run.completed,
+    processLines: trimClaudeProcessLines(run.processLines),
+    assistantText: run.assistantText,
+    errorText: run.errorText,
+    exitCode: run.exitCode,
+  }
+}
+
+function normalizeClaudePersistedRun(value: unknown): ClaudePersistedRun | null {
+  const row = asRecord(value)
+  if (!row) return null
+  const runId = normalizeText(row.runId)
+  const sessionKey = normalizeText(row.sessionKey)
+  if (!runId || !sessionKey) return null
+  const startedAtMs = typeof row.startedAtMs === 'number' && Number.isFinite(row.startedAtMs)
+    ? Math.floor(row.startedAtMs)
+    : Date.now()
+  const updatedAtMs = typeof row.updatedAtMs === 'number' && Number.isFinite(row.updatedAtMs)
+    ? Math.floor(row.updatedAtMs)
+    : startedAtMs
+  const lastOutputAtMs = typeof row.lastOutputAtMs === 'number' && Number.isFinite(row.lastOutputAtMs)
+    ? Math.floor(row.lastOutputAtMs)
+    : updatedAtMs
+  const processLinesRaw = Array.isArray(row.processLines) ? row.processLines : []
+  const processLines = trimClaudeProcessLines(
+    processLinesRaw
+      .map((item) => normalizeText(item))
+      .filter((item) => item.length > 0),
+  )
+  return {
+    runId,
+    sessionKey,
+    status: normalizeText(row.status) || 'running',
+    startedAtMs,
+    updatedAtMs,
+    lastOutputAtMs,
+    completed: row.completed === true,
+    processLines,
+    assistantText: normalizeText(row.assistantText),
+    errorText: normalizeText(row.errorText),
+    exitCode: typeof row.exitCode === 'number' && Number.isFinite(row.exitCode) ? Math.floor(row.exitCode) : null,
+  }
+}
+
+async function readClaudeRunsState(): Promise<ClaudePersistedRun[]> {
+  try {
+    const raw = await readFile(CLAUDE_RUNS_STATE_PATH, 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    const record = asRecord(parsed)
+    const rows = Array.isArray(record?.runs) ? record.runs : []
+    const runs: ClaudePersistedRun[] = []
+    for (const row of rows) {
+      const normalized = normalizeClaudePersistedRun(row)
+      if (normalized) runs.push(normalized)
+    }
+    return runs
+  } catch {
+    return []
+  }
+}
+
+async function writeClaudeRunsState(runs: ClaudePersistedRun[]): Promise<void> {
+  await mkdir(dirname(CLAUDE_RUNS_STATE_PATH), { recursive: true })
+  await writeFile(
+    CLAUDE_RUNS_STATE_PATH,
+    JSON.stringify({ runs }, null, 2),
+    { mode: 0o600 },
+  )
+}
+
+async function persistClaudeRunsNow(): Promise<void> {
+  const snapshot = [...claudeRuns.values()].map(toPersistedClaudeRun)
+  await writeClaudeRunsState(snapshot)
+}
+
+function scheduleClaudeRunsPersist(delayMs = 280): void {
+  if (claudeRunsPersistTimer !== null) return
+  claudeRunsPersistTimer = setTimeout(() => {
+    claudeRunsPersistTimer = null
+    void persistClaudeRunsNow()
+  }, Math.max(80, delayMs))
+}
+
 function reapStaleClaudeRuns(): void {
   const now = Date.now()
+  let removed = false
   for (const [runId, run] of claudeRuns.entries()) {
     if (!run.completed) continue
     if (now - run.updatedAtMs > CLAUDE_RUN_CONTEXT_TTL_MS) {
       claudeRuns.delete(runId)
+      removed = true
     }
+  }
+  if (removed) {
+    scheduleClaudeRunsPersist()
   }
 }
 
@@ -2366,6 +2482,7 @@ async function finalizeClaudeRun(runId: string): Promise<void> {
   session.updatedAt = Date.now()
   session.lastMessagePreview = buildClaudePreview(session.messages)
   await writeClaudeState(state)
+  scheduleClaudeRunsPersist()
 }
 
 async function sendClaudeMessage(payload: Record<string, unknown>): Promise<{ runId: string }> {
@@ -2420,6 +2537,7 @@ async function sendClaudeMessage(payload: Record<string, unknown>): Promise<{ ru
     status: 'running',
     startedAtMs: Date.now(),
     updatedAtMs: Date.now(),
+    lastOutputAtMs: Date.now(),
     completed: false,
     processLines: [],
     rawOutput: '',
@@ -2430,6 +2548,7 @@ async function sendClaudeMessage(payload: Record<string, unknown>): Promise<{ ru
   }
   claudeRuns.set(runId, run)
   reapStaleClaudeRuns()
+  scheduleClaudeRunsPersist(120)
 
   const env = ensurePrefixPath({
     ...process.env,
@@ -2449,6 +2568,8 @@ async function sendClaudeMessage(payload: Record<string, unknown>): Promise<{ ru
     run.rawOutput = truncateText(run.rawOutput + String(chunk), CLAUDE_OUTPUT_CHARS_MAX)
     run.processLines = collectClaudeProcessLines(run.rawOutput)
     run.updatedAtMs = Date.now()
+    run.lastOutputAtMs = run.updatedAtMs
+    scheduleClaudeRunsPersist()
   }
   proc.stdout.on('data', appendOutput)
   proc.stderr.on('data', appendOutput)
@@ -2460,6 +2581,8 @@ async function sendClaudeMessage(payload: Record<string, unknown>): Promise<{ ru
     run.process = null
     run.assistantText = extractClaudeAssistantText(run.rawOutput)
     run.updatedAtMs = Date.now()
+    run.lastOutputAtMs = run.updatedAtMs
+    scheduleClaudeRunsPersist()
     await finalizeClaudeRun(runId)
   })
   proc.on('close', async (code) => {
@@ -2476,33 +2599,34 @@ async function sendClaudeMessage(payload: Record<string, unknown>): Promise<{ ru
     run.completed = true
     run.process = null
     run.updatedAtMs = Date.now()
+    run.lastOutputAtMs = run.updatedAtMs
+    scheduleClaudeRunsPersist()
     await finalizeClaudeRun(runId)
   })
   return { runId }
 }
 
-function getClaudeRunStatus(runId: string): Record<string, unknown> {
-  const run = claudeRuns.get(runId)
-  if (!run) {
-    return {
-      ok: false,
-      runId,
-      status: 'unknown',
-      completed: true,
-      error: 'Run not found',
-    }
-  }
+function buildClaudeWatchdogMessage(lastOutputAtMs: number, completed: boolean): string {
+  if (completed) return ''
+  const idleMs = Math.max(0, Date.now() - lastOutputAtMs)
+  if (idleMs < CLAUDE_NO_OUTPUT_WARN_MS) return ''
+  return `Claude long task still running, no new output for ${Math.floor(idleMs / 1000)}s`
+}
+
+function toClaudeStatusPayloadFromPersisted(run: ClaudePersistedRun): Record<string, unknown> {
   const processText = trimClaudeProcessLines(run.processLines).join('\n')
+  const watchdog = buildClaudeWatchdogMessage(run.lastOutputAtMs, run.completed)
   const result = {
     processText: truncateText(processText, 12_000),
     assistantText: truncateText(run.assistantText, 12_000),
     exitCode: run.exitCode,
+    watchdog: watchdog || null,
   }
   if (run.completed) {
     return {
       ok: run.status === 'completed',
       runId: run.runId,
-      status: run.status,
+      status: run.status || 'completed',
       completed: true,
       result,
       error: run.errorText || null,
@@ -2513,8 +2637,99 @@ function getClaudeRunStatus(runId: string): Record<string, unknown> {
     runId: run.runId,
     status: run.status || 'running',
     completed: false,
+    retryable: true,
+    detached: true,
     result,
-    error: null,
+    error: run.errorText || null,
+  }
+}
+
+function toClaudeStatusPayloadFromContext(run: ClaudeRunContext): Record<string, unknown> {
+  const payload = toClaudeStatusPayloadFromPersisted(toPersistedClaudeRun(run))
+  if (payload.completed !== true) {
+    payload.detached = false
+  }
+  return payload
+}
+
+function extractClaudeMessageText(message: ClaudeHistoryMessage): string {
+  const chunks: string[] = []
+  for (const item of message.content) {
+    if (item.type !== 'text') continue
+    const text = normalizeText(item.text)
+    if (text) chunks.push(text)
+  }
+  return chunks.join('\n\n').trim()
+}
+
+async function probeClaudeRunCompletionByHistory(run: ClaudePersistedRun): Promise<Record<string, unknown> | null> {
+  try {
+    const state = await readClaudeState()
+    const session = state.sessions.find((row) => row.key === run.sessionKey)
+    if (!session) return null
+    for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+      const row = session.messages[index]
+      if (row.role !== 'assistant') continue
+      if (row.timestamp < run.startedAtMs) continue
+      const text = extractClaudeMessageText(row)
+      if (!text) continue
+      const completed: ClaudePersistedRun = {
+        ...run,
+        status: 'completed',
+        completed: true,
+        assistantText: text,
+        errorText: '',
+        updatedAtMs: Date.now(),
+        lastOutputAtMs: Date.now(),
+      }
+      const rows = await readClaudeRunsState()
+      const nextRows = rows.map((item) => (item.runId === run.runId ? completed : item))
+      await writeClaudeRunsState(nextRows)
+      return {
+        ok: true,
+        runId: run.runId,
+        status: 'completed',
+        completed: true,
+        source: 'history-probe',
+        result: {
+          processText: truncateText(trimClaudeProcessLines(run.processLines).join('\n'), 12_000),
+          assistantText: truncateText(text, 12_000),
+          exitCode: run.exitCode,
+          watchdog: null,
+        },
+        error: null,
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function getClaudeRunStatus(runId: string): Promise<Record<string, unknown>> {
+  const run = claudeRuns.get(runId)
+  if (run) {
+    return toClaudeStatusPayloadFromContext(run)
+  }
+
+  const persistedRuns = await readClaudeRunsState()
+  const persisted = persistedRuns.find((item) => item.runId === runId)
+  if (persisted) {
+    if (persisted.completed) {
+      return toClaudeStatusPayloadFromPersisted(persisted)
+    }
+    const probed = await probeClaudeRunCompletionByHistory(persisted)
+    if (probed) return probed
+    return toClaudeStatusPayloadFromPersisted(persisted)
+  }
+
+  return {
+    ok: false,
+    runId,
+    status: 'unknown',
+    completed: false,
+    retryable: true,
+    error: 'Run state unavailable, please retry wait or refresh history',
   }
 }
 
@@ -2539,6 +2754,8 @@ async function abortClaudeRun(runId: string): Promise<boolean> {
   run.completed = true
   run.exitCode = 130
   run.process = null
+  run.lastOutputAtMs = Date.now()
+  scheduleClaudeRunsPersist()
   await finalizeClaudeRun(runId)
   return true
 }
@@ -3801,14 +4018,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         )
         const startedAt = Date.now()
         while (Date.now() - startedAt < waitTimeoutMs) {
-          const status = getClaudeRunStatus(runId)
+          const status = await getClaudeRunStatus(runId)
           if (status.completed === true) {
             setJson(res, 200, status)
             return
           }
           await sleepMs(250)
         }
-        setJson(res, 200, getClaudeRunStatus(runId))
+        setJson(res, 200, await getClaudeRunStatus(runId))
         return
       }
 

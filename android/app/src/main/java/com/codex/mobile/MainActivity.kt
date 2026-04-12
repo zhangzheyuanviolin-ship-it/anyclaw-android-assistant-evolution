@@ -174,24 +174,15 @@ class MainActivity : AppCompatActivity() {
             updateUiForCurrentTarget()
         }
         openClawNewChatButton.setOnClickListener {
-            startActivity(
-                Intent(this, OpenClawChatActivity::class.java).apply {
-                    val sessionKey = extractSessionFromCurrentUrl()
-                    if (!sessionKey.isNullOrBlank()) {
-                        putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionKey)
-                    }
-                },
-            )
+            currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
+            webView.loadUrl(buildOpenClawChatPageUrl(null))
+            updateUiForCurrentTarget()
         }
         tabOpenClawButton.setOnClickListener {
-            startActivity(
-                Intent(this, OpenClawChatActivity::class.java).apply {
-                    val sessionKey = extractSessionFromCurrentUrl()
-                    if (!sessionKey.isNullOrBlank()) {
-                        putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionKey)
-                    }
-                },
-            )
+            currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
+            val sessionKey = extractSessionFromCurrentUrl()
+            webView.loadUrl(buildOpenClawChatPageUrl(sessionKey))
+            updateUiForCurrentTarget()
         }
         tabCodexButton.setOnClickListener {
             currentUiTarget = OPEN_TARGET_CODEX_HOME
@@ -231,11 +222,6 @@ class MainActivity : AppCompatActivity() {
             else -> OPEN_TARGET_CODEX_HOME
         }
         if (setupStarted && webView.visibility == View.VISIBLE) {
-            if (isOpenClawChatUrl(targetUrl)) {
-                openNativeOpenClawChat(extractSessionFromUrl(targetUrl))
-                pendingLaunchUrl = null
-                return
-            }
             webView.loadUrl(targetUrl)
             pendingLaunchUrl = null
         }
@@ -261,11 +247,6 @@ class MainActivity : AppCompatActivity() {
                     isOpenClawChatUrl(targetUrl) -> OPEN_TARGET_OPENCLAW_SESSION
                     isClaudeChatUrl(targetUrl) -> OPEN_TARGET_CLAUDE_SESSION
                     else -> OPEN_TARGET_CODEX_HOME
-                }
-                if (isOpenClawChatUrl(targetUrl)) {
-                    openNativeOpenClawChat(extractSessionFromUrl(targetUrl))
-                    pendingLaunchUrl = null
-                    return
                 }
                 webView.loadUrl(targetUrl)
                 pendingLaunchUrl = null
@@ -827,11 +808,6 @@ class MainActivity : AppCompatActivity() {
             isClaudeChatUrl(launchUrl) -> OPEN_TARGET_CLAUDE_SESSION
             else -> OPEN_TARGET_CODEX_HOME
         }
-        if (isOpenClawChatUrl(launchUrl)) {
-            openNativeOpenClawChat(extractSessionFromUrl(launchUrl))
-            finish()
-            return
-        }
         updateUiForCurrentTarget()
         webView.loadUrl(launchUrl)
     }
@@ -870,15 +846,6 @@ class MainActivity : AppCompatActivity() {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
         when (target) {
-            OPEN_TARGET_OPENCLAW_SESSION -> {
-                startActivity(
-                    Intent(this, OpenClawChatActivity::class.java).apply {
-                        if (sessionId.isNotEmpty()) {
-                            putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, sessionId)
-                        }
-                    },
-                )
-            }
             OPEN_TARGET_CLAUDE_SESSION -> {
                 startActivity(
                     Intent(this, CliAgentChatActivity::class.java).apply {
@@ -903,17 +870,6 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             null
         }
-    }
-
-    private fun openNativeOpenClawChat(sessionKey: String?) {
-        startActivity(
-            Intent(this, OpenClawChatActivity::class.java).apply {
-                val normalized = sessionKey?.trim().orEmpty()
-                if (normalized.isNotEmpty()) {
-                    putExtra(OpenClawChatActivity.EXTRA_SESSION_KEY, normalized)
-                }
-            },
-        )
     }
 
     private fun hasExplicitTargetIntent(intent: Intent?): Boolean {
