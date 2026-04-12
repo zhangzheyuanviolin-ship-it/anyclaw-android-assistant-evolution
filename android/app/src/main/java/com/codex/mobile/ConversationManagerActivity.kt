@@ -356,6 +356,7 @@ class ConversationManagerActivity : AppCompatActivity() {
         if (row.source == SourceType.OPENCLAW) {
             startActivity(
                 Intent(this, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     putExtra(MainActivity.EXTRA_OPEN_TARGET, MainActivity.OPEN_TARGET_OPENCLAW_SESSION)
                     putExtra(MainActivity.EXTRA_SESSION_KEY, row.id)
                 },

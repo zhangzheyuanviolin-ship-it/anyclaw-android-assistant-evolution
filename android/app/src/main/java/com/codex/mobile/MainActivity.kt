@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
         const val OPEN_TARGET_CODEX_THREAD = "codex_thread"
         const val OPEN_TARGET_OPENCLAW_SESSION = "openclaw_session"
         const val OPEN_TARGET_CLAUDE_SESSION = "claude_session"
+        private const val OPENCLAW_LIGHTWEIGHT_ONLY_MODE = true
     }
 
     private lateinit var webView: WebView
@@ -604,6 +605,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun runSetup() {
         val explicitTarget = hasExplicitTargetIntent(intent)
+        val explicitOpenClawTarget = isOpenClawTargetIntent(intent)
         if (explicitTarget) {
             updateStatus("Checking local server…")
             val warmReady = serverManager.waitForServer(timeoutMs = 3500)
@@ -612,6 +614,15 @@ class MainActivity : AppCompatActivity() {
                     showReadyUi(explicitTarget = true)
                 }
                 return
+            }
+            if (explicitOpenClawTarget && OPENCLAW_LIGHTWEIGHT_ONLY_MODE) {
+                val quickStarted = runOpenClawLightweightQuickStart()
+                if (quickStarted) {
+                    runOnUiThread {
+                        showReadyUi(explicitTarget = true)
+                    }
+                    return
+                }
             }
         }
 
@@ -760,7 +771,7 @@ class MainActivity : AppCompatActivity() {
 
         // Step 7: Prepare OpenClaw local runtime and force-disconnect gateway to
         // avoid session lock contention in native chat mode.
-        if (openClawAvailable) {
+        if (openClawAvailable && !OPENCLAW_LIGHTWEIGHT_ONLY_MODE) {
             val isFreshOpenClawInstall = !hadOpenClawAtStart
             if (isFreshOpenClawInstall) {
                 updateStatus("Finalizing OpenClaw…", "Preparing local runtime")
@@ -842,6 +853,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun runOpenClawLightweightQuickStart(): Boolean {
+        return try {
+            updateStatus("Updating web UI…")
+            serverManager.installServerBundle { msg -> updateDetail(msg) }
+
+            updateStatus("Starting server…")
+            val started = serverManager.startServer()
+            if (!started) {
+                return false
+            }
+
+            updateStatus("Waiting for server…")
+            serverManager.waitForServer(timeoutMs = 45_000)
+        } catch (error: Exception) {
+            Log.w(TAG, "OpenClaw lightweight quick start failed: ${error.message}")
+            false
+        }
+    }
+
+    private fun isOpenClawTargetIntent(intent: Intent?): Boolean {
+        val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
+        return target == OPEN_TARGET_OPENCLAW_SESSION
+    }
+
     private fun redirectToExternalAgentIfNeeded(intent: Intent?): Boolean {
         val target = intent?.getStringExtra(EXTRA_OPEN_TARGET)?.trim().orEmpty()
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
@@ -880,11 +915,15 @@ class MainActivity : AppCompatActivity() {
     private fun updateUiForCurrentTarget() {
         val openClawActive = currentUiTarget == OPEN_TARGET_OPENCLAW_SESSION
         if (openClawActive) {
-            gatewayToggleButton.visibility = View.VISIBLE
+            gatewayToggleButton.visibility = if (OPENCLAW_LIGHTWEIGHT_ONLY_MODE) View.GONE else View.VISIBLE
             backToCodexButton.visibility = View.VISIBLE
             openClawNewChatButton.visibility = View.VISIBLE
-            startGatewayStatusMonitor()
-            refreshGatewayStatusAsync(announce = false)
+            if (OPENCLAW_LIGHTWEIGHT_ONLY_MODE) {
+                stopGatewayStatusMonitor()
+            } else {
+                startGatewayStatusMonitor()
+                refreshGatewayStatusAsync(announce = false)
+            }
         } else {
             gatewayToggleButton.visibility = View.GONE
             backToCodexButton.visibility = View.GONE

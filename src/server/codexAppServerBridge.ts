@@ -45,10 +45,13 @@ const OPENCLAW_RUN_WAIT_ATTEMPTS = 2
 const OPENCLAW_GATEWAY_CALL_MAX_RETRIES = 4
 const OPENCLAW_GATEWAY_RETRY_BACKOFF_MS = [300, 700, 1200, 1800]
 const OPENCLAW_NATIVE_STRICT_MODE = false
+const OPENCLAW_BACKEND_MODE = 'lightweight_only'
 const OPENCLAW_RUN_CONTEXT_TTL_MS = 6 * 60 * 60_000
 const OPENCLAW_RUN_CONTEXT_MAX = 400
 const OPENCLAW_HEARTBEAT_JOB_NAME = 'anyclaw-heartbeat-main'
 const OPENCLAW_HEARTBEAT_PROMPT = 'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.'
+const LIGHTWEIGHT_RUN_CONTEXT_TTL_MS = 2 * 60 * 60_000
+const LIGHTWEIGHT_RUN_CONTEXT_MAX = 400
 const CLAUDE_STATE_PATH = homeDir
   ? join(homeDir, '.pocketlobster', 'claude-web', 'sessions.json')
   : join(process.cwd(), '.pocketlobster', 'claude-web', 'sessions.json')
@@ -135,6 +138,16 @@ type LightweightState = {
   sessions: LightweightSession[]
 }
 
+type LightweightRunContext = {
+  runId: string
+  sessionKey: string
+  status: string
+  startedAtMs: number
+  updatedAtMs: number
+  completed: boolean
+  errorText: string
+}
+
 type LightweightModelConfig = {
   modelId: string
   modelName: string
@@ -219,6 +232,8 @@ type ClaudePersistedRun = {
 let openClawNativeReadyCacheValue: boolean | null = null
 let openClawNativeReadyCacheAtMs = 0
 const openClawNativeRuns = new Map<string, OpenClawNativeRunContext>()
+const lightweightRuns = new Map<string, LightweightRunContext>()
+const lightweightRunAbortRequested = new Set<string>()
 const claudeRuns = new Map<string, ClaudeRunContext>()
 let claudeRunsPersistTimer: NodeJS.Timeout | null = null
 
@@ -528,6 +543,9 @@ async function tryRunOpenClawGatewayCall(method: string, params: unknown): Promi
 }
 
 async function isNativeOpenClawReady(forceRefresh = false): Promise<boolean> {
+  if (isOpenClawLightweightOnlyMode()) {
+    return false
+  }
   const now = Date.now()
   if (
     !forceRefresh &&
@@ -741,6 +759,98 @@ function readPositiveInt(value: string | null, fallback: number): number {
   const normalized = Math.floor(parsed)
   if (normalized < 1) return fallback
   return normalized
+}
+
+function isOpenClawLightweightOnlyMode(): boolean {
+  return OPENCLAW_BACKEND_MODE === 'lightweight_only'
+}
+
+function pruneLightweightRuns(nowMs = Date.now()): void {
+  const cutoff = nowMs - LIGHTWEIGHT_RUN_CONTEXT_TTL_MS
+  for (const [runId, context] of lightweightRuns.entries()) {
+    if (context.updatedAtMs < cutoff) {
+      lightweightRuns.delete(runId)
+      lightweightRunAbortRequested.delete(runId)
+    }
+  }
+  if (lightweightRuns.size <= LIGHTWEIGHT_RUN_CONTEXT_MAX) return
+  const sorted = [...lightweightRuns.values()].sort((first, second) => first.updatedAtMs - second.updatedAtMs)
+  const overflow = lightweightRuns.size - LIGHTWEIGHT_RUN_CONTEXT_MAX
+  for (let index = 0; index < overflow; index += 1) {
+    const runId = sorted[index].runId
+    lightweightRuns.delete(runId)
+    lightweightRunAbortRequested.delete(runId)
+  }
+}
+
+function rememberLightweightRun(runId: string, sessionKey: string): LightweightRunContext {
+  const nowMs = Date.now()
+  const context: LightweightRunContext = {
+    runId,
+    sessionKey,
+    status: 'running',
+    startedAtMs: nowMs,
+    updatedAtMs: nowMs,
+    completed: false,
+    errorText: '',
+  }
+  lightweightRuns.set(runId, context)
+  pruneLightweightRuns(nowMs)
+  return context
+}
+
+function updateLightweightRun(runId: string, status: string, completed: boolean, errorText = ''): void {
+  const existing = lightweightRuns.get(runId)
+  if (!existing) return
+  existing.status = status.trim() || existing.status
+  existing.completed = completed
+  existing.errorText = errorText.trim()
+  existing.updatedAtMs = Date.now()
+  lightweightRuns.set(runId, existing)
+  if (completed) {
+    lightweightRunAbortRequested.delete(runId)
+  }
+  pruneLightweightRuns(existing.updatedAtMs)
+}
+
+function isLightweightRunAbortRequested(runId: string): boolean {
+  return lightweightRunAbortRequested.has(runId)
+}
+
+function findLatestRunningLightweightRun(sessionKey: string): string {
+  let picked: LightweightRunContext | null = null
+  for (const run of lightweightRuns.values()) {
+    if (run.sessionKey !== sessionKey || run.completed) continue
+    if (!picked || run.updatedAtMs > picked.updatedAtMs) {
+      picked = run
+    }
+  }
+  return picked?.runId ?? ''
+}
+
+function toLightweightRunWaitPayload(runId: string): Record<string, unknown> {
+  const context = lightweightRuns.get(runId)
+  if (!context) {
+    return {
+      ok: false,
+      runId,
+      status: 'unknown',
+      completed: false,
+      retryable: true,
+      source: 'lightweight',
+      error: 'Run state unavailable, retry wait or refresh history',
+    }
+  }
+  return {
+    ok: context.completed ? context.status === 'completed' : true,
+    runId,
+    status: context.status,
+    completed: context.completed,
+    retryable: !context.completed,
+    source: 'lightweight',
+    result: context.completed ? { source: 'lightweight', sessionKey: context.sessionKey } : null,
+    error: context.errorText || null,
+  }
 }
 
 function toOpenClawSessionSummary(row: Record<string, unknown>): Record<string, unknown> | null {
@@ -1360,7 +1470,12 @@ async function callProviderChatCompletions(
   return asRecord(parsed) ?? {}
 }
 
-async function runLightweightTurn(session: LightweightSession): Promise<void> {
+async function runLightweightTurn(
+  session: LightweightSession,
+  options?: {
+    isAborted?: () => boolean
+  },
+): Promise<void> {
   const model = await readLightweightModelConfig()
   session.model = model.modelId
   session.modelProvider = model.providerName
@@ -1374,6 +1489,9 @@ async function runLightweightTurn(session: LightweightSession): Promise<void> {
 
   let finalAssistantText = ''
   for (let step = 0; step < LIGHTWEIGHT_MAX_TOOL_STEPS; step += 1) {
+    if (options?.isAborted?.()) {
+      throw new Error('lightweight-run-aborted')
+    }
     const envelope = await callProviderChatCompletions(model, requestMessages)
     const choices = Array.isArray(envelope.choices) ? envelope.choices : []
     const firstChoice = asRecord(choices[0])
@@ -1398,6 +1516,9 @@ async function runLightweightTurn(session: LightweightSession): Promise<void> {
     })
 
     for (const call of toolCalls) {
+      if (options?.isAborted?.()) {
+        throw new Error('lightweight-run-aborted')
+      }
       const callRecord = asRecord(call)
       const callId = normalizeText(callRecord?.id) || randomUUID()
       const fn = asRecord(callRecord?.function)
@@ -1893,12 +2014,47 @@ function normalizeImageAttachmentsForLightweight(value: unknown): LightweightCon
   return items
 }
 
+async function runLightweightMessageInBackground(runId: string, sessionKey: string): Promise<void> {
+  const state = await readLightweightState()
+  const session = await ensureLightweightSession(state, sessionKey)
+  try {
+    await runLightweightTurn(session, {
+      isAborted: () => isLightweightRunAbortRequested(runId),
+    })
+    if (isLightweightRunAbortRequested(runId)) {
+      throw new Error('lightweight-run-aborted')
+    }
+    session.updatedAt = Date.now()
+    session.lastMessagePreview = buildSessionPreview(session.messages)
+    await writeLightweightState(state)
+    updateLightweightRun(runId, 'completed', true, '')
+  } catch (error) {
+    const message = getErrorMessage(error, '轻量调度执行失败')
+    const aborted = message === 'lightweight-run-aborted' || isLightweightRunAbortRequested(runId)
+    const renderedError = aborted ? '任务已中止。' : `任务执行失败：${message}`
+    session.messages.push({
+      role: 'assistant',
+      timestamp: Date.now(),
+      content: toTextContent(renderedError),
+    })
+    session.updatedAt = Date.now()
+    session.lastMessagePreview = buildSessionPreview(session.messages)
+    await writeLightweightState(state)
+    updateLightweightRun(runId, aborted ? 'aborted' : 'failed', true, renderedError)
+  }
+}
+
 async function sendLightweightMessage(payload: Record<string, unknown>): Promise<{ runId: string }> {
   const sessionKey = normalizeText(payload.sessionKey)
   const message = normalizeText(payload.message)
   const attachments = normalizeImageAttachmentsForLightweight(payload.attachments)
   if (!sessionKey || (!message && attachments.length === 0)) {
     throw new Error('Missing sessionKey and message/attachments')
+  }
+
+  const activeRunId = findLatestRunningLightweightRun(sessionKey)
+  if (activeRunId) {
+    throw new Error('已有任务正在执行，请等待完成或先终止当前任务')
   }
 
   const state = await readLightweightState()
@@ -1917,13 +2073,13 @@ async function sendLightweightMessage(payload: Record<string, unknown>): Promise
 
   session.updatedAt = Date.now()
   session.lastMessagePreview = buildSessionPreview(session.messages)
-  await runLightweightTurn(session)
-  session.updatedAt = Date.now()
-  session.lastMessagePreview = buildSessionPreview(session.messages)
   await writeLightweightState(state)
+  const runId = `lite_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  rememberLightweightRun(runId, session.key)
+  void runLightweightMessageInBackground(runId, session.key)
 
   return {
-    runId: `lite_${Date.now().toString(36)}`,
+    runId,
   }
 }
 
@@ -3267,6 +3423,17 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/openclaw-api/health') {
+        if (isOpenClawLightweightOnlyMode()) {
+          setJson(res, 200, {
+            ok: true,
+            data: {
+              mode: 'lightweight-proxy',
+              backendMode: OPENCLAW_BACKEND_MODE,
+              gatewayRequired: false,
+            },
+          })
+          return
+        }
         const nativeHealth = await tryRunOpenClawGatewayCall('health', {})
         if (nativeHealth !== null) {
           const record = asRecord(nativeHealth) ?? {}
@@ -3306,6 +3473,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
       if (req.method === 'GET' && url.pathname === '/openclaw-api/sessions') {
         const limit = readPositiveInt(url.searchParams.get('limit'), 200)
+        if (isOpenClawLightweightOnlyMode()) {
+          const sessions = await listLightweightSessions(limit)
+          setJson(res, 200, { sessions })
+          return
+        }
         if (await isNativeOpenClawReady()) {
           try {
             const nativeSessions = await runOpenClawGatewayCall(
@@ -3363,6 +3535,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
         const limit = readPositiveInt(String(payload?.limit ?? ''), 60)
+        if (isOpenClawLightweightOnlyMode()) {
+          const result = await readLightweightHistory(sessionKey, limit)
+          setJson(res, 200, result)
+          return
+        }
         if (await isNativeOpenClawReady()) {
           try {
             const nativeHistory = await runOpenClawGatewayCall(
@@ -3424,6 +3601,18 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           8_000,
           240_000,
         )
+
+        if (isOpenClawLightweightOnlyMode()) {
+          const run = await sendLightweightMessage({
+            sessionKey,
+            message,
+            deliver: payload?.deliver === true,
+            attachments: attachments.length > 0 ? attachments : undefined,
+            timeoutMs: sendTimeoutMs,
+          })
+          setJson(res, 200, { ok: true, runId: run.runId })
+          return
+        }
 
         if (await isNativeOpenClawReady()) {
           try {
@@ -3496,6 +3685,20 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           2_000,
           120_000,
         )
+
+        if (isOpenClawLightweightOnlyMode()) {
+          const startedAt = Date.now()
+          while (Date.now() - startedAt < waitTimeoutMs) {
+            const status = toLightweightRunWaitPayload(runId)
+            if (status.completed === true) {
+              setJson(res, 200, status)
+              return
+            }
+            await sleepMs(220)
+          }
+          setJson(res, 200, toLightweightRunWaitPayload(runId))
+          return
+        }
 
         if (await isNativeOpenClawReady()) {
           const waitAttempts = OPENCLAW_RUN_WAIT_ATTEMPTS
@@ -3597,6 +3800,26 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/heartbeat/trigger') {
         const payload = asRecord(await readJsonBody(req))
         const sessionKey = normalizeText(payload?.sessionKey)
+
+        if (isOpenClawLightweightOnlyMode()) {
+          if (!sessionKey) {
+            setJson(res, 400, { ok: false, error: 'Missing sessionKey for heartbeat' })
+            return
+          }
+          const run = await sendLightweightMessage({
+            sessionKey,
+            message: OPENCLAW_HEARTBEAT_PROMPT,
+            deliver: false,
+          })
+          setJson(res, 200, {
+            ok: true,
+            status: 'submitted',
+            runId: run.runId,
+            source: 'lightweight',
+            message: 'Heartbeat lightweight task submitted',
+          })
+          return
+        }
 
         if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
           setOpenClawNativeUnavailable(
@@ -3715,6 +3938,29 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const runId = normalizeText(payload?.runId)
         if (!sessionKey && !runId) {
           setJson(res, 400, { error: 'Missing sessionKey or runId' })
+          return
+        }
+
+        if (isOpenClawLightweightOnlyMode()) {
+          const targetRunId = runId || findLatestRunningLightweightRun(sessionKey)
+          if (!targetRunId) {
+            setJson(res, 200, {
+              ok: false,
+              aborted: false,
+              status: 'not_found',
+              source: 'lightweight',
+            })
+            return
+          }
+          lightweightRunAbortRequested.add(targetRunId)
+          updateLightweightRun(targetRunId, 'aborted', true, '任务已中止')
+          setJson(res, 200, {
+            ok: true,
+            aborted: true,
+            status: 'aborted',
+            runId: targetRunId,
+            source: 'lightweight',
+          })
           return
         }
 
@@ -3856,6 +4102,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const label = normalizeText(payload?.label) || '新会话'
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
+        if (isOpenClawLightweightOnlyMode()) {
+          const sessionKey = await createLightweightSession(label, currentSessionKey)
+          setJson(res, 200, { sessionKey })
+          return
+        }
         if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
           setOpenClawNativeUnavailable(
             res,
@@ -3875,6 +4126,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'POST' && url.pathname === '/openclaw-api/sessions/reset') {
         const payload = asRecord(await readJsonBody(req))
         const currentSessionKey = normalizeText(payload?.currentSessionKey)
+        if (isOpenClawLightweightOnlyMode()) {
+          const sessionKey = await resetLightweightSession(currentSessionKey)
+          setJson(res, 200, { sessionKey })
+          return
+        }
         if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
           setOpenClawNativeUnavailable(
             res,
@@ -3897,6 +4153,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const label = normalizeText(payload?.label)
         if (!sessionKey || !label) {
           setJson(res, 400, { error: 'Missing sessionKey or label' })
+          return
+        }
+        if (isOpenClawLightweightOnlyMode()) {
+          await renameLightweightSession(sessionKey, label)
+          setJson(res, 200, { ok: true })
           return
         }
         if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
@@ -3925,6 +4186,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const sessionKey = normalizeText(payload?.sessionKey)
         if (!sessionKey) {
           setJson(res, 400, { error: 'Missing sessionKey' })
+          return
+        }
+        if (isOpenClawLightweightOnlyMode()) {
+          await deleteLightweightSession(sessionKey)
+          setJson(res, 200, { ok: true })
           return
         }
         if (OPENCLAW_NATIVE_STRICT_MODE && !(await isNativeOpenClawReady())) {
