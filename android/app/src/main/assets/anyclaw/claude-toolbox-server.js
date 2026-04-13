@@ -11,9 +11,25 @@ const DEFAULT_SEARCH_LIMIT = 6;
 const WEB_BRIDGE_URL = process.env.ANYCLAW_WEB_BRIDGE_URL || "http://127.0.0.1:18926/web/call";
 const TAVILY_BASE_URL = process.env.ANYCLAW_TAVILY_BASE_URL || "https://api.tavily.com/search";
 const EXA_MCP_URL = process.env.ANYCLAW_EXA_MCP_URL || "https://mcp.exa.ai/mcp";
+const EXA_API_BASE_URL = (process.env.ANYCLAW_EXA_API_BASE_URL || "https://api.exa.ai").replace(/\/$/, "");
 const GITHUB_API_BASE = (process.env.ANYCLAW_GITHUB_API_BASE_URL || "https://api.github.com").replace(/\/$/, "");
 const WORKSPACE_ROOT = path.resolve(process.env.ANYCLAW_WORKSPACE_ROOT || path.join(process.env.HOME || "/tmp", ".openclaw", "workspace"));
 const MCP_CONFIG_PATH = process.env.ANYCLAW_MCP_CONFIG_PATH || "";
+const DEFAULT_EXA_MCP_TOOLS = [
+  "web_search_exa",
+  "web_search_advanced_exa",
+  "get_code_context_exa",
+  "company_research_exa",
+  "people_search_exa",
+  "crawling_exa",
+  "deep_researcher_start",
+  "deep_researcher_check",
+  "web_fetch_exa"
+];
+const EXA_MCP_TOOLS = String(process.env.ANYCLAW_EXA_MCP_TOOLS || DEFAULT_EXA_MCP_TOOLS.join(","))
+  .split(",")
+  .map((item) => String(item || "").trim())
+  .filter(Boolean);
 
 const SEARCH_URLS = {
   google: (query) => "https://www.google.com/search?q=" + encodeURIComponent(query) + "&hl=en",
@@ -142,6 +158,86 @@ const TOOL_DEFS = [
     tavilyApiKey: { type: "string" },
     searchDepth: { type: "string" }
   }, ["query"]),
+  tool("anyclaw_exa_search_advanced", "Exa MCP advanced search wrapper.", {
+    query: { type: "string", minLength: 1 },
+    numResults: { type: "integer", minimum: 1, maximum: 10 },
+    type: { type: "string" },
+    category: { type: "string" },
+    includeDomainsJson: { type: "string" },
+    excludeDomainsJson: { type: "string" },
+    maxAgeHours: { type: "integer", minimum: -1, maximum: 720 },
+    enableSummary: { type: "boolean" },
+    enableHighlights: { type: "boolean" },
+    highlightsQuery: { type: "string" },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 60000 },
+    apiKey: { type: "string" }
+  }, ["query"]),
+  tool("anyclaw_exa_code_context", "Exa MCP code context retrieval.", {
+    query: { type: "string", minLength: 1 },
+    numResults: { type: "integer", minimum: 1, maximum: 10 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 60000 },
+    apiKey: { type: "string" }
+  }, ["query"]),
+  tool("anyclaw_exa_people_search", "Exa MCP people search.", {
+    query: { type: "string", minLength: 1 },
+    numResults: { type: "integer", minimum: 1, maximum: 10 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 60000 },
+    apiKey: { type: "string" }
+  }, ["query"]),
+  tool("anyclaw_exa_company_research", "Exa MCP company research.", {
+    companyName: { type: "string", minLength: 1 },
+    numResults: { type: "integer", minimum: 1, maximum: 10 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 60000 },
+    apiKey: { type: "string" }
+  }, ["companyName"]),
+  tool("anyclaw_exa_crawling", "Exa MCP URL crawling/content fetch.", {
+    urlsJson: { type: "string" },
+    urls: { type: "array", items: { type: "string" } },
+    maxCharacters: { type: "integer", minimum: 500, maximum: 120000 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 120000 },
+    apiKey: { type: "string" }
+  }),
+  tool("anyclaw_exa_deep_research_start", "Exa MCP deep researcher start.", {
+    instructions: { type: "string", minLength: 1 },
+    model: { type: "string" },
+    outputSchemaJson: { type: "string" },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 60000 },
+    apiKey: { type: "string" }
+  }, ["instructions"]),
+  tool("anyclaw_exa_deep_research_check", "Exa MCP deep researcher check.", {
+    researchId: { type: "string", minLength: 1 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 60000 },
+    apiKey: { type: "string" }
+  }, ["researchId"]),
+  tool("anyclaw_exa_search_api", "Exa REST /search with deep/deep-reasoning/outputSchema support.", {
+    query: { type: "string", minLength: 1 },
+    type: { type: "string" },
+    numResults: { type: "integer", minimum: 1, maximum: 25 },
+    category: { type: "string" },
+    contentsJson: { type: "string" },
+    contentType: { type: "string" },
+    contentMaxCharacters: { type: "integer", minimum: 200, maximum: 120000 },
+    outputSchemaJson: { type: "string" },
+    includeDomainsJson: { type: "string" },
+    excludeDomainsJson: { type: "string" },
+    startPublishedDate: { type: "string" },
+    endPublishedDate: { type: "string" },
+    startCrawlDate: { type: "string" },
+    endCrawlDate: { type: "string" },
+    maxAgeHours: { type: "integer", minimum: -1, maximum: 720 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 120000 },
+    apiKey: { type: "string" }
+  }, ["query"]),
+  tool("anyclaw_exa_contents_api", "Exa REST /contents for known URLs.", {
+    urlsJson: { type: "string" },
+    urls: { type: "array", items: { type: "string" } },
+    mode: { type: "string" },
+    maxCharacters: { type: "integer", minimum: 200, maximum: 120000 },
+    highlightsQuery: { type: "string" },
+    maxAgeHours: { type: "integer", minimum: -1, maximum: 720 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 120000 },
+    apiKey: { type: "string" }
+  }),
 
   tool("start_web", "Start persistent web session.", {
     url: { type: "string" },
@@ -988,6 +1084,33 @@ function isTimeoutLikeError(error) {
   return text.includes("abort") || text.includes("timeout") || text.includes("timed out");
 }
 
+function tryParseJsonText(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function readStringArrayArg(args, key) {
+  const raw = args?.[key];
+  if (Array.isArray(raw)) {
+    return raw.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) return [];
+    if (text.startsWith("[")) {
+      const arr = parseJsonArray(text).map((item) => String(item || "").trim()).filter(Boolean);
+      if (arr.length > 0) return arr;
+    }
+    return text.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
+}
+
 function parseMcpSsePayload(rawText) {
   const lines = String(rawText || "").split("\n");
   let lastData = "";
@@ -1006,8 +1129,8 @@ function parseMcpSsePayload(rawText) {
 }
 
 function resolveTavilyApiKey(args) {
-  return toStringSafe(args.apiKey, "").trim() ||
-    toStringSafe(args.tavilyApiKey, "").trim() ||
+  return toStringSafe(args.tavilyApiKey, "").trim() ||
+    toStringSafe(args.apiKey, "").trim() ||
     String(
       process.env.TAVILY_API_KEY ||
         process.env.ANYCLAW_TAVILY_API_KEY ||
@@ -1031,6 +1154,129 @@ function readExaLimit(args) {
   const numResults = toInt(args.numResults, NaN);
   const value = Number.isFinite(maxResults) ? maxResults : (Number.isFinite(numResults) ? numResults : DEFAULT_SEARCH_LIMIT);
   return clampInt(value, 1, 10);
+}
+
+function buildExaMcpUrl() {
+  const raw = String(EXA_MCP_URL || "").trim() || "https://mcp.exa.ai/mcp";
+  try {
+    const url = new URL(raw);
+    if (!url.searchParams.get("tools") && EXA_MCP_TOOLS.length > 0) {
+      url.searchParams.set("tools", EXA_MCP_TOOLS.join(","));
+    }
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
+async function callExaMcpTool(toolName, toolArgs, args) {
+  const timeoutMs = clampInt(toInt(args.timeoutMs, 25000), 3000, 120000);
+  const apiKey = resolveExaApiKey(args);
+  const mcpUrl = buildExaMcpUrl();
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    "User-Agent": "AnyClawSearchSuite/1.4"
+  };
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+  const rpcPayload = {
+    jsonrpc: "2.0",
+    id: Date.now(),
+    method: "tools/call",
+    params: {
+      name: toolName,
+      arguments: asObject(toolArgs)
+    }
+  };
+  const response = await fetchWithTimeout(mcpUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(rpcPayload)
+  }, timeoutMs);
+  if (!response.ok) {
+    throw new Error(`exa_http_${response.status}`);
+  }
+  const payload = parseMcpSsePayload(response.text);
+  const error = asObject(payload.error);
+  if (error.message) {
+    throw new Error(`exa_mcp_error:${String(error.message)}`);
+  }
+  const result = asObject(payload.result);
+  const content = Array.isArray(result.content) ? result.content : [];
+  const text = content
+    .filter((row) => asObject(row).type === "text")
+    .map((row) => toStringSafe(asObject(row).text, ""))
+    .join("\n")
+    .trim();
+  const parsed = tryParseJsonText(text);
+  return {
+    mcpUrl,
+    text,
+    parsed,
+    result,
+    usedApiKey: apiKey ? 1 : 0
+  };
+}
+
+function pickExaSearchType(raw) {
+  const value = String(raw || "auto").trim().toLowerCase();
+  if (["auto", "fast", "deep", "deep-reasoning", "neural"].includes(value)) return value;
+  return "auto";
+}
+
+function normalizeExaHits(rows, limit = 10) {
+  const list = Array.isArray(rows) ? rows : [];
+  const hits = [];
+  for (const row of list) {
+    const obj = asObject(row);
+    const title = toStringSafe(obj.title, "").trim();
+    const url = normalizeUrl(toStringSafe(obj.url, "").trim(), null);
+    const snippet = toStringSafe(obj.text, "").trim() ||
+      toStringSafe(obj.summary, "").trim() ||
+      toStringSafe(obj.highlight, "").trim();
+    if (!title || !url) continue;
+    hits.push({
+      title,
+      url,
+      snippet: snippet.slice(0, 800),
+      source: "exa",
+      confidence: 0.85
+    });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+function buildExaAdvancedMcpArgs(args) {
+  const query = requireQuery(args);
+  const payload = {
+    query,
+    numResults: readExaLimit(args)
+  };
+  const typeRaw = toStringSafe(args.type, "").trim().toLowerCase();
+  if (["auto", "fast", "neural"].includes(typeRaw)) {
+    payload.type = typeRaw;
+  }
+  const category = toStringSafe(args.category, "").trim().toLowerCase();
+  if (category) payload.category = category;
+  const includeDomains = readStringArrayArg(args, "includeDomainsJson");
+  if (includeDomains.length > 0) payload.includeDomains = includeDomains;
+  const excludeDomains = readStringArrayArg(args, "excludeDomainsJson");
+  if (excludeDomains.length > 0) payload.excludeDomains = excludeDomains;
+  const maxAgeHours = toInt(args.maxAgeHours, NaN);
+  if (Number.isFinite(maxAgeHours)) payload.maxAgeHours = clampInt(maxAgeHours, -1, 720);
+  if (toBool(args.enableSummary, false)) payload.enableSummary = true;
+  if (toBool(args.enableHighlights, false)) payload.enableHighlights = true;
+  const highlightsQuery = toStringSafe(args.highlightsQuery, "").trim();
+  if (highlightsQuery) payload.highlightsQuery = highlightsQuery;
+  const dateKeys = ["startPublishedDate", "endPublishedDate", "startCrawlDate", "endCrawlDate"];
+  for (const key of dateKeys) {
+    const value = toStringSafe(args[key], "").trim();
+    if (value) payload[key] = value;
+  }
+  return payload;
 }
 
 async function runTavilySearch(args, extra = {}) {
@@ -1114,60 +1360,222 @@ async function runTavilySearch(args, extra = {}) {
 async function runExaSearch(args) {
   const query = requireQuery(args);
   const maxResults = readExaLimit(args);
-  const timeoutMs = clampInt(toInt(args.timeoutMs, 20000), 3000, 60000);
-  const apiKey = resolveExaApiKey(args);
-  const headers = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/event-stream",
-    "User-Agent": "AnyClawSearchSuite/1.4"
-  };
-  if (apiKey) {
-    headers["x-api-key"] = apiKey;
-  }
-  const rpcPayload = {
-    jsonrpc: "2.0",
-    id: Date.now(),
-    method: "tools/call",
-    params: {
-      name: "web_search_exa",
-      arguments: {
-        query,
-        numResults: maxResults
-      }
-    }
-  };
-  const response = await fetchWithTimeout(EXA_MCP_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(rpcPayload)
-  }, timeoutMs);
-  if (!response.ok) {
-    throw new Error(`exa_http_${response.status}`);
-  }
-  const payload = parseMcpSsePayload(response.text);
-  const error = asObject(payload.error);
-  if (error.message) {
-    throw new Error(`exa_mcp_error:${String(error.message)}`);
-  }
-  const result = asObject(payload.result);
-  const content = Array.isArray(result.content) ? result.content : [];
-  const text = content
-    .filter((row) => asObject(row).type === "text")
-    .map((row) => toStringSafe(asObject(row).text, ""))
-    .join("\n")
-    .trim();
+  const call = await callExaMcpTool("web_search_exa", {
+    query,
+    numResults: maxResults
+  }, args);
+  const text = call.text;
   const titleCount = (text.match(/^Title:\s+/gm) || []).length;
   return {
     ok: true,
     engine: "exa",
     query,
-    requestUrl: EXA_MCP_URL,
+    requestUrl: call.mcpUrl,
     count: titleCount,
     text: text || "No result",
     raw: text || undefined,
-    usedApiKey: apiKey ? 1 : 0,
+    usedApiKey: call.usedApiKey,
     fallbackUsed: false,
     finalQualityLabel: titleCount >= 3 ? "good" : titleCount > 0 ? "mixed" : "noisy"
+  };
+}
+
+async function runExaMcpPassthrough(mcpToolName, mcpArgs, args) {
+  const call = await callExaMcpTool(mcpToolName, mcpArgs, args);
+  const parsedObj = asObject(call.parsed);
+  const hits = normalizeExaHits(parsedObj.results, 10);
+  const text = call.text || renderHitsText(hits) || safeStringify(parsedObj);
+  return {
+    ok: true,
+    engine: "exa",
+    mcpTool: mcpToolName,
+    requestUrl: call.mcpUrl,
+    usedApiKey: call.usedApiKey,
+    count: hits.length,
+    results: hits,
+    data: Object.keys(parsedObj).length ? parsedObj : call.result,
+    text: String(text || "").slice(0, 16000),
+    finalQualityLabel: hits.length >= 3 ? "good" : hits.length > 0 ? "mixed" : "noisy"
+  };
+}
+
+async function runExaSearchApi(args) {
+  const query = requireQuery(args);
+  const apiKey = resolveExaApiKey(args);
+  if (!apiKey) {
+    return {
+      ok: false,
+      engine: "exa_rest",
+      error: "missing_exa_api_key",
+      message: "Provide args.apiKey or set EXA_API_KEY/ANYCLAW_EXA_API_KEY"
+    };
+  }
+  const timeoutMs = clampInt(toInt(args.timeoutMs, 45000), 3000, 120000);
+  const numResults = clampInt(toInt(args.numResults, readExaLimit(args)), 1, 25);
+  const type = pickExaSearchType(args.type);
+  const requestUrl = `${EXA_API_BASE_URL}/search`;
+  const body = {
+    query,
+    type,
+    num_results: numResults
+  };
+  const category = toStringSafe(args.category, "").trim();
+  if (category) body.category = category;
+
+  const contentsJson = parseJsonObject(toStringSafe(args.contentsJson, ""));
+  if (Object.keys(contentsJson).length > 0) {
+    body.contents = contentsJson;
+  } else {
+    const contentType = toStringSafe(args.contentType, "").trim().toLowerCase();
+    const contentMax = clampInt(toInt(args.contentMaxCharacters, 12000), 200, 120000);
+    if (contentType === "highlights") {
+      body.contents = { highlights: { max_characters: contentMax } };
+    } else if (contentType === "text") {
+      body.contents = { text: { max_characters: contentMax } };
+    }
+  }
+
+  const outputSchema = parseJsonObject(toStringSafe(args.outputSchemaJson, ""));
+  if (Object.keys(outputSchema).length > 0) {
+    body.outputSchema = outputSchema;
+  }
+  const includeDomains = readStringArrayArg(args, "includeDomainsJson");
+  if (includeDomains.length > 0) body.includeDomains = includeDomains;
+  const excludeDomains = readStringArrayArg(args, "excludeDomainsJson");
+  if (excludeDomains.length > 0) body.excludeDomains = excludeDomains;
+  const dateKeys = ["startPublishedDate", "endPublishedDate", "startCrawlDate", "endCrawlDate"];
+  for (const key of dateKeys) {
+    const value = toStringSafe(args[key], "").trim();
+    if (value) body[key] = value;
+  }
+  const maxAgeHours = toInt(args.maxAgeHours, NaN);
+  if (Number.isFinite(maxAgeHours)) body.maxAgeHours = clampInt(maxAgeHours, -1, 720);
+
+  const response = await fetchJson(requestUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "User-Agent": "AnyClawSearchSuite/1.4"
+    },
+    body: JSON.stringify(body)
+  }, timeoutMs);
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      engine: "exa_rest",
+      requestUrl,
+      status: response.status,
+      error: `exa_rest_http_${response.status}`,
+      detail: String(response.text || "").slice(0, 1200)
+    };
+  }
+
+  const payload = asObject(response.data);
+  const rows = Array.isArray(payload.results) ? payload.results : [];
+  const hits = normalizeExaHits(rows, numResults);
+  const output = asObject(payload.output);
+  const text = hits.length > 0
+    ? renderHitsText(hits)
+    : toStringSafe(payload.answer, "").trim() || safeStringify(payload).slice(0, 16000);
+  return {
+    ok: true,
+    engine: "exa_rest",
+    requestUrl,
+    query,
+    searchType: type,
+    count: rows.length,
+    results: hits,
+    output: Object.keys(output).length ? output : undefined,
+    answer: toStringSafe(payload.answer, "").trim() || undefined,
+    text,
+    usedApiKey: 1,
+    finalQualityLabel: hits.length >= 3 ? "good" : hits.length > 0 ? "mixed" : "noisy"
+  };
+}
+
+async function runExaContentsApi(args) {
+  const apiKey = resolveExaApiKey(args);
+  if (!apiKey) {
+    return {
+      ok: false,
+      engine: "exa_rest",
+      error: "missing_exa_api_key",
+      message: "Provide args.apiKey or set EXA_API_KEY/ANYCLAW_EXA_API_KEY"
+    };
+  }
+  const urls = readStringArrayArg(args, "urls")
+    .concat(readStringArrayArg(args, "urlsJson"))
+    .filter((url) => /^https?:\/\//i.test(url));
+  const unique = Array.from(new Set(urls));
+  if (unique.length === 0) {
+    throw new Error("urls/urlsJson must contain at least one http(s) URL");
+  }
+  const mode = toStringSafe(args.mode, "text").trim().toLowerCase();
+  const maxCharacters = clampInt(toInt(args.maxCharacters, 12000), 200, 120000);
+  const timeoutMs = clampInt(toInt(args.timeoutMs, 45000), 3000, 120000);
+  const requestUrl = `${EXA_API_BASE_URL}/contents`;
+  const body = {
+    urls: unique
+  };
+  if (mode === "highlights") {
+    body.highlights = {
+      max_characters: maxCharacters,
+      query: toStringSafe(args.highlightsQuery, "").trim() || undefined
+    };
+  } else {
+    body.text = { max_characters: maxCharacters };
+  }
+  const maxAgeHours = toInt(args.maxAgeHours, NaN);
+  if (Number.isFinite(maxAgeHours)) body.maxAgeHours = clampInt(maxAgeHours, -1, 720);
+
+  const response = await fetchJson(requestUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "User-Agent": "AnyClawSearchSuite/1.4"
+    },
+    body: JSON.stringify(body)
+  }, timeoutMs);
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      engine: "exa_rest",
+      requestUrl,
+      status: response.status,
+      error: `exa_contents_http_${response.status}`,
+      detail: String(response.text || "").slice(0, 1200)
+    };
+  }
+
+  const payload = asObject(response.data);
+  const rows = Array.isArray(payload.results) ? payload.results : [];
+  const results = rows.slice(0, 10).map((row) => {
+    const obj = asObject(row);
+    return {
+      title: toStringSafe(obj.title, "").trim(),
+      url: normalizeUrl(toStringSafe(obj.url, "").trim(), null),
+      text: String(
+        toStringSafe(obj.text, "").trim() ||
+          toStringSafe(obj.summary, "").trim() ||
+          toStringSafe(obj.content, "").trim(),
+      ).slice(0, 1000)
+    };
+  }).filter((row) => row.url);
+  return {
+    ok: true,
+    engine: "exa_rest",
+    requestUrl,
+    mode,
+    count: rows.length,
+    results,
+    text: results.length > 0
+      ? results.map((row, idx) => `${idx + 1}. ${row.title || row.url} | ${row.url}`).join("\n")
+      : "No result",
+    usedApiKey: 1
   };
 }
 
@@ -1364,7 +1772,12 @@ async function callTool(name, args) {
         return await runExaSearch(args);
       } catch (error) {
         if (isTimeoutLikeError(error)) {
-          return await runTavilySearch(args, {
+          const tavilyArgs = {
+            ...args,
+            apiKey: "",
+            tavilyApiKey: toStringSafe(args.tavilyApiKey, "").trim()
+          };
+          return await runTavilySearch(tavilyArgs, {
             fallbackUsed: true,
             fallbackFrom: "exa_timeout",
             fallbackReason: String(error?.message || error)
@@ -1374,12 +1787,65 @@ async function callTool(name, args) {
           ok: false,
           engine: "exa",
           query: toStringSafe(args.query, "").trim(),
-          requestUrl: EXA_MCP_URL,
+          requestUrl: buildExaMcpUrl(),
           error: "exa_search_failed",
           detail: String(error?.message || error).slice(0, 500)
         };
       }
     }
+    case "anyclaw_exa_search_advanced": {
+      const mcpArgs = buildExaAdvancedMcpArgs(args);
+      return await runExaMcpPassthrough("web_search_advanced_exa", mcpArgs, args);
+    }
+    case "anyclaw_exa_code_context":
+      return await runExaMcpPassthrough("get_code_context_exa", {
+        query: requireQuery(args),
+        numResults: readExaLimit(args)
+      }, args);
+    case "anyclaw_exa_people_search":
+      return await runExaMcpPassthrough("people_search_exa", {
+        query: requireQuery(args),
+        numResults: readExaLimit(args)
+      }, args);
+    case "anyclaw_exa_company_research": {
+      const companyName = toStringSafe(args.companyName, "").trim();
+      if (!companyName) throw new Error("companyName is required");
+      return await runExaMcpPassthrough("company_research_exa", {
+        companyName,
+        numResults: readExaLimit(args)
+      }, args);
+    }
+    case "anyclaw_exa_crawling": {
+      const urls = readStringArrayArg(args, "urls")
+        .concat(readStringArrayArg(args, "urlsJson"))
+        .filter((url) => /^https?:\/\//i.test(url));
+      const uniqueUrls = Array.from(new Set(urls));
+      if (uniqueUrls.length === 0) throw new Error("urls/urlsJson must contain at least one http(s) URL");
+      const maxCharacters = clampInt(toInt(args.maxCharacters, 12000), 500, 120000);
+      return await runExaMcpPassthrough("crawling_exa", {
+        urls: uniqueUrls,
+        maxCharacters
+      }, args);
+    }
+    case "anyclaw_exa_deep_research_start": {
+      const instructions = toStringSafe(args.instructions, "").trim();
+      if (!instructions) throw new Error("instructions is required");
+      const mcpArgs = { instructions };
+      const model = toStringSafe(args.model, "").trim();
+      if (model) mcpArgs.model = model;
+      const outputSchema = parseJsonObject(toStringSafe(args.outputSchemaJson, ""));
+      if (Object.keys(outputSchema).length > 0) mcpArgs.outputSchema = outputSchema;
+      return await runExaMcpPassthrough("deep_researcher_start", mcpArgs, args);
+    }
+    case "anyclaw_exa_deep_research_check": {
+      const researchId = toStringSafe(args.researchId, "").trim();
+      if (!researchId) throw new Error("researchId is required");
+      return await runExaMcpPassthrough("deep_researcher_check", { researchId }, args);
+    }
+    case "anyclaw_exa_search_api":
+      return await runExaSearchApi(args);
+    case "anyclaw_exa_contents_api":
+      return await runExaContentsApi(args);
 
     case "start_web": {
       const headers = parseJsonObject(toStringSafe(args.headersJson, ""));

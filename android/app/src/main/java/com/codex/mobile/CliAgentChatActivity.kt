@@ -488,6 +488,7 @@ class CliAgentChatActivity : AppCompatActivity() {
                 out.appendLine("7) 网页自动化调用请使用 mcp__anyclaw_toolbox__start_web/stop_web/web_*，避免裸 start_web/web_*。")
                 out.appendLine("8) 若 anyclaw_ 工具不可见或调用失败，必须输出 MCP_TOOLBOX_STATUS=UNAVAILABLE，并给出 reason 与 step。")
                 out.appendLine("9) 联网检索优先 mcp__anyclaw_toolbox__anyclaw_exa_search；若 Exa 超时将自动回退到 Tavily。")
+                out.appendLine("10) 需要 Exa 高级能力时，优先使用 anyclaw_exa_search_advanced / anyclaw_exa_search_api / anyclaw_exa_contents_api。")
             }
             out.appendLine()
             out.appendLine("自动注入预检结果：")
@@ -1035,6 +1036,8 @@ class CliAgentChatActivity : AppCompatActivity() {
             "anyclaw_device_screen_info",
             "anyclaw_search_web",
             "anyclaw_exa_search",
+            "anyclaw_exa_search_advanced",
+            "anyclaw_exa_search_api",
             "anyclaw_duckduckgo_search",
             "anyclaw_github_repo",
             "anyclaw_github_repo_info",
@@ -1189,6 +1192,8 @@ class CliAgentChatActivity : AppCompatActivity() {
             .put("ANYCLAW_WEB_BRIDGE_URL", "http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")
             .put("ANYCLAW_TAVILY_BASE_URL", "https://api.tavily.com/search")
             .put("ANYCLAW_EXA_MCP_URL", "https://mcp.exa.ai/mcp")
+            .put("ANYCLAW_EXA_MCP_TOOLS", "web_search_exa,web_search_advanced_exa,get_code_context_exa,company_research_exa,people_search_exa,crawling_exa,deep_researcher_start,deep_researcher_check,web_fetch_exa")
+            .put("ANYCLAW_EXA_API_BASE_URL", "https://api.exa.ai")
             .put("ANYCLAW_GITHUB_API_BASE_URL", "https://api.github.com")
             .put("ANYCLAW_WORKSPACE_ROOT", "${paths.homeDir}/.openclaw/workspace")
             .put("ANYCLAW_ALLOW_SHARED_STORAGE", if (options.allowSharedStorage) "1" else "0")
