@@ -10,6 +10,7 @@ const MAX_STDIO_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SEARCH_LIMIT = 6;
 const WEB_BRIDGE_URL = process.env.ANYCLAW_WEB_BRIDGE_URL || "http://127.0.0.1:18926/web/call";
 const TAVILY_BASE_URL = process.env.ANYCLAW_TAVILY_BASE_URL || "https://api.tavily.com/search";
+const EXA_MCP_URL = process.env.ANYCLAW_EXA_MCP_URL || "https://mcp.exa.ai/mcp";
 const GITHUB_API_BASE = (process.env.ANYCLAW_GITHUB_API_BASE_URL || "https://api.github.com").replace(/\/$/, "");
 const WORKSPACE_ROOT = path.resolve(process.env.ANYCLAW_WORKSPACE_ROOT || path.join(process.env.HOME || "/tmp", ".openclaw", "workspace"));
 const MCP_CONFIG_PATH = process.env.ANYCLAW_MCP_CONFIG_PATH || "";
@@ -131,6 +132,15 @@ const TOOL_DEFS = [
     maxResults: { type: "integer", minimum: 1, maximum: 10 },
     searchDepth: { type: "string" },
     apiKey: { type: "string" }
+  }, ["query"]),
+  tool("anyclaw_exa_search", "Exa MCP web search. On timeout, auto-fallbacks to Tavily search.", {
+    query: { type: "string", minLength: 1 },
+    maxResults: { type: "integer", minimum: 1, maximum: 10 },
+    numResults: { type: "integer", minimum: 1, maximum: 10 },
+    timeoutMs: { type: "integer", minimum: 3000, maximum: 60000 },
+    apiKey: { type: "string" },
+    tavilyApiKey: { type: "string" },
+    searchDepth: { type: "string" }
   }, ["query"]),
 
   tool("start_web", "Start persistent web session.", {
@@ -973,6 +983,194 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isTimeoutLikeError(error) {
+  const text = String(error?.message || error || "").toLowerCase();
+  return text.includes("abort") || text.includes("timeout") || text.includes("timed out");
+}
+
+function parseMcpSsePayload(rawText) {
+  const lines = String(rawText || "").split("\n");
+  let lastData = "";
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || !line.startsWith("data:")) continue;
+    const chunk = line.slice(5).trim();
+    if (chunk) lastData = chunk;
+  }
+  if (!lastData) return {};
+  try {
+    return asObject(JSON.parse(lastData));
+  } catch {
+    return {};
+  }
+}
+
+function resolveTavilyApiKey(args) {
+  return toStringSafe(args.apiKey, "").trim() ||
+    toStringSafe(args.tavilyApiKey, "").trim() ||
+    String(
+      process.env.TAVILY_API_KEY ||
+        process.env.ANYCLAW_TAVILY_API_KEY ||
+        readMcpConfigEnvValue(["ANYCLAW_TAVILY_API_KEY", "TAVILY_API_KEY"]) ||
+        "",
+    ).trim();
+}
+
+function resolveExaApiKey(args) {
+  return toStringSafe(args.apiKey, "").trim() ||
+    String(
+      process.env.EXA_API_KEY ||
+        process.env.ANYCLAW_EXA_API_KEY ||
+        readMcpConfigEnvValue(["ANYCLAW_EXA_API_KEY", "EXA_API_KEY"]) ||
+        "",
+    ).trim();
+}
+
+function readExaLimit(args) {
+  const maxResults = toInt(args.maxResults, NaN);
+  const numResults = toInt(args.numResults, NaN);
+  const value = Number.isFinite(maxResults) ? maxResults : (Number.isFinite(numResults) ? numResults : DEFAULT_SEARCH_LIMIT);
+  return clampInt(value, 1, 10);
+}
+
+async function runTavilySearch(args, extra = {}) {
+  const query = requireQuery(args);
+  const maxResults = clampInt(toInt(args.maxResults, DEFAULT_SEARCH_LIMIT), 1, 10);
+  const depthRaw = toStringSafe(args.searchDepth, "advanced").trim().toLowerCase();
+  const searchDepth = depthRaw === "basic" ? "basic" : "advanced";
+  const apiKey = resolveTavilyApiKey(args);
+  if (!apiKey) {
+    return {
+      ok: false,
+      engine: "tavily",
+      error: "missing_tavily_api_key",
+      message: "Provide args.apiKey/tavilyApiKey or set TAVILY_API_KEY/ANYCLAW_TAVILY_API_KEY",
+      ...extra
+    };
+  }
+  const response = await fetchJson(TAVILY_BASE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "AnyClawSearchSuite/1.4"
+    },
+    body: JSON.stringify({
+      api_key: apiKey,
+      query,
+      search_depth: searchDepth,
+      max_results: maxResults,
+      include_answer: true,
+      include_images: false,
+      include_raw_content: false
+    })
+  }, 45000);
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      engine: "tavily",
+      query,
+      requestUrl: TAVILY_BASE_URL,
+      status: response.status,
+      error: `tavily_http_${response.status}`,
+      detail: String(response.text || "").slice(0, 800),
+      ...extra
+    };
+  }
+
+  const rows = Array.isArray(response.data?.results) ? response.data.results : [];
+  const results = [];
+  for (const row of rows) {
+    const obj = asObject(row);
+    const title = toStringSafe(obj.title, "").trim();
+    const url = normalizeUrl(toStringSafe(obj.url, "").trim(), null);
+    const snippet = toStringSafe(obj.content, "").trim();
+    const score = Number(obj.score);
+    if (!title || !url) continue;
+    results.push({
+      title,
+      url,
+      snippet,
+      source: "tavily",
+      confidence: Number.isFinite(score) ? Math.max(0.2, Math.min(0.99, score)) : 0.8
+    });
+    if (results.length >= maxResults) break;
+  }
+
+  return {
+    ok: true,
+    engine: "tavily",
+    query,
+    requestUrl: TAVILY_BASE_URL,
+    count: results.length,
+    results,
+    answer: toStringSafe(response.data?.answer, ""),
+    text: renderHitsText(results),
+    finalQualityLabel: results.length >= 3 ? "good" : results.length > 0 ? "mixed" : "noisy",
+    ...extra
+  };
+}
+
+async function runExaSearch(args) {
+  const query = requireQuery(args);
+  const maxResults = readExaLimit(args);
+  const timeoutMs = clampInt(toInt(args.timeoutMs, 20000), 3000, 60000);
+  const apiKey = resolveExaApiKey(args);
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    "User-Agent": "AnyClawSearchSuite/1.4"
+  };
+  if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+  const rpcPayload = {
+    jsonrpc: "2.0",
+    id: Date.now(),
+    method: "tools/call",
+    params: {
+      name: "web_search_exa",
+      arguments: {
+        query,
+        numResults: maxResults
+      }
+    }
+  };
+  const response = await fetchWithTimeout(EXA_MCP_URL, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(rpcPayload)
+  }, timeoutMs);
+  if (!response.ok) {
+    throw new Error(`exa_http_${response.status}`);
+  }
+  const payload = parseMcpSsePayload(response.text);
+  const error = asObject(payload.error);
+  if (error.message) {
+    throw new Error(`exa_mcp_error:${String(error.message)}`);
+  }
+  const result = asObject(payload.result);
+  const content = Array.isArray(result.content) ? result.content : [];
+  const text = content
+    .filter((row) => asObject(row).type === "text")
+    .map((row) => toStringSafe(asObject(row).text, ""))
+    .join("\n")
+    .trim();
+  const titleCount = (text.match(/^Title:\s+/gm) || []).length;
+  return {
+    ok: true,
+    engine: "exa",
+    query,
+    requestUrl: EXA_MCP_URL,
+    count: titleCount,
+    text: text || "No result",
+    raw: text || undefined,
+    usedApiKey: apiKey ? 1 : 0,
+    fallbackUsed: false,
+    finalQualityLabel: titleCount >= 3 ? "good" : titleCount > 0 ? "mixed" : "noisy"
+  };
+}
+
 async function callTool(name, args) {
   switch (name) {
     case "anyclaw_device_exec": {
@@ -1159,85 +1357,28 @@ async function callTool(name, args) {
         error: run.error
       };
     }
-    case "anyclaw_tavily_search": {
-      const query = requireQuery(args);
-      const maxResults = clampInt(toInt(args.maxResults, DEFAULT_SEARCH_LIMIT), 1, 10);
-      const depthRaw = toStringSafe(args.searchDepth, "advanced").trim().toLowerCase();
-      const searchDepth = depthRaw === "basic" ? "basic" : "advanced";
-      const apiKey = toStringSafe(args.apiKey, "").trim() ||
-        String(
-          process.env.TAVILY_API_KEY ||
-            process.env.ANYCLAW_TAVILY_API_KEY ||
-            readMcpConfigEnvValue(["ANYCLAW_TAVILY_API_KEY", "TAVILY_API_KEY"]) ||
-            "",
-        ).trim();
-      if (!apiKey) {
+    case "anyclaw_tavily_search":
+      return await runTavilySearch(args);
+    case "anyclaw_exa_search": {
+      try {
+        return await runExaSearch(args);
+      } catch (error) {
+        if (isTimeoutLikeError(error)) {
+          return await runTavilySearch(args, {
+            fallbackUsed: true,
+            fallbackFrom: "exa_timeout",
+            fallbackReason: String(error?.message || error)
+          });
+        }
         return {
           ok: false,
-          engine: "tavily",
-          error: "missing_tavily_api_key",
-          message: "Provide args.apiKey or set TAVILY_API_KEY/ANYCLAW_TAVILY_API_KEY"
+          engine: "exa",
+          query: toStringSafe(args.query, "").trim(),
+          requestUrl: EXA_MCP_URL,
+          error: "exa_search_failed",
+          detail: String(error?.message || error).slice(0, 500)
         };
       }
-      const response = await fetchJson(TAVILY_BASE_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": "AnyClawSearchSuite/1.4"
-        },
-        body: JSON.stringify({
-          api_key: apiKey,
-          query,
-          search_depth: searchDepth,
-          max_results: maxResults,
-          include_answer: true,
-          include_images: false,
-          include_raw_content: false
-        })
-      }, 45000);
-
-      if (!response.ok) {
-        return {
-          ok: false,
-          engine: "tavily",
-          query,
-          requestUrl: TAVILY_BASE_URL,
-          status: response.status,
-          error: `tavily_http_${response.status}`,
-          detail: String(response.text || "").slice(0, 800)
-        };
-      }
-
-      const rows = Array.isArray(response.data?.results) ? response.data.results : [];
-      const results = [];
-      for (const row of rows) {
-        const obj = asObject(row);
-        const title = toStringSafe(obj.title, "").trim();
-        const url = normalizeUrl(toStringSafe(obj.url, "").trim(), null);
-        const snippet = toStringSafe(obj.content, "").trim();
-        const score = Number(obj.score);
-        if (!title || !url) continue;
-        results.push({
-          title,
-          url,
-          snippet,
-          source: "tavily",
-          confidence: Number.isFinite(score) ? Math.max(0.2, Math.min(0.99, score)) : 0.8
-        });
-        if (results.length >= maxResults) break;
-      }
-
-      return {
-        ok: true,
-        engine: "tavily",
-        query,
-        requestUrl: TAVILY_BASE_URL,
-        count: results.length,
-        results,
-        answer: toStringSafe(response.data?.answer, ""),
-        text: renderHitsText(results),
-        finalQualityLabel: results.length >= 3 ? "good" : results.length > 0 ? "mixed" : "noisy"
-      };
     }
 
     case "start_web": {
