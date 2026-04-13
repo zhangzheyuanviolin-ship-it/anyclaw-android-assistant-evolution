@@ -243,6 +243,10 @@
     <string name="openclaw_native_waiting_server">本地服务未就绪，正在尝试恢复…</string>
     <string name="openclaw_native_server_recover">打开主界面恢复服务</string>
     <string name="openclaw_native_run_status_prefix">运行状态：</string>
+    <string name="openclaw_native_toggle_thinking_on">思考显示：开</string>
+    <string name="openclaw_native_toggle_thinking_off">思考显示：关</string>
+    <string name="openclaw_native_toggle_tool_on">工具显示：开</string>
+    <string name="openclaw_native_toggle_tool_off">工具显示：关</string>
     <string name="shizuku_revoke_hint">如需彻底撤销授权：点击“打开 Shizuku 应用”，在其中关闭对口袋大龙虾的授权。</string>
     <string name="shizuku_not_installed">未检测到 Shizuku 应用，系统命令通道不可用。</string>
     <string name="shizuku_service_not_running">检测到 Shizuku 已安装，但服务未运行。请先在 Shizuku 内启动服务。</string>

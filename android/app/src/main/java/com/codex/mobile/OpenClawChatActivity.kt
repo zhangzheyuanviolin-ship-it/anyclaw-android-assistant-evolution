@@ -1,6 +1,7 @@
 package com.codex.mobile
 
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -25,6 +26,9 @@ class OpenClawChatActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_SESSION_KEY = "com.codex.mobile.extra.OPENCLAW_SESSION_KEY"
+        private const val PREFS_NAME = "openclaw_native_chat_prefs"
+        private const val PREF_SHOW_THINKING = "show_thinking"
+        private const val PREF_SHOW_TOOL_EXECUTION = "show_tool_execution"
         private const val HEARTBEAT_PROMPT =
             "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. " +
                 "Do not infer or repeat old tasks from prior chats. " +
@@ -48,6 +52,16 @@ class OpenClawChatActivity : AppCompatActivity() {
         val message: String,
     )
 
+    private enum class ProcessKind {
+        THINKING,
+        TOOL,
+    }
+
+    private data class ProcessRow(
+        val kind: ProcessKind,
+        val text: String,
+    )
+
     private lateinit var tvSession: TextView
     private lateinit var tvStatus: TextView
     private lateinit var listView: ListView
@@ -59,6 +73,8 @@ class OpenClawChatActivity : AppCompatActivity() {
     private lateinit var btnReset: Button
     private lateinit var btnHeartbeat: Button
     private lateinit var btnAbort: Button
+    private lateinit var btnToggleThinking: Button
+    private lateinit var btnToggleToolExecution: Button
     private lateinit var btnTabOpenClaw: Button
     private lateinit var btnTabCodex: Button
     private lateinit var btnTabClaude: Button
@@ -93,6 +109,11 @@ class OpenClawChatActivity : AppCompatActivity() {
     private var sessionId: String = ""
     private var sessionTitle: String = ""
     private var pendingRunStatus: String = "idle"
+    private var showThinkingProcess: Boolean = true
+    private var showToolExecutionProcess: Boolean = true
+    private val prefs: SharedPreferences by lazy {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,6 +130,8 @@ class OpenClawChatActivity : AppCompatActivity() {
         btnReset = findViewById(R.id.btnOpenClawReset)
         btnHeartbeat = findViewById(R.id.btnOpenClawHeartbeat)
         btnAbort = findViewById(R.id.btnOpenClawAbort)
+        btnToggleThinking = findViewById(R.id.btnOpenClawToggleThinking)
+        btnToggleToolExecution = findViewById(R.id.btnOpenClawToggleToolExecution)
         btnTabOpenClaw = findViewById(R.id.btnOpenClawTabOpenClaw)
         btnTabCodex = findViewById(R.id.btnOpenClawTabCodex)
         btnTabClaude = findViewById(R.id.btnOpenClawTabClaude)
@@ -122,6 +145,8 @@ class OpenClawChatActivity : AppCompatActivity() {
         btnReset.setOnClickListener { onResetSessionPressed() }
         btnHeartbeat.setOnClickListener { onHeartbeatPressed() }
         btnAbort.setOnClickListener { onAbortPressed() }
+        btnToggleThinking.setOnClickListener { onToggleThinkingPressed() }
+        btnToggleToolExecution.setOnClickListener { onToggleToolExecutionPressed() }
 
         btnTabOpenClaw.isEnabled = false
         btnTabCodex.setOnClickListener {
@@ -141,6 +166,7 @@ class OpenClawChatActivity : AppCompatActivity() {
             finish()
         }
 
+        loadDisplayPreferences()
         renderUi()
     }
 
@@ -343,6 +369,32 @@ class OpenClawChatActivity : AppCompatActivity() {
         postRender()
     }
 
+    private fun onToggleThinkingPressed() {
+        showThinkingProcess = !showThinkingProcess
+        saveDisplayPreferences()
+        refreshNow(showErrors = false)
+        postRender()
+    }
+
+    private fun onToggleToolExecutionPressed() {
+        showToolExecutionProcess = !showToolExecutionProcess
+        saveDisplayPreferences()
+        refreshNow(showErrors = false)
+        postRender()
+    }
+
+    private fun loadDisplayPreferences() {
+        showThinkingProcess = prefs.getBoolean(PREF_SHOW_THINKING, true)
+        showToolExecutionProcess = prefs.getBoolean(PREF_SHOW_TOOL_EXECUTION, true)
+    }
+
+    private fun saveDisplayPreferences() {
+        prefs.edit()
+            .putBoolean(PREF_SHOW_THINKING, showThinkingProcess)
+            .putBoolean(PREF_SHOW_TOOL_EXECUTION, showToolExecutionProcess)
+            .apply()
+    }
+
     private fun submitPrompt(text: String, echoAsUser: Boolean) {
         if (sendingInFlight) return
         if (sessionKey.isBlank()) {
@@ -523,13 +575,17 @@ class OpenClawChatActivity : AppCompatActivity() {
                         next += DisplayMessage(role = "OpenClaw", text = text)
                     }
                     val processLines = extractProcessContent(content)
-                    processLines.forEach { line ->
-                        next += DisplayMessage(role = getString(R.string.cli_process_role), text = line)
+                    processLines.forEach { process ->
+                        if (shouldShowProcessRow(process.kind)) {
+                            next += DisplayMessage(role = getString(R.string.cli_process_role), text = process.text)
+                        }
                     }
                 }
                 role.equals("toolResult", ignoreCase = true) || role.equals("toolUse", ignoreCase = true) -> {
-                    val fallback = text.ifBlank { row.toString() }
-                    next += DisplayMessage(role = getString(R.string.cli_process_role), text = fallback)
+                    if (showToolExecutionProcess) {
+                        val fallback = text.ifBlank { row.toString() }
+                        next += DisplayMessage(role = getString(R.string.cli_process_role), text = fallback)
+                    }
                 }
             }
         }
@@ -557,29 +613,48 @@ class OpenClawChatActivity : AppCompatActivity() {
         return rows.joinToString("\n\n").trim()
     }
 
-    private fun extractProcessContent(content: JSONArray?): List<String> {
+    private fun shouldShowProcessRow(kind: ProcessKind): Boolean {
+        return when (kind) {
+            ProcessKind.THINKING -> showThinkingProcess
+            ProcessKind.TOOL -> showToolExecutionProcess
+        }
+    }
+
+    private fun extractProcessContent(content: JSONArray?): List<ProcessRow> {
         if (content == null) return emptyList()
-        val rows = mutableListOf<String>()
+        val rows = mutableListOf<ProcessRow>()
         for (index in 0 until content.length()) {
             val item = content.optJSONObject(index) ?: continue
             val type = item.optString("type", "").trim().lowercase(Locale.getDefault())
             when (type) {
                 "thinking" -> {
                     val text = item.optString("thinking", "").trim()
-                    if (text.isNotBlank()) rows += "思考: $text"
+                    if (text.isNotBlank()) rows += ProcessRow(
+                        kind = ProcessKind.THINKING,
+                        text = "思考: $text",
+                    )
                 }
                 "redacted_thinking" -> {
-                    rows += "思考: [模型返回了加密思考片段]"
+                    rows += ProcessRow(
+                        kind = ProcessKind.THINKING,
+                        text = "思考: [模型返回了加密思考片段]",
+                    )
                 }
                 "toolcall", "tool_use" -> {
                     val name = item.optString("name", "").trim().ifBlank { "unknown_tool" }
-                    rows += "工具调用: $name"
+                    rows += ProcessRow(
+                        kind = ProcessKind.TOOL,
+                        text = "工具调用: $name",
+                    )
                 }
                 "toolresult", "tool_result" -> {
                     val text = item.optString("text", "").trim().ifBlank {
                         item.opt("content")?.toString()?.trim().orEmpty()
                     }
-                    rows += if (text.isBlank()) "工具结果已返回" else "工具结果: $text"
+                    rows += ProcessRow(
+                        kind = ProcessKind.TOOL,
+                        text = if (text.isBlank()) "工具结果已返回" else "工具结果: $text",
+                    )
                 }
             }
         }
@@ -621,6 +696,18 @@ class OpenClawChatActivity : AppCompatActivity() {
         btnRename.isEnabled = sessionKey.isNotBlank()
         btnReset.isEnabled = !sendingInFlight
         btnNewSession.isEnabled = !sendingInFlight
+        btnToggleThinking.isEnabled = true
+        btnToggleToolExecution.isEnabled = true
+        btnToggleThinking.text = if (showThinkingProcess) {
+            getString(R.string.openclaw_native_toggle_thinking_on)
+        } else {
+            getString(R.string.openclaw_native_toggle_thinking_off)
+        }
+        btnToggleToolExecution.text = if (showToolExecutionProcess) {
+            getString(R.string.openclaw_native_toggle_tool_on)
+        } else {
+            getString(R.string.openclaw_native_toggle_tool_off)
+        }
 
         adapter.notifyDataSetChanged()
         if (messages.isNotEmpty()) {
