@@ -86,7 +86,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isOpenClawLightweightOnlyMode(): Boolean {
-        return BuildConfig.APPLICATION_ID == "com.codex.mobile.pocketlobster.beta"
+        return packageName == "com.codex.mobile.pocketlobster.beta"
     }
 
     private val storagePermissionLauncher =
