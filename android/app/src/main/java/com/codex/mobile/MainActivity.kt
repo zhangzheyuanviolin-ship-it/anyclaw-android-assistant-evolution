@@ -44,7 +44,6 @@ class MainActivity : AppCompatActivity() {
         const val OPEN_TARGET_CODEX_THREAD = "codex_thread"
         const val OPEN_TARGET_OPENCLAW_SESSION = "openclaw_session"
         const val OPEN_TARGET_CLAUDE_SESSION = "claude_session"
-        private const val OPENCLAW_LIGHTWEIGHT_ONLY_MODE = true
     }
 
     private lateinit var webView: WebView
@@ -84,6 +83,10 @@ class MainActivity : AppCompatActivity() {
             refreshGatewayStatusAsync(announce = false)
             gatewayStatusHandler.postDelayed(this, 7000)
         }
+    }
+
+    private fun isOpenClawLightweightOnlyMode(): Boolean {
+        return BuildConfig.APPLICATION_ID == "com.codex.mobile.pocketlobster.beta"
     }
 
     private val storagePermissionLauncher =
@@ -615,7 +618,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 return
             }
-            if (explicitOpenClawTarget && OPENCLAW_LIGHTWEIGHT_ONLY_MODE) {
+            if (explicitOpenClawTarget && isOpenClawLightweightOnlyMode()) {
                 val quickStarted = runOpenClawLightweightQuickStart()
                 if (quickStarted) {
                     runOnUiThread {
@@ -772,12 +775,12 @@ class MainActivity : AppCompatActivity() {
 
         // Step 7: Prepare OpenClaw local runtime and force-disconnect gateway to
         // avoid session lock contention in native chat mode.
-        if (openClawAvailable && !OPENCLAW_LIGHTWEIGHT_ONLY_MODE) {
+        if (openClawAvailable && !isOpenClawLightweightOnlyMode()) {
             val isFreshOpenClawInstall = !hadOpenClawAtStart
             if (isFreshOpenClawInstall) {
-                updateStatus("Finalizing OpenClaw…", "Preparing local runtime")
+                updateStatus("Finalizing OpenClaw…", "Preparing gateway runtime")
             } else {
-                updateStatus("Refreshing OpenClaw runtime…", "Switching to local mode")
+                updateStatus("Refreshing OpenClaw runtime…", "Switching to gateway mode")
             }
             startOpenClawServicesSync()
         }
@@ -845,9 +848,8 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Configuring OpenClaw…")
             serverManager.configureOpenClawAuth()
 
-            updateStatus("Stopping OpenClaw gateway…", "Using Android native local session mode")
-            serverManager.disconnectOpenClawGateway()
-            true
+            updateStatus("Starting OpenClaw gateway…", "Using gateway + Web chat mode")
+            serverManager.reconnectOpenClawGateway()
         } catch (error: Exception) {
             Log.e(TAG, "OpenClaw startup failed", error)
             false
@@ -928,10 +930,10 @@ class MainActivity : AppCompatActivity() {
     private fun updateUiForCurrentTarget() {
         val openClawActive = currentUiTarget == OPEN_TARGET_OPENCLAW_SESSION
         if (openClawActive) {
-            gatewayToggleButton.visibility = if (OPENCLAW_LIGHTWEIGHT_ONLY_MODE) View.GONE else View.VISIBLE
+            gatewayToggleButton.visibility = if (isOpenClawLightweightOnlyMode()) View.GONE else View.VISIBLE
             backToCodexButton.visibility = View.VISIBLE
             openClawNewChatButton.visibility = View.VISIBLE
-            if (OPENCLAW_LIGHTWEIGHT_ONLY_MODE) {
+            if (isOpenClawLightweightOnlyMode()) {
                 stopGatewayStatusMonitor()
             } else {
                 startGatewayStatusMonitor()
