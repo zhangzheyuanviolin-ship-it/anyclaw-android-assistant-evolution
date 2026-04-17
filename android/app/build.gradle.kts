@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 194
-        versionName = "1.0.26-gateway-init-routing-fix-v194"
+        versionCode = 195
+        versionName = "1.0.26-gateway-init-routing-fix-v195"
     }
 
     flavorDimensions += "channel"
