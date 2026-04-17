@@ -26,7 +26,8 @@ class CodexServerManager(private val context: Context) {
         private const val TAG = "CodexServerManager"
         const val SERVER_PORT = 18923
         private const val PROXY_PORT = 18924
-        private const val CODEX_VERSION = "0.104.0"
+        private const val CODEX_VERSION = "0.121.0"
+        private const val CLAUDE_CODE_VERSION = "2.1.112"
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
@@ -231,6 +232,24 @@ class CodexServerManager(private val context: Context) {
         val pkg = File(paths.prefixDir, "lib/node_modules/@anthropic-ai/claude-code")
         if (pkg.exists()) return true
         return runCapture("command -v claude >/dev/null 2>&1 && echo yes || echo no") == "yes"
+    }
+
+    fun getInstalledCodexVersion(): String {
+        val paths = BootstrapInstaller.getPaths(context)
+        val pkg = File(paths.prefixDir, "lib/node_modules/@openai/codex/package.json")
+        if (!pkg.exists()) return ""
+        return runCatching {
+            JSONObject(pkg.readText()).optString("version", "").trim()
+        }.getOrDefault("")
+    }
+
+    fun getInstalledClaudeCodeVersion(): String {
+        val paths = BootstrapInstaller.getPaths(context)
+        val pkg = File(paths.prefixDir, "lib/node_modules/@anthropic-ai/claude-code/package.json")
+        if (!pkg.exists()) return ""
+        return runCatching {
+            JSONObject(pkg.readText()).optString("version", "").trim()
+        }.getOrDefault("")
     }
 
     fun isServerBundleInstalled(): Boolean = false
@@ -2382,9 +2401,9 @@ EOF
         val prefix = paths.prefixDir
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
 
-        onProgress("Installing Codex CLI…")
+        onProgress("Installing Codex CLI $CODEX_VERSION …")
         val codexCode = runInPrefix(
-            "node $npmCli install -g @openai/codex 2>&1",
+            "node $npmCli install -g @openai/codex@$CODEX_VERSION 2>&1",
             onOutput = { onProgress(it) },
         )
         if (codexCode != 0) {
@@ -2401,9 +2420,9 @@ EOF
         val prefix = paths.prefixDir
         val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
 
-        onProgress("Installing Claude Code CLI…")
+        onProgress("Installing Claude Code CLI $CLAUDE_CODE_VERSION …")
         val code = runInPrefix(
-            "node $npmCli install -g @anthropic-ai/claude-code 2>&1",
+            "node $npmCli install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION 2>&1",
             onOutput = { onProgress(it) },
         )
         if (code != 0) {

@@ -20,6 +20,8 @@ data class AgentChatSession(
     val title: String,
     val updatedAtMs: Long,
     val messages: List<AgentChatMessage>,
+    val nativeSessionId: String = "",
+    val nativeSessionMode: String = "",
 )
 
 object AgentSessionStore {
@@ -59,6 +61,8 @@ object AgentSessionStore {
             title = safeTitle,
             updatedAtMs = now,
             messages = emptyList(),
+            nativeSessionId = "",
+            nativeSessionMode = "",
         )
         saveSession(context, session)
         return session
@@ -96,6 +100,23 @@ object AgentSessionStore {
         return next
     }
 
+    fun updateNativeSession(
+        context: Context,
+        agentId: ExternalAgentId,
+        sessionId: String,
+        nativeSessionId: String,
+        nativeSessionMode: String,
+    ): AgentChatSession? {
+        val base = loadSession(context, agentId, sessionId) ?: return null
+        val next = base.copy(
+            updatedAtMs = System.currentTimeMillis(),
+            nativeSessionId = nativeSessionId.trim(),
+            nativeSessionMode = nativeSessionMode.trim(),
+        )
+        saveSession(context, next)
+        return next
+    }
+
     fun deleteSession(context: Context, agentId: ExternalAgentId, sessionId: String): Boolean {
         val file = sessionFile(context, agentId, sessionId)
         return file.exists() && file.delete()
@@ -121,6 +142,12 @@ object AgentSessionStore {
         out.appendLine(session.title)
         out.appendLine("source=${session.agentId.value}")
         out.appendLine("sessionId=${session.sessionId}")
+        if (session.nativeSessionId.isNotBlank()) {
+            out.appendLine("nativeSessionId=${session.nativeSessionId}")
+        }
+        if (session.nativeSessionMode.isNotBlank()) {
+            out.appendLine("nativeSessionMode=${session.nativeSessionMode}")
+        }
         out.appendLine()
         session.messages.forEach { msg ->
             val role = msg.role.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
@@ -147,6 +174,8 @@ object AgentSessionStore {
         val sessionId = root.optString("sessionId", "").trim()
         val title = root.optString("title", "").trim().ifEmpty { sessionId }
         val updatedAtMs = root.optLong("updatedAtMs", 0L)
+        val nativeSessionId = root.optString("nativeSessionId", "").trim()
+        val nativeSessionMode = root.optString("nativeSessionMode", "").trim()
         val messages = mutableListOf<AgentChatMessage>()
         val arr = root.optJSONArray("messages") ?: JSONArray()
         for (index in 0 until arr.length()) {
@@ -165,6 +194,8 @@ object AgentSessionStore {
             title = title,
             updatedAtMs = updatedAtMs,
             messages = messages,
+            nativeSessionId = nativeSessionId,
+            nativeSessionMode = nativeSessionMode,
         )
     }
 
@@ -183,6 +214,8 @@ object AgentSessionStore {
             .put("sessionId", session.sessionId)
             .put("title", session.title)
             .put("updatedAtMs", session.updatedAtMs)
+            .put("nativeSessionId", session.nativeSessionId)
+            .put("nativeSessionMode", session.nativeSessionMode)
             .put("messages", arr)
     }
 

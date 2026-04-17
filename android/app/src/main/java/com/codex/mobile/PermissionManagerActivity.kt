@@ -136,6 +136,11 @@ class PermissionManagerActivity : AppCompatActivity() {
         Thread {
             val cliInstalled = runCatching { serverManager.isCodexInstalled() }.getOrElse { false }
             val binaryInstalled = runCatching { serverManager.isPlatformBinaryInstalled() }.getOrElse { false }
+            val codexVersion = if (cliInstalled) {
+                runCatching { serverManager.getInstalledCodexVersion() }.getOrElse { "" }
+            } else {
+                ""
+            }
             val loggedIn = if (cliInstalled && binaryInstalled) {
                 runCatching { serverManager.isLoggedIn() }.getOrElse { false }
             } else {
@@ -148,7 +153,8 @@ class PermissionManagerActivity : AppCompatActivity() {
                     loggedIn -> getString(R.string.codex_auth_status_logged_in)
                     else -> getString(R.string.codex_auth_status_logged_out)
                 }
-                tvCodexAuthStatus.text = getString(R.string.codex_auth_status_template, text)
+                val textWithVersion = if (codexVersion.isBlank()) text else "$text · CLI $codexVersion"
+                tvCodexAuthStatus.text = getString(R.string.codex_auth_status_template, textWithVersion)
                 btnCodexAuthBrowser.isEnabled = !codexLoginRunning && cliInstalled && binaryInstalled
                 btnCodexInstall.isEnabled = !codexInstallRunning
                 btnCodexInstall.text = if (cliInstalled && binaryInstalled) {
@@ -267,14 +273,24 @@ class PermissionManagerActivity : AppCompatActivity() {
         )
         Thread {
             val claudeInstalled = runCatching { serverManager.isClaudeCodeInstalled() }.getOrElse { false }
+            val claudeVersion = if (claudeInstalled) {
+                runCatching { serverManager.getInstalledClaudeCodeVersion() }.getOrElse { "" }
+            } else {
+                ""
+            }
             runOnUiThread {
-                tvClaudeInstallStatus.text = getString(
-                    R.string.optional_agent_status_template,
-                    if (claudeInstalled) {
+                val statusText = if (claudeInstalled) {
+                    if (claudeVersion.isBlank()) {
                         getString(R.string.optional_agent_installed)
                     } else {
-                        getString(R.string.optional_agent_not_installed)
-                    },
+                        "${getString(R.string.optional_agent_installed)} · CLI $claudeVersion"
+                    }
+                } else {
+                    getString(R.string.optional_agent_not_installed)
+                }
+                tvClaudeInstallStatus.text = getString(
+                    R.string.optional_agent_status_template,
+                    statusText,
                 )
                 btnClaudeInstall.isEnabled = !claudeInstallRunning
             }
@@ -288,7 +304,7 @@ class PermissionManagerActivity : AppCompatActivity() {
         Toast.makeText(this, getString(R.string.claude_install_starting), Toast.LENGTH_SHORT).show()
 
         Thread {
-            val installed = if (serverManager.isClaudeCodeInstalled()) true else serverManager.installClaudeCode { }
+            val installed = serverManager.installClaudeCode { }
             runOnUiThread {
                 claudeInstallRunning = false
                 val message = if (installed) {

@@ -40,6 +40,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         private const val CLAUDE_HARD_PROMPT_BYTES = 140 * 1024
         private const val CLAUDE_SUMMARY_CLIP_CHARS = 420
         private const val CLAUDE_SUMMARY_TOTAL_MAX_CHARS = 12_000
+        private const val CLAUDE_NATIVE_SESSION_MODE = "claude_native_v1"
     }
 
     private lateinit var tvTitle: TextView
@@ -85,6 +86,7 @@ class CliAgentChatActivity : AppCompatActivity() {
     private data class AgentRuntimeOptions(
         val allowSharedStorage: Boolean,
         val dangerousAutoApprove: Boolean,
+        val claudeNativeSession: Boolean,
     )
 
     private data class ProbeResult(
@@ -105,11 +107,13 @@ class CliAgentChatActivity : AppCompatActivity() {
     private data class AgentRunResult(
         val assistantText: String,
         val processText: String,
+        val nativeSessionId: String = "",
     )
 
     private data class ClaudeStreamParseState(
         var assistantText: String = "",
         var resultText: String = "",
+        var sessionId: String = "",
         val processLines: MutableList<String> = mutableListOf(),
         val fallbackLines: MutableList<String> = mutableListOf(),
         val seenToolUseIds: MutableSet<String> = mutableSetOf(),
@@ -241,7 +245,10 @@ class CliAgentChatActivity : AppCompatActivity() {
         } else {
             val shared = if (runtimeOptions.allowSharedStorage) "开" else "关"
             val danger = if (runtimeOptions.dangerousAutoApprove) "开" else "关"
-            "就绪 · 共享存储:$shared · 高权限:$danger"
+            val mode = if (runtimeOptions.claudeNativeSession) "原生会话" else "兼容会话"
+            val nativeShort = activeSession.nativeSessionId.trim().take(8)
+            val nativeTag = if (nativeShort.isBlank()) "未绑定" else nativeShort
+            "就绪 · 共享存储:$shared · 高权限:$danger · 会话模式:$mode · native:$nativeTag"
         }
         tvAttachmentSummary.text = buildAttachmentSummary()
         renderBottomTabState()
@@ -317,6 +324,10 @@ class CliAgentChatActivity : AppCompatActivity() {
             Toast.makeText(this, getString(R.string.cli_compact_blocked_sending), Toast.LENGTH_SHORT).show()
             return
         }
+        if (agentId == ExternalAgentId.CLAUDE_CODE && runtimeOptions.claudeNativeSession) {
+            runNativeManualCompaction()
+            return
+        }
         val compacted = maybeCompactSessionIfNeeded(trigger = "manual_button", force = true)
         if (compacted) {
             renderSession()
@@ -326,8 +337,86 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
     }
 
+    private fun runNativeManualCompaction() {
+        if (activeSession.nativeSessionId.isBlank()) {
+            val compacted = maybeCompactSessionIfNeeded(trigger = "manual_button_native_fallback", force = true)
+            if (compacted) {
+                renderSession()
+                Toast.makeText(this, getString(R.string.cli_compact_done), Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, getString(R.string.cli_compact_not_needed), Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val modelConfig = AgentModelConfigStore.loadCurrentConfig(this, agentId)
+        if (modelConfig == null) {
+            Toast.makeText(this, "请先在模型管理中配置${AgentSessionStore.displayAgentName(agentId)}模型", Toast.LENGTH_LONG).show()
+            return
+        }
+        sending = true
+        abortRequested = false
+        clearLiveProcessLines()
+        renderSession()
+        Thread {
+            val result = runCatching {
+                runClaudePrint(
+                    config = modelConfig,
+                    prompt = "/compact",
+                    options = runtimeOptions,
+                    resumeSessionId = activeSession.nativeSessionId.trim(),
+                    sendPromptViaStdin = true,
+                )
+            }.getOrElse { error ->
+                AgentRunResult(
+                    assistantText = "上下文压缩执行失败：${error.message ?: "unknown error"}",
+                    processText = snapshotLiveProcessLines().joinToString("\n").trim(),
+                )
+            }
+            val nativeCompactFailed = result.assistantText.startsWith("上下文压缩执行失败：")
+            var nextSession = activeSession
+            if (result.nativeSessionId.isNotBlank()) {
+                nextSession = AgentSessionStore.updateNativeSession(
+                    context = this,
+                    agentId = agentId,
+                    sessionId = nextSession.sessionId,
+                    nativeSessionId = result.nativeSessionId,
+                    nativeSessionMode = CLAUDE_NATIVE_SESSION_MODE,
+                ) ?: nextSession
+            }
+            if (result.processText.isNotBlank()) {
+                nextSession = AgentSessionStore.appendMessage(
+                    this,
+                    agentId,
+                    nextSession.sessionId,
+                    "process",
+                    result.processText,
+                )
+            }
+            nextSession = AgentSessionStore.appendMessage(
+                this,
+                agentId,
+                nextSession.sessionId,
+                "assistant",
+                result.assistantText.ifBlank { "已触发上下文压缩。" },
+            )
+            activeSession = nextSession
+            runOnUiThread {
+                sending = false
+                activeProcess = null
+                clearLiveProcessLines()
+                renderSession()
+                if (nativeCompactFailed) {
+                    Toast.makeText(this, getString(R.string.cli_compact_failed), Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, getString(R.string.cli_compact_done_native), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
     private fun maybeCompactSessionIfNeeded(trigger: String, force: Boolean = false): Boolean {
         if (agentId != ExternalAgentId.CLAUDE_CODE) return false
+        if (runtimeOptions.claudeNativeSession && !force) return false
         val snapshot = activeSession
         if (snapshot.messages.isEmpty()) return false
 
@@ -560,6 +649,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         val switchAllow = view.findViewById<SwitchCompat>(R.id.switchCliSettingAllowSharedStorage)
         val switchDanger = view.findViewById<SwitchCompat>(R.id.switchCliSettingDangerousMode)
         val switchProcess = view.findViewById<SwitchCompat>(R.id.switchCliSettingShowProcess)
+        val switchNative = view.findViewById<SwitchCompat>(R.id.switchCliSettingClaudeNativeSession)
         val btnPermission = view.findViewById<Button>(R.id.btnCliSettingPermissionCenter)
         val btnPrompt = view.findViewById<Button>(R.id.btnCliSettingPromptManager)
         val btnConversation = view.findViewById<Button>(R.id.btnCliSettingConversationManager)
@@ -570,6 +660,8 @@ class CliAgentChatActivity : AppCompatActivity() {
         switchAllow.isChecked = runtimeOptions.allowSharedStorage
         switchDanger.isChecked = runtimeOptions.dangerousAutoApprove
         switchProcess.isChecked = showProcess
+        switchNative.isChecked = runtimeOptions.claudeNativeSession
+        switchNative.isEnabled = agentId == ExternalAgentId.CLAUDE_CODE
 
         switchAllow.setOnCheckedChangeListener { _, checked ->
             runtimeOptions = runtimeOptions.copy(allowSharedStorage = checked)
@@ -584,6 +676,11 @@ class CliAgentChatActivity : AppCompatActivity() {
         switchProcess.setOnCheckedChangeListener { _, checked ->
             showProcess = checked
             saveShowProcess(checked)
+            renderSession()
+        }
+        switchNative.setOnCheckedChangeListener { _, checked ->
+            runtimeOptions = runtimeOptions.copy(claudeNativeSession = checked)
+            saveRuntimeOptions(runtimeOptions)
             renderSession()
         }
 
@@ -642,6 +739,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         ShizukuBridgeRuntime.ensureStarted(this)
         val input = inputMessage.text.toString().trim()
         if (input.isEmpty()) return
+        val useNativeSession = agentId == ExternalAgentId.CLAUDE_CODE && runtimeOptions.claudeNativeSession
 
         val modelConfig = AgentModelConfigStore.loadCurrentConfig(this, agentId)
         if (modelConfig == null) {
@@ -666,15 +764,27 @@ class CliAgentChatActivity : AppCompatActivity() {
 
         Thread {
             val result = runCatching {
-                if (agentId == ExternalAgentId.CLAUDE_CODE && maybeCompactSessionIfNeeded(trigger = "auto_threshold")) {
+                val nativeSessionId = activeSession.nativeSessionId.trim()
+                val bootstrapFromHistory = useNativeSession && nativeSessionId.isBlank()
+                if (agentId == ExternalAgentId.CLAUDE_CODE &&
+                    !useNativeSession &&
+                    maybeCompactSessionIfNeeded(trigger = "auto_threshold")
+                ) {
                     runOnUiThread {
                         Toast.makeText(this, getString(R.string.cli_compact_auto_triggered), Toast.LENGTH_SHORT).show()
                         renderSession()
                     }
                 }
 
-                var prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
-                if (agentId == ExternalAgentId.CLAUDE_CODE && promptUtf8Bytes(prompt) > CLAUDE_HARD_PROMPT_BYTES) {
+                var prompt = if (useNativeSession && !bootstrapFromHistory) {
+                    buildClaudeNativeTurnPrompt(userText, runtimeOptions)
+                } else {
+                    buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                }
+                if (agentId == ExternalAgentId.CLAUDE_CODE &&
+                    !useNativeSession &&
+                    promptUtf8Bytes(prompt) > CLAUDE_HARD_PROMPT_BYTES
+                ) {
                     if (maybeCompactSessionIfNeeded(trigger = "hard_limit_guard", force = true)) {
                         runOnUiThread {
                             Toast.makeText(this, getString(R.string.cli_compact_auto_triggered), Toast.LENGTH_SHORT).show()
@@ -684,10 +794,19 @@ class CliAgentChatActivity : AppCompatActivity() {
                     prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
                 }
                 when (agentId) {
-                    ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, prompt, runtimeOptions)
+                    ExternalAgentId.CLAUDE_CODE -> runClaudePrint(
+                        config = modelConfig,
+                        prompt = prompt,
+                        options = runtimeOptions,
+                        resumeSessionId = if (useNativeSession) nativeSessionId else "",
+                        sendPromptViaStdin = true,
+                    )
                 }
             }.recoverCatching { error ->
-                if (agentId == ExternalAgentId.CLAUDE_CODE && isArgumentListTooLong(error)) {
+                if (agentId == ExternalAgentId.CLAUDE_CODE &&
+                    !useNativeSession &&
+                    isArgumentListTooLong(error)
+                ) {
                     if (maybeCompactSessionIfNeeded(trigger = "error_retry", force = true)) {
                         runOnUiThread {
                             Toast.makeText(this, getString(R.string.cli_compact_retry_triggered), Toast.LENGTH_SHORT).show()
@@ -696,7 +815,12 @@ class CliAgentChatActivity : AppCompatActivity() {
                     }
                     val retryPrompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
                     when (agentId) {
-                        ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, retryPrompt, runtimeOptions)
+                        ExternalAgentId.CLAUDE_CODE -> runClaudePrint(
+                            config = modelConfig,
+                            prompt = retryPrompt,
+                            options = runtimeOptions,
+                            sendPromptViaStdin = true,
+                        )
                     }
                 } else {
                     throw error
@@ -712,6 +836,15 @@ class CliAgentChatActivity : AppCompatActivity() {
             }
 
             var nextSession = activeSession
+            if (useNativeSession && result.nativeSessionId.isNotBlank()) {
+                nextSession = AgentSessionStore.updateNativeSession(
+                    context = this,
+                    agentId = agentId,
+                    sessionId = nextSession.sessionId,
+                    nativeSessionId = result.nativeSessionId,
+                    nativeSessionMode = CLAUDE_NATIVE_SESSION_MODE,
+                ) ?: nextSession
+            }
             if (result.processText.isNotBlank()) {
                 nextSession = AgentSessionStore.appendMessage(
                     this,
@@ -786,10 +919,34 @@ class CliAgentChatActivity : AppCompatActivity() {
         return out.toString().trim()
     }
 
+    private fun buildClaudeNativeTurnPrompt(userText: String, options: AgentRuntimeOptions): String {
+        val out = StringBuilder()
+        out.appendLine("你正在继续一个已存在的 Claude 原生会话。")
+        out.appendLine("高优先级运行规范（必须遵守）：")
+        out.appendLine("1) Android 系统级命令必须使用 system-shell <command>。")
+        out.appendLine("2) Ubuntu 命令使用 ubuntu-shell <command> 或直接 Linux 命令。")
+        out.appendLine("3) 若某链路失败，明确失败原因并自动切换可用链路继续。")
+        out.appendLine("4) 本会话已注入 AnyClaw MCP 工具箱，优先使用 mcp__anyclaw_toolbox__ 前缀工具名。")
+        out.appendLine("5) 网页自动化请使用 mcp__anyclaw_toolbox__start_web/stop_web/web_*。")
+        out.appendLine("6) 若 anyclaw 工具不可见或调用失败，输出 MCP_TOOLBOX_STATUS=UNAVAILABLE 并给出 reason 与 step。")
+        out.appendLine()
+        out.appendLine("自动注入预检结果：")
+        out.appendLine(buildRuntimeProbeBlock(options))
+        out.appendLine()
+        out.appendLine("AnyClaw MCP注入状态：")
+        out.appendLine(buildClaudeMcpProbeBlock(options))
+        out.appendLine()
+        out.appendLine("当前用户请求：")
+        out.appendLine(userText)
+        return out.toString().trim()
+    }
+
     private fun runClaudePrint(
         config: AgentModelConfig,
         prompt: String,
         options: AgentRuntimeOptions,
+        resumeSessionId: String = "",
+        sendPromptViaStdin: Boolean = true,
     ): AgentRunResult {
         val paths = BootstrapInstaller.getPaths(this)
         val nodePath = File(paths.prefixDir, "bin/node").absolutePath
@@ -811,11 +968,16 @@ class CliAgentChatActivity : AppCompatActivity() {
         if (!systemPromptFile.isNullOrBlank()) {
             args += listOf("--append-system-prompt-file", systemPromptFile)
         }
+        if (resumeSessionId.isNotBlank()) {
+            args += listOf("--resume", resumeSessionId.trim())
+        }
         if (config.modelId.isNotBlank()) {
             args += listOf("--model", config.modelId.trim())
         }
         args += listOf("--output-format", "stream-json", "--include-partial-messages", "--include-hook-events")
-        args += prompt
+        if (!sendPromptViaStdin) {
+            args += prompt
+        }
 
         val extraEnv = mutableMapOf(
             "ANTHROPIC_API_KEY" to config.apiKey.trim(),
@@ -825,7 +987,20 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
 
         val process = serverManager.startPrefixExecProcess(args, extraEnv)
-        runCatching { process.outputStream.close() }
+        if (sendPromptViaStdin) {
+            runCatching {
+                process.outputStream.bufferedWriter(Charsets.UTF_8).use { writer ->
+                    writer.write(prompt)
+                    writer.write("\n")
+                    writer.flush()
+                }
+            }.onFailure { error ->
+                runCatching { process.destroyForcibly() }
+                throw IllegalStateException("写入 Claude stdin 失败: ${error.message}", error)
+            }
+        } else {
+            runCatching { process.outputStream.close() }
+        }
         return runClaudeStreamJson(process)
     }
 
@@ -926,6 +1101,7 @@ class CliAgentChatActivity : AppCompatActivity() {
             return AgentRunResult(
                 assistantText = getString(R.string.cli_task_aborted),
                 processText = state.processLines.joinToString("\n").trim(),
+                nativeSessionId = state.sessionId,
             )
         }
 
@@ -942,6 +1118,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         return AgentRunResult(
             assistantText = assistantText.ifBlank { "Claude 未返回可解析内容" },
             processText = processText,
+            nativeSessionId = state.sessionId,
         )
     }
 
@@ -955,6 +1132,10 @@ class CliAgentChatActivity : AppCompatActivity() {
             "system" -> {
                 val subtype = payload.optString("subtype").trim()
                 if (subtype.equals("init", ignoreCase = true)) {
+                    val sessionId = payload.optString("session_id").trim()
+                    if (sessionId.isNotBlank()) {
+                        state.sessionId = sessionId
+                    }
                     appendClaudeProcessLine(state.processLines, "Claude 会话已初始化")
                 }
             }
@@ -1431,6 +1612,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         return AgentRuntimeOptions(
             allowSharedStorage = prefs.getBoolean(runtimeOptionKey("allow_shared_storage"), true),
             dangerousAutoApprove = prefs.getBoolean(runtimeOptionKey("dangerous_mode"), false),
+            claudeNativeSession = prefs.getBoolean(runtimeOptionKey("claude_native_session"), true),
         )
     }
 
@@ -1439,6 +1621,7 @@ class CliAgentChatActivity : AppCompatActivity() {
             .edit()
             .putBoolean(runtimeOptionKey("allow_shared_storage"), options.allowSharedStorage)
             .putBoolean(runtimeOptionKey("dangerous_mode"), options.dangerousAutoApprove)
+            .putBoolean(runtimeOptionKey("claude_native_session"), options.claudeNativeSession)
             .apply()
     }
 
