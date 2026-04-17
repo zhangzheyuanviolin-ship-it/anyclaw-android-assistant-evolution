@@ -315,21 +315,6 @@ function normalizeMessageText(value: string): string {
   return value.replace(/\s+/gu, ' ').trim()
 }
 
-function toProjectNameFromCwd(cwd: string): string {
-  const normalized = cwd.trim()
-  if (!normalized) return 'codex'
-  const parts = normalized.split('/').filter(Boolean)
-  return parts.at(-1) || normalized
-}
-
-function toOptimisticThreadTitle(text: string): string {
-  const normalized = normalizeMessageText(text)
-  if (!normalized) return 'Untitled thread'
-  const maxLength = 64
-  if (normalized.length <= maxLength) return normalized
-  return `${normalized.slice(0, maxLength - 1)}...`
-}
-
 function removeRedundantLiveAgentMessages(previous: UiMessage[], incoming: UiMessage[]): UiMessage[] {
   const incomingAssistantTexts = new Set(
     incoming
@@ -910,61 +895,6 @@ export function useDesktopState() {
     persistedMessagesByThreadId.value = {
       ...persistedMessagesByThreadId.value,
       [threadId]: nextMessages,
-    }
-  }
-
-  function upsertThreadInSourceGroups(nextThread: UiThread): void {
-    const nextGroups = sourceGroups.value.map((group) => ({
-      projectName: group.projectName,
-      threads: [...group.threads],
-    }))
-    const existingGroupIndex = nextGroups.findIndex((group) => group.projectName === nextThread.projectName)
-
-    if (existingGroupIndex >= 0) {
-      const group = nextGroups[existingGroupIndex]
-      const existingThreadIndex = group.threads.findIndex((thread) => thread.id === nextThread.id)
-      if (existingThreadIndex >= 0) {
-        group.threads.splice(existingThreadIndex, 1, nextThread)
-      } else {
-        group.threads.unshift(nextThread)
-      }
-    } else {
-      nextGroups.unshift({
-        projectName: nextThread.projectName,
-        threads: [nextThread],
-      })
-    }
-
-    sourceGroups.value = mergeThreadGroups(sourceGroups.value, nextGroups)
-    applyThreadFlags()
-  }
-
-  function seedOptimisticThreadState(threadId: string, cwd: string, firstMessageText: string): void {
-    const nowIso = new Date().toISOString()
-    upsertThreadInSourceGroups({
-      id: threadId,
-      title: toOptimisticThreadTitle(firstMessageText),
-      projectName: toProjectNameFromCwd(cwd),
-      cwd,
-      createdAtIso: nowIso,
-      updatedAtIso: nowIso,
-      preview: firstMessageText,
-      unread: false,
-      inProgress: true,
-    })
-
-    const optimisticUserMessage: UiMessage = {
-      id: `local-user:${threadId}:${Date.now().toString(36)}`,
-      role: 'user',
-      text: firstMessageText,
-      messageType: 'userMessage',
-    }
-    setPersistedMessagesForThread(threadId, [optimisticUserMessage])
-    setLiveAgentMessagesForThread(threadId, [])
-
-    loadedMessagesByThreadId.value = {
-      ...loadedMessagesByThreadId.value,
-      [threadId]: true,
     }
   }
 
@@ -1558,14 +1488,13 @@ export function useDesktopState() {
     }, EVENT_SYNC_DEBOUNCE_MS)
   }
 
-  async function loadThreads(options: { allowEmptyReplace?: boolean } = {}) {
+  async function loadThreads() {
     if (!hasLoadedThreads.value) {
       isLoadingThreads.value = true
     }
 
     try {
       const groups = await getThreadGroups()
-      const previousFlatThreadCount = flattenThreads(sourceGroups.value).length
 
       const nextProjectOrder = mergeProjectOrder(projectOrder.value, groups)
       if (!areStringArraysEqual(projectOrder.value, nextProjectOrder)) {
@@ -1574,19 +1503,6 @@ export function useDesktopState() {
       }
 
       const orderedGroups = orderGroupsByProjectOrder(groups, projectOrder.value)
-      const incomingFlatThreadCount = flattenThreads(orderedGroups).length
-      const shouldPreservePreviousThreads =
-        options.allowEmptyReplace !== true &&
-        hasLoadedThreads.value &&
-        previousFlatThreadCount > 0 &&
-        incomingFlatThreadCount === 0
-
-      if (shouldPreservePreviousThreads) {
-        applyThreadFlags()
-        hasLoadedThreads.value = true
-        return
-      }
-
       sourceGroups.value = mergeThreadGroups(sourceGroups.value, orderedGroups)
       inProgressById.value = pruneThreadStateMap(
         inProgressById.value,
@@ -1601,9 +1517,6 @@ export function useDesktopState() {
       const currentExists = flatThreads.some((thread) => thread.id === selectedThreadId.value)
 
       if (!currentExists) {
-        if (selectedThreadId.value && isSendingMessage.value) {
-          return
-        }
         setSelectedThreadId(flatThreads[0]?.id ?? '')
       }
     } finally {
@@ -1689,7 +1602,7 @@ export function useDesktopState() {
   async function archiveThreadById(threadId: string) {
     try {
       await archiveThread(threadId)
-      await loadThreads({ allowEmptyReplace: true })
+      await loadThreads()
 
       if (selectedThreadId.value === threadId) {
         await loadMessages(selectedThreadId.value)
@@ -1823,7 +1736,6 @@ export function useDesktopState() {
         ...resumedThreadById.value,
         [threadId]: true,
       }
-      seedOptimisticThreadState(threadId, targetCwd, nextText)
       setSelectedThreadId(threadId)
       shouldAutoScrollOnNextAgentEvent = true
       setTurnSummaryForThread(threadId, null)
