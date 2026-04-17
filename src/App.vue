@@ -677,6 +677,7 @@ const router = useRouter()
 const isCodexBridgeAvailable = ref(true)
 const isRouteSyncInProgress = ref(false)
 const hasInitialized = ref(false)
+const routeThreadRefreshAttempted = new Set<string>()
 const newThreadCwd = ref('')
 const isSidebarCollapsed = ref(loadSidebarCollapsed())
 const sidebarSearchQuery = ref('')
@@ -1213,6 +1214,14 @@ async function initialize(): Promise<void> {
     // Keep Codex UI available even if Claude bootstrap is temporarily unavailable.
   }
   hasInitialized.value = true
+  if (
+    isCodexBridgeAvailable.value &&
+    route.name === 'home' &&
+    selectedThreadId.value &&
+    knownThreadIdSet.value.has(selectedThreadId.value)
+  ) {
+    await router.replace({ name: 'thread', params: { threadId: selectedThreadId.value } })
+  }
   await syncThreadSelectionWithRoute()
   if (isCodexBridgeAvailable.value) {
     startPolling()
@@ -1243,9 +1252,6 @@ async function syncThreadSelectionWithRoute(): Promise<void> {
 
   try {
     if (route.name === 'home') {
-      if (selectedThreadId.value !== '') {
-        await selectThread('')
-      }
       return
     }
 
@@ -1254,9 +1260,23 @@ async function syncThreadSelectionWithRoute(): Promise<void> {
       if (!threadId) return
 
       if (!knownThreadIdSet.value.has(threadId)) {
+        if (isLoadingThreads.value || isSendingMessage.value || selectedThreadId.value === threadId) {
+          return
+        }
+
+        if (!routeThreadRefreshAttempted.has(threadId)) {
+          routeThreadRefreshAttempted.add(threadId)
+          await refreshAll()
+          if (knownThreadIdSet.value.has(threadId)) {
+            return
+          }
+        } else {
+          routeThreadRefreshAttempted.delete(threadId)
+        }
         await router.replace({ name: 'home' })
         return
       }
+      routeThreadRefreshAttempted.delete(threadId)
 
       if (selectedThreadId.value !== threadId) {
         await selectThread(threadId)
