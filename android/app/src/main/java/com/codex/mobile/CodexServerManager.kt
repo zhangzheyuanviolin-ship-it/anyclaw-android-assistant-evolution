@@ -120,6 +120,28 @@ class CodexServerManager(private val context: Context) {
         return pb.start()
     }
 
+    fun startPrefixExecProcess(
+        args: List<String>,
+        extraEnv: Map<String, String> = emptyMap(),
+    ): Process {
+        require(args.isNotEmpty()) { "args must not be empty" }
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val env = buildEnvironment(paths).toMutableMap()
+        extraEnv.forEach { (key, value) ->
+            if (key.isNotBlank() && value.isNotBlank()) {
+                env[key] = value
+            }
+        }
+
+        val pb = ProcessBuilder(args)
+        pb.environment().clear()
+        pb.environment().putAll(env)
+        pb.directory(File(paths.homeDir))
+        pb.redirectErrorStream(true)
+        return pb.start()
+    }
+
     fun startUbuntuProcess(command: String): Process {
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths)

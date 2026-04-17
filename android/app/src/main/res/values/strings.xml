@@ -200,6 +200,7 @@
     <string name="cli_option_show_process">显示执行过程</string>
     <string name="cli_settings_button_text">设置</string>
     <string name="cli_settings_dialog_title">聊天设置</string>
+    <string name="cli_compact_button_text">压缩续接</string>
     <string name="cli_attach_button_text">添加附件</string>
     <string name="cli_clear_attachments_button_text">清空附件</string>
     <string name="cli_abort_button_text">终止任务</string>
@@ -220,6 +221,11 @@
     <string name="cli_task_aborted">任务已终止。</string>
     <string name="cli_history_expanded">已加载更早消息。</string>
     <string name="cli_history_restored">已恢复轻量显示。</string>
+    <string name="cli_compact_done">已完成上下文压缩并切换到续接会话。</string>
+    <string name="cli_compact_not_needed">当前上下文较短，无需压缩。</string>
+    <string name="cli_compact_blocked_sending">任务执行中，暂时不能压缩。</string>
+    <string name="cli_compact_auto_triggered">上下文过长，已自动压缩后继续执行。</string>
+    <string name="cli_compact_retry_triggered">命令过长，已自动压缩并重试。</string>
     <string name="openclaw_reset_session">重置会话</string>
     <string name="openclaw_heartbeat_now">立即心跳</string>
     <string name="openclaw_native_input_hint">输入消息并发送给 OpenClaw</string>

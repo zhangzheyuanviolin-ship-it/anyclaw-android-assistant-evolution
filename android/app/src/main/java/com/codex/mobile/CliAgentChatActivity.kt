@@ -36,6 +36,9 @@ class CliAgentChatActivity : AppCompatActivity() {
         private const val DEFAULT_VISIBLE_HISTORY = 40
         private const val HISTORY_STEP = 40
         private const val MAX_VISIBLE_HISTORY = 240
+        private const val CLAUDE_AUTO_COMPACT_PROMPT_BYTES = 96 * 1024
+        private const val CLAUDE_HARD_PROMPT_BYTES = 140 * 1024
+        private const val CLAUDE_SUMMARY_CLIP_CHARS = 260
     }
 
     private lateinit var tvTitle: TextView
@@ -44,6 +47,7 @@ class CliAgentChatActivity : AppCompatActivity() {
     private lateinit var tvAttachmentSummary: TextView
     private lateinit var btnSettings: Button
     private lateinit var btnNewSession: Button
+    private lateinit var btnCompact: Button
     private lateinit var btnAttach: Button
     private lateinit var btnClearAttachments: Button
     private lateinit var btnAbort: Button
@@ -144,6 +148,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         tvAttachmentSummary = findViewById(R.id.tvCliAttachmentSummary)
         btnSettings = findViewById(R.id.btnCliSettings)
         btnNewSession = findViewById(R.id.btnCliNewSession)
+        btnCompact = findViewById(R.id.btnCliCompact)
         btnAttach = findViewById(R.id.btnCliAttach)
         btnClearAttachments = findViewById(R.id.btnCliClearAttachments)
         btnAbort = findViewById(R.id.btnCliAbort)
@@ -166,6 +171,9 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
         btnNewSession.setOnClickListener {
             createNewSession()
+        }
+        btnCompact.setOnClickListener {
+            compactSessionManually()
         }
         btnAttach.setOnClickListener {
             showAttachmentPicker()
@@ -239,6 +247,7 @@ class CliAgentChatActivity : AppCompatActivity() {
 
         btnAttach.isEnabled = !sending
         btnClearAttachments.isEnabled = attachedFiles.isNotEmpty() && !sending
+        btnCompact.isEnabled = !sending && agentId == ExternalAgentId.CLAUDE_CODE
         btnAbort.isEnabled = sending
         btnSend.isEnabled = !sending
         inputMessage.isEnabled = !sending
@@ -300,6 +309,152 @@ class CliAgentChatActivity : AppCompatActivity() {
         attachedFiles.clear()
         renderSession()
         Toast.makeText(this, getString(R.string.cli_attachment_cleared), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun compactSessionManually() {
+        if (sending) {
+            Toast.makeText(this, getString(R.string.cli_compact_blocked_sending), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val compacted = maybeCompactSessionIfNeeded(trigger = "manual_button", force = true)
+        if (compacted) {
+            renderSession()
+            Toast.makeText(this, getString(R.string.cli_compact_done), Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, getString(R.string.cli_compact_not_needed), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun maybeCompactSessionIfNeeded(trigger: String, force: Boolean = false): Boolean {
+        if (agentId != ExternalAgentId.CLAUDE_CODE) return false
+        val snapshot = activeSession
+        if (snapshot.messages.isEmpty()) return false
+
+        val promptBytes = promptUtf8Bytes(buildPromptWithHistory(snapshot.messages, runtimeOptions))
+        if (!force && promptBytes < CLAUDE_AUTO_COMPACT_PROMPT_BYTES) return false
+
+        val summary = buildCompactionSummary(snapshot, trigger, promptBytes)
+        val baseTitle = snapshot.title.trim().ifEmpty { "Claude Code 会话" }
+        val nextTitle = if (baseTitle.contains("续接")) baseTitle else "$baseTitle（续接）"
+
+        var nextSession = AgentSessionStore.createSession(this, agentId, nextTitle)
+        nextSession = AgentSessionStore.appendMessage(
+            this,
+            agentId,
+            nextSession.sessionId,
+            "assistant",
+            summary,
+        )
+
+        val latestUser = snapshot.messages.lastOrNull { it.role.equals("user", ignoreCase = true) }
+            ?.text
+            ?.trim()
+            .orEmpty()
+        if (latestUser.isNotEmpty()) {
+            nextSession = AgentSessionStore.appendMessage(
+                this,
+                agentId,
+                nextSession.sessionId,
+                "user",
+                "请基于上面的压缩摘要继续处理这个请求：\n$latestUser",
+            )
+        }
+
+        activeSession = nextSession
+        clearLiveProcessLines()
+        return true
+    }
+
+    private fun buildCompactionSummary(
+        session: AgentChatSession,
+        trigger: String,
+        promptBytes: Int,
+    ): String {
+        val allMessages = session.messages
+        val userMessages = allMessages.filter { it.role.equals("user", ignoreCase = true) }
+        val assistantMessages = allMessages.filter { it.role.equals("assistant", ignoreCase = true) }
+        val processMessages = allMessages.filter { it.role.equals("process", ignoreCase = true) }
+
+        val requestSamples = userMessages.takeLast(8).mapIndexed { index, msg ->
+            "${index + 1}. ${clipSummaryText(msg.text)}"
+        }
+        val responseSamples = assistantMessages
+            .filterNot { it.text.contains("执行失败") || it.text.contains("Argument list too long", ignoreCase = true) }
+            .takeLast(6)
+            .mapIndexed { index, msg ->
+                "${index + 1}. ${clipSummaryText(msg.text)}"
+            }
+        val failureSamples = (assistantMessages + processMessages)
+            .filter {
+                val text = it.text
+                text.contains("执行失败") ||
+                    text.contains("Argument list too long", ignoreCase = true) ||
+                    text.contains("error=", ignoreCase = true)
+            }
+            .takeLast(4)
+            .mapIndexed { index, msg ->
+                "${index + 1}. ${clipSummaryText(msg.text)}"
+            }
+
+        val firstUser = userMessages.firstOrNull()?.text.orEmpty()
+        val latestUser = userMessages.lastOrNull()?.text.orEmpty()
+
+        return buildString {
+            appendLine("【会话压缩摘要】")
+            appendLine("source_session_id=${session.sessionId}")
+            appendLine("trigger=$trigger")
+            appendLine("original_message_count=${allMessages.size}")
+            appendLine("estimated_prompt_bytes=$promptBytes")
+            appendLine()
+            appendLine("初始目标：")
+            appendLine(clipSummaryText(firstUser, maxChars = 420))
+            appendLine()
+            appendLine("最近用户请求（按时间升序）：")
+            if (requestSamples.isEmpty()) {
+                appendLine("无")
+            } else {
+                requestSamples.forEach { appendLine(it) }
+            }
+            appendLine()
+            appendLine("最近有效结论：")
+            if (responseSamples.isEmpty()) {
+                appendLine("无")
+            } else {
+                responseSamples.forEach { appendLine(it) }
+            }
+            appendLine()
+            appendLine("最近异常与风险：")
+            if (failureSamples.isEmpty()) {
+                appendLine("无")
+            } else {
+                failureSamples.forEach { appendLine(it) }
+            }
+            appendLine()
+            appendLine("当前待续接请求：")
+            appendLine(clipSummaryText(latestUser, maxChars = 420))
+            appendLine()
+            appendLine("请在后续回答中以上述摘要为准，避免重复读取旧长上下文。")
+        }.trim()
+    }
+
+    private fun clipSummaryText(value: String, maxChars: Int = CLAUDE_SUMMARY_CLIP_CHARS): String {
+        val normalized = value
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+        if (normalized.isBlank()) return "无"
+        if (normalized.length <= maxChars) return normalized
+        return normalized.take(maxChars) + "..."
+    }
+
+    private fun promptUtf8Bytes(value: String): Int {
+        return value.toByteArray(Charsets.UTF_8).size
+    }
+
+    private fun isArgumentListTooLong(error: Throwable): Boolean {
+        val message = error.message?.lowercase(Locale.US).orEmpty()
+        return message.contains("argument list too long") || message.contains("error=7")
     }
 
     private fun loadOlderMessages() {
@@ -427,9 +582,40 @@ class CliAgentChatActivity : AppCompatActivity() {
 
         Thread {
             val result = runCatching {
-                val prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                if (agentId == ExternalAgentId.CLAUDE_CODE && maybeCompactSessionIfNeeded(trigger = "auto_threshold")) {
+                    runOnUiThread {
+                        Toast.makeText(this, getString(R.string.cli_compact_auto_triggered), Toast.LENGTH_SHORT).show()
+                        renderSession()
+                    }
+                }
+
+                var prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                if (agentId == ExternalAgentId.CLAUDE_CODE && promptUtf8Bytes(prompt) > CLAUDE_HARD_PROMPT_BYTES) {
+                    if (maybeCompactSessionIfNeeded(trigger = "hard_limit_guard", force = true)) {
+                        runOnUiThread {
+                            Toast.makeText(this, getString(R.string.cli_compact_auto_triggered), Toast.LENGTH_SHORT).show()
+                            renderSession()
+                        }
+                    }
+                    prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                }
                 when (agentId) {
                     ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, prompt, runtimeOptions)
+                }
+            }.recoverCatching { error ->
+                if (agentId == ExternalAgentId.CLAUDE_CODE && isArgumentListTooLong(error)) {
+                    if (maybeCompactSessionIfNeeded(trigger = "error_retry", force = true)) {
+                        runOnUiThread {
+                            Toast.makeText(this, getString(R.string.cli_compact_retry_triggered), Toast.LENGTH_SHORT).show()
+                            renderSession()
+                        }
+                    }
+                    val retryPrompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                    when (agentId) {
+                        ExternalAgentId.CLAUDE_CODE -> runClaudePrint(modelConfig, retryPrompt, runtimeOptions)
+                    }
+                } else {
+                    throw error
                 }
             }.getOrElse { error ->
                 val processText = snapshotLiveProcessLines().joinToString("\n").trim()
@@ -521,26 +707,46 @@ class CliAgentChatActivity : AppCompatActivity() {
         prompt: String,
         options: AgentRuntimeOptions,
     ): AgentRunResult {
+        val paths = BootstrapInstaller.getPaths(this)
+        val nodePath = File(paths.prefixDir, "bin/node").absolutePath
+        val claudeCliPath = File(paths.prefixDir, "lib/node_modules/@anthropic-ai/claude-code/cli.js").absolutePath
         val mcpConfigPath = ensureClaudeAnyClawMcpConfig(options).absolutePath
-        val modelArg = if (config.modelId.isBlank()) "" else "--model ${LocalBridgeClients.shellQuote(config.modelId)} "
-        val baseEnv = if (config.baseUrl.isBlank()) "" else "ANTHROPIC_BASE_URL=${LocalBridgeClients.shellQuote(config.baseUrl)} "
-        val keyEnv = "ANTHROPIC_API_KEY=${LocalBridgeClients.shellQuote(config.apiKey)} "
-        val addDirArg = buildClaudeDirArgs(options)
-        val dangerArg = if (options.dangerousAutoApprove) "--dangerously-skip-permissions " else ""
-        val mcpArg =
-            "--mcp-config ${LocalBridgeClients.shellQuote(mcpConfigPath)} --strict-mcp-config "
-        val promptArg = buildClaudeSystemPromptArg()
-        val cmd =
-            "${baseEnv}${keyEnv}claude -p --verbose ${dangerArg}${addDirArg}${mcpArg}${promptArg}${modelArg}" +
-                "--output-format stream-json --include-partial-messages --include-hook-events " +
-                "${LocalBridgeClients.shellQuote(prompt)} < /dev/null 2>&1"
-        return runClaudeStreamJson(serverManager.startPrefixProcess(cmd))
+        val systemPromptFile = buildClaudeSystemPromptFile()
+
+        val args = mutableListOf(
+            nodePath,
+            claudeCliPath,
+            "-p",
+            "--verbose",
+        )
+        if (options.dangerousAutoApprove) {
+            args += "--dangerously-skip-permissions"
+        }
+        args += buildClaudeDirArgs(options)
+        args += listOf("--mcp-config", mcpConfigPath, "--strict-mcp-config")
+        if (!systemPromptFile.isNullOrBlank()) {
+            args += listOf("--append-system-prompt-file", systemPromptFile)
+        }
+        if (config.modelId.isNotBlank()) {
+            args += listOf("--model", config.modelId.trim())
+        }
+        args += listOf("--output-format", "stream-json", "--include-partial-messages", "--include-hook-events")
+        args += prompt
+
+        val extraEnv = mutableMapOf(
+            "ANTHROPIC_API_KEY" to config.apiKey.trim(),
+        )
+        if (config.baseUrl.isNotBlank()) {
+            extraEnv["ANTHROPIC_BASE_URL"] = config.baseUrl.trim()
+        }
+
+        return runClaudeStreamJson(serverManager.startPrefixExecProcess(args, extraEnv))
     }
 
-    private fun buildClaudeSystemPromptArg(): String {
+    private fun buildClaudeSystemPromptFile(): String? {
         val selected = PromptProfileStore.loadSelectedProfile(this, PromptProfileTarget.CLAUDE)
         val content = selected?.content?.trim().orEmpty()
-        if (content.isBlank()) return ""
+        if (content.isBlank()) return null
         val paths = BootstrapInstaller.getPaths(this)
         val mcpDir = File(paths.homeDir, ".pocketlobster/mcp")
         if (!mcpDir.exists()) {
@@ -548,17 +754,22 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
         val promptFile = File(mcpDir, "claude-system-prompt.txt")
         writeTextIfChanged(promptFile, content + "\n")
-        return "--append-system-prompt-file ${LocalBridgeClients.shellQuote(promptFile.absolutePath)} "
+        return promptFile.absolutePath
     }
 
-    private fun buildClaudeDirArgs(options: AgentRuntimeOptions): String {
+    private fun buildClaudeDirArgs(options: AgentRuntimeOptions): List<String> {
         val paths = BootstrapInstaller.getPaths(this)
         val dirs = linkedSetOf(paths.homeDir)
         if (options.allowSharedStorage) {
             dirs += "/sdcard"
             dirs += "/storage/emulated/0"
         }
-        return dirs.joinToString(" ") { "--add-dir ${LocalBridgeClients.shellQuote(it)}" } + " "
+        val args = mutableListOf<String>()
+        dirs.forEach { dir ->
+            args += "--add-dir"
+            args += dir
+        }
+        return args
     }
 
     private fun runStreamingCommand(
