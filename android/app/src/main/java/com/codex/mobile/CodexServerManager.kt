@@ -2510,7 +2510,19 @@ WEOF
      * resolver; the proxy forwards TCP connections transparently.
      */
     fun startProxy(): Boolean {
-        if (proxyProcess != null) return true
+        proxyProcess?.let { existing ->
+            val stillRunning =
+                try {
+                    existing.exitValue()
+                    false
+                } catch (_: IllegalThreadStateException) {
+                    true
+                }
+            if (stillRunning) {
+                return true
+            }
+            proxyProcess = null
+        }
 
         val paths = BootstrapInstaller.getPaths(context)
         val proxyScript = File(paths.homeDir, "proxy.js")

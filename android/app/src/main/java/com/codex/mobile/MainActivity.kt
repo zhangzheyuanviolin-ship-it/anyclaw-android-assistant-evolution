@@ -76,6 +76,8 @@ class MainActivity : AppCompatActivity() {
     private val openClawWatchdogHandler = Handler(Looper.getMainLooper())
     private var openClawWatchdogRunnable: Runnable? = null
     private var openClawRecoveryAttempts = 0
+    @Volatile
+    private var openClawGatewayStartupInFlight = false
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var pendingCameraImageUri: Uri? = null
     private val gatewayStatusPollRunnable = object : Runnable {
@@ -181,14 +183,12 @@ class MainActivity : AppCompatActivity() {
         }
         openClawNewChatButton.setOnClickListener {
             currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
-            webView.loadUrl(buildOpenClawChatPageUrl(null))
-            updateUiForCurrentTarget()
+            ensureOpenClawGatewayAndLoad(buildOpenClawChatPageUrl(null))
         }
         tabOpenClawButton.setOnClickListener {
             currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
             val sessionKey = extractSessionFromCurrentUrl()
-            webView.loadUrl(buildOpenClawLaunchUrl(sessionKey))
-            updateUiForCurrentTarget()
+            ensureOpenClawGatewayAndLoad(buildOpenClawLaunchUrl(sessionKey))
         }
         tabCodexButton.setOnClickListener {
             currentUiTarget = OPEN_TARGET_CODEX_HOME
@@ -228,8 +228,12 @@ class MainActivity : AppCompatActivity() {
             else -> OPEN_TARGET_CODEX_HOME
         }
         if (setupStarted && webView.visibility == View.VISIBLE) {
-            webView.loadUrl(targetUrl)
-            pendingLaunchUrl = null
+            if (isOpenClawChatUrl(targetUrl)) {
+                ensureOpenClawGatewayAndLoad(targetUrl)
+            } else {
+                webView.loadUrl(targetUrl)
+                pendingLaunchUrl = null
+            }
         }
     }
 
@@ -254,8 +258,12 @@ class MainActivity : AppCompatActivity() {
                     isClaudeChatUrl(targetUrl) -> OPEN_TARGET_CLAUDE_SESSION
                     else -> OPEN_TARGET_CODEX_HOME
                 }
-                webView.loadUrl(targetUrl)
-                pendingLaunchUrl = null
+                if (isOpenClawChatUrl(targetUrl)) {
+                    ensureOpenClawGatewayAndLoad(targetUrl)
+                } else {
+                    webView.loadUrl(targetUrl)
+                    pendingLaunchUrl = null
+                }
             }
         }
     }
@@ -614,7 +622,7 @@ class MainActivity : AppCompatActivity() {
         val explicitOpenClawTarget = target == OPEN_TARGET_OPENCLAW_SESSION
         val explicitCodexTarget = target == OPEN_TARGET_CODEX_HOME || target == OPEN_TARGET_CODEX_THREAD
         if (explicitTarget) {
-            updateStatus("Checking local server…")
+            updateStatus("Checking app services…")
             val warmReady = serverManager.waitForServer(timeoutMs = 3500)
             if (warmReady) {
                 if (explicitOpenClawTarget && !isOpenClawLightweightOnlyMode()) {
@@ -628,10 +636,22 @@ class MainActivity : AppCompatActivity() {
                         return
                     }
                 } else {
-                    runOnUiThread {
-                        showReadyUi(explicitTarget = true)
+                    if (explicitCodexTarget) {
+                        val proxyReady = ensureCodexProxyReady()
+                        if (!proxyReady) {
+                            updateDetail("Proxy warm-start failed, falling back to quick setup…")
+                        } else {
+                            runOnUiThread {
+                                showReadyUi(explicitTarget = true)
+                            }
+                            return
+                        }
+                    } else {
+                        runOnUiThread {
+                            showReadyUi(explicitTarget = true)
+                        }
+                        return
                     }
-                    return
                 }
             }
             if (explicitCodexTarget) {
@@ -866,6 +886,44 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun ensureOpenClawGatewayAndLoad(targetUrl: String) {
+        if (isOpenClawLightweightOnlyMode()) {
+            currentUiTarget = OPEN_TARGET_OPENCLAW_SESSION
+            webView.loadUrl(targetUrl)
+            updateUiForCurrentTarget()
+            return
+        }
+        if (openClawGatewayStartupInFlight) return
+        openClawGatewayStartupInFlight = true
+        showLoading(true)
+        setStatus("Starting OpenClaw gateway…")
+        Thread {
+            val ok = startOpenClawServicesSync()
+            runOnUiThread {
+                openClawGatewayStartupInFlight = false
+                pendingLaunchUrl = targetUrl
+                showReadyUi(explicitTarget = true)
+                if (!ok) {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.gateway_toggle_connect_failed),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                refreshGatewayStatusAsync(announce = true)
+            }
+        }.start()
+    }
+
+    private fun ensureCodexProxyReady(): Boolean {
+        return try {
+            serverManager.startProxy()
+        } catch (error: Exception) {
+            Log.w(TAG, "Codex proxy startup failed: ${error.message}")
+            false
+        }
+    }
+
     private fun startOpenClawServicesSync(): Boolean {
         if (!serverManager.isOpenClawInstalled()) return false
         return try {
@@ -875,7 +933,7 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Configuring OpenClaw…")
             serverManager.configureOpenClawAuth()
 
-            updateStatus("Starting OpenClaw gateway…", "Using gateway + Web chat mode")
+            updateStatus("Starting OpenClaw gateway…")
             serverManager.reconnectOpenClawGateway()
         } catch (error: Exception) {
             Log.e(TAG, "OpenClaw startup failed", error)
@@ -916,6 +974,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun runCodexWebQuickStart(): Boolean {
         return try {
+            updateStatus("Starting network proxy…")
+            if (!ensureCodexProxyReady()) {
+                updateDetail("Codex quick-start requires CONNECT proxy")
+                return false
+            }
+
             updateStatus("Updating web UI…")
             serverManager.installServerBundle { msg -> updateDetail(msg) }
 
