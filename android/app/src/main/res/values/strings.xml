@@ -200,7 +200,7 @@
     <string name="cli_option_show_process">显示执行过程</string>
     <string name="cli_settings_button_text">设置</string>
     <string name="cli_settings_dialog_title">聊天设置</string>
-    <string name="cli_compact_button_text">压缩续接</string>
+    <string name="cli_compact_button_text">上下文压缩</string>
     <string name="cli_attach_button_text">添加附件</string>
     <string name="cli_clear_attachments_button_text">清空附件</string>
     <string name="cli_abort_button_text">终止任务</string>

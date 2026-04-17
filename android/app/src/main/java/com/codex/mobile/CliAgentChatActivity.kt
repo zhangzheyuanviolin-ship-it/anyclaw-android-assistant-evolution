@@ -38,7 +38,8 @@ class CliAgentChatActivity : AppCompatActivity() {
         private const val MAX_VISIBLE_HISTORY = 240
         private const val CLAUDE_AUTO_COMPACT_PROMPT_BYTES = 96 * 1024
         private const val CLAUDE_HARD_PROMPT_BYTES = 140 * 1024
-        private const val CLAUDE_SUMMARY_CLIP_CHARS = 260
+        private const val CLAUDE_SUMMARY_CLIP_CHARS = 420
+        private const val CLAUDE_SUMMARY_TOTAL_MAX_CHARS = 12_000
     }
 
     private lateinit var tvTitle: TextView
@@ -346,17 +347,14 @@ class CliAgentChatActivity : AppCompatActivity() {
             summary,
         )
 
-        val latestUser = snapshot.messages.lastOrNull { it.role.equals("user", ignoreCase = true) }
-            ?.text
-            ?.trim()
-            .orEmpty()
-        if (latestUser.isNotEmpty()) {
+        val pendingUser = resolvePendingUserRequest(snapshot.messages)
+        if (pendingUser.isNotEmpty()) {
             nextSession = AgentSessionStore.appendMessage(
                 this,
                 agentId,
                 nextSession.sessionId,
                 "user",
-                "请基于上面的压缩摘要继续处理这个请求：\n$latestUser",
+                "请基于上面的压缩摘要继续处理这个请求：\n$pendingUser",
             )
         }
 
@@ -374,56 +372,78 @@ class CliAgentChatActivity : AppCompatActivity() {
         val userMessages = allMessages.filter { it.role.equals("user", ignoreCase = true) }
         val assistantMessages = allMessages.filter { it.role.equals("assistant", ignoreCase = true) }
         val processMessages = allMessages.filter { it.role.equals("process", ignoreCase = true) }
+        val pendingUser = resolvePendingUserRequest(allMessages)
 
-        val requestSamples = userMessages.takeLast(8).mapIndexed { index, msg ->
+        val requestSamples = userMessages.takeLast(10).mapIndexed { index, msg ->
             "${index + 1}. ${clipSummaryText(msg.text)}"
         }
         val responseSamples = assistantMessages
-            .filterNot { it.text.contains("执行失败") || it.text.contains("Argument list too long", ignoreCase = true) }
-            .takeLast(6)
+            .filterNot { isFailureLikeMessage(it.text) }
+            .takeLast(8)
             .mapIndexed { index, msg ->
                 "${index + 1}. ${clipSummaryText(msg.text)}"
             }
+        val constraintSamples = userMessages
+            .map { it.text }
+            .filter { isConstraintLikeMessage(it) }
+            .takeLast(6)
+            .mapIndexed { index, text ->
+                "${index + 1}. ${clipSummaryText(text)}"
+            }
         val failureSamples = (assistantMessages + processMessages)
             .filter {
-                val text = it.text
-                text.contains("执行失败") ||
-                    text.contains("Argument list too long", ignoreCase = true) ||
-                    text.contains("error=", ignoreCase = true)
+                isFailureLikeMessage(it.text)
             }
-            .takeLast(4)
+            .takeLast(6)
             .mapIndexed { index, msg ->
                 "${index + 1}. ${clipSummaryText(msg.text)}"
             }
 
         val firstUser = userMessages.firstOrNull()?.text.orEmpty()
         val latestUser = userMessages.lastOrNull()?.text.orEmpty()
+        val activeGoal = pendingUser.ifBlank { latestUser.ifBlank { firstUser } }
+        val pendingDisplay = if (pendingUser.isBlank()) {
+            "无（上一请求已完成或无需续接）"
+        } else {
+            clipSummaryText(pendingUser, maxChars = 520)
+        }
 
-        return buildString {
+        val summary = buildString {
             appendLine("【会话压缩摘要】")
             appendLine("source_session_id=${session.sessionId}")
             appendLine("trigger=$trigger")
             appendLine("original_message_count=${allMessages.size}")
             appendLine("estimated_prompt_bytes=$promptBytes")
+            appendLine("summary_policy=structured_v2")
+            appendLine()
+            appendLine("当前主目标：")
+            appendLine(clipSummaryText(activeGoal, maxChars = 520))
             appendLine()
             appendLine("初始目标：")
             appendLine(clipSummaryText(firstUser, maxChars = 420))
             appendLine()
-            appendLine("最近用户请求（按时间升序）：")
+            appendLine("最近用户请求轨迹（按时间升序）：")
             if (requestSamples.isEmpty()) {
                 appendLine("无")
             } else {
                 requestSamples.forEach { appendLine(it) }
             }
             appendLine()
-            appendLine("最近有效结论：")
+            appendLine("最近已完成事项（有效结论）：")
             if (responseSamples.isEmpty()) {
                 appendLine("无")
             } else {
                 responseSamples.forEach { appendLine(it) }
             }
             appendLine()
-            appendLine("最近异常与风险：")
+            appendLine("关键约束与偏好：")
+            if (constraintSamples.isEmpty()) {
+                appendLine("无")
+            } else {
+                constraintSamples.forEach { appendLine(it) }
+            }
+            appendLine()
+            appendLine("异常与风险：")
             if (failureSamples.isEmpty()) {
                 appendLine("无")
             } else {
@@ -431,10 +451,19 @@ class CliAgentChatActivity : AppCompatActivity() {
             }
             appendLine()
             appendLine("当前待续接请求：")
-            appendLine(clipSummaryText(latestUser, maxChars = 420))
+            appendLine(pendingDisplay)
             appendLine()
-            appendLine("请在后续回答中以上述摘要为准，避免重复读取旧长上下文。")
+            appendLine("续接执行要求：")
+            if (pendingUser.isBlank()) {
+                appendLine("1. 以上述摘要为会话事实基线，继续处理用户后续新请求。")
+                appendLine("2. 若需核验信息，可正常调用工具进行验证。")
+            } else {
+                appendLine("1. 优先完成“当前待续接请求”，并保持与已完成事项一致。")
+                appendLine("2. 以上述摘要为准，必要时可调用工具核验或补充。")
+            }
         }.trim()
+
+        return enforceSummaryBudget(summary)
     }
 
     private fun clipSummaryText(value: String, maxChars: Int = CLAUDE_SUMMARY_CLIP_CHARS): String {
@@ -446,6 +475,61 @@ class CliAgentChatActivity : AppCompatActivity() {
         if (normalized.isBlank()) return "无"
         if (normalized.length <= maxChars) return normalized
         return normalized.take(maxChars) + "..."
+    }
+
+    private fun enforceSummaryBudget(value: String, maxChars: Int = CLAUDE_SUMMARY_TOTAL_MAX_CHARS): String {
+        if (value.length <= maxChars) return value
+        val keep = (maxChars - 64).coerceAtLeast(256)
+        return value.take(keep).trimEnd() + "\n\n[摘要超出预算，已截断到核心字段]"
+    }
+
+    private fun resolvePendingUserRequest(messages: List<AgentChatMessage>): String {
+        val lastUserIndex = messages.indexOfLast { it.role.equals("user", ignoreCase = true) && it.text.isNotBlank() }
+        if (lastUserIndex < 0) return ""
+
+        val latestUser = messages[lastUserIndex].text.trim()
+        if (latestUser.isEmpty()) return ""
+
+        val assistantAfterUser = messages
+            .drop(lastUserIndex + 1)
+            .filter { it.role.equals("assistant", ignoreCase = true) }
+
+        if (assistantAfterUser.isEmpty()) return latestUser
+        val hasSuccessfulAssistant = assistantAfterUser.any { !isFailureLikeMessage(it.text) }
+        return if (hasSuccessfulAssistant) "" else latestUser
+    }
+
+    private fun isFailureLikeMessage(text: String): Boolean {
+        val normalized = text.lowercase(Locale.US)
+        return normalized.contains("执行失败") ||
+            normalized.contains("argument list too long") ||
+            normalized.contains("error=7") ||
+            normalized.contains("error=") ||
+            normalized.contains("command exit code=") ||
+            normalized.contains("任务已终止") ||
+            normalized.contains("claude 返回错误")
+    }
+
+    private fun isConstraintLikeMessage(text: String): Boolean {
+        val normalized = text.lowercase(Locale.US)
+        val markers = listOf(
+            "必须",
+            "默认",
+            "禁止",
+            "不要",
+            "只能",
+            "仅",
+            "优先",
+            "beta",
+            "测试版",
+            "system-shell",
+            "ubuntu-shell",
+            "回退",
+            "风控",
+            "风险",
+            "通讯版",
+        )
+        return markers.any { normalized.contains(it) }
     }
 
     private fun promptUtf8Bytes(value: String): Int {
@@ -740,7 +824,9 @@ class CliAgentChatActivity : AppCompatActivity() {
             extraEnv["ANTHROPIC_BASE_URL"] = config.baseUrl.trim()
         }
 
-        return runClaudeStreamJson(serverManager.startPrefixExecProcess(args, extraEnv))
+        val process = serverManager.startPrefixExecProcess(args, extraEnv)
+        runCatching { process.outputStream.close() }
+        return runClaudeStreamJson(process)
     }
 
     private fun buildClaudeSystemPromptFile(): String? {
@@ -983,8 +1069,15 @@ class CliAgentChatActivity : AppCompatActivity() {
     private fun shouldIgnoreProcessLine(line: String): Boolean {
         if (line.isBlank()) return true
         if (line == "LOGIN_SUCCESSFUL" || line == "TERMINAL_READY") return true
-        if (line.startsWith("Claude Code Warning: no stdin data received")) return true
-        if (line.startsWith("If piping from a slow command, redirect stdin explicitly")) return true
+        if (isClaudeStdinWarningLine(line)) return true
+        return false
+    }
+
+    private fun isClaudeStdinWarningLine(line: String): Boolean {
+        val normalized = line.trim().lowercase(Locale.US)
+        if (normalized.startsWith("warning: no stdin data received")) return true
+        if (normalized.startsWith("claude code warning: no stdin data received")) return true
+        if (normalized.startsWith("if piping from a slow command, redirect stdin explicitly")) return true
         return false
     }
 
@@ -1321,8 +1414,7 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun cleanClaudeOutput(raw: String): String {
         val filtered = raw.lineSequence()
-            .filterNot { it.startsWith("Claude Code Warning: no stdin data received") }
-            .filterNot { it.startsWith("If piping from a slow command, redirect stdin explicitly") }
+            .filterNot { isClaudeStdinWarningLine(it) }
             .joinToString("\n")
             .trim()
         return filtered.ifBlank { raw.trim() }
