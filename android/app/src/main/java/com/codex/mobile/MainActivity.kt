@@ -192,6 +192,7 @@ class MainActivity : AppCompatActivity() {
         }
         tabCodexButton.setOnClickListener {
             currentUiTarget = OPEN_TARGET_CODEX_HOME
+            ensureCodexProxyReadyAsync()
             webView.loadUrl("http://127.0.0.1:${CodexServerManager.SERVER_PORT}/")
             updateUiForCurrentTarget()
         }
@@ -231,6 +232,7 @@ class MainActivity : AppCompatActivity() {
             if (isOpenClawChatUrl(targetUrl)) {
                 ensureOpenClawGatewayAndLoad(targetUrl)
             } else {
+                ensureCodexProxyReadyAsync()
                 webView.loadUrl(targetUrl)
                 pendingLaunchUrl = null
             }
@@ -261,6 +263,7 @@ class MainActivity : AppCompatActivity() {
                 if (isOpenClawChatUrl(targetUrl)) {
                     ensureOpenClawGatewayAndLoad(targetUrl)
                 } else {
+                    ensureCodexProxyReadyAsync()
                     webView.loadUrl(targetUrl)
                     pendingLaunchUrl = null
                 }
@@ -922,6 +925,12 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "Codex proxy startup failed: ${error.message}")
             false
         }
+    }
+
+    private fun ensureCodexProxyReadyAsync() {
+        Thread {
+            ensureCodexProxyReady()
+        }.start()
     }
 
     private fun startOpenClawServicesSync(): Boolean {
