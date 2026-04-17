@@ -41,6 +41,9 @@ class CliAgentChatActivity : AppCompatActivity() {
         private const val CLAUDE_SUMMARY_CLIP_CHARS = 420
         private const val CLAUDE_SUMMARY_TOTAL_MAX_CHARS = 12_000
         private const val CLAUDE_NATIVE_SESSION_MODE = "claude_native_v1"
+        private const val NATIVE_BIND_RETRY_COOLDOWN_MS = 20_000L
+        private val CLAUDE_SESSION_ID_REGEX = Regex("""claude-code-[A-Za-z0-9._-]+""")
+        private val UUID_SESSION_ID_REGEX = Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
     }
 
     private lateinit var tvTitle: TextView
@@ -73,6 +76,7 @@ class CliAgentChatActivity : AppCompatActivity() {
     private var visibleMessages: List<DisplayMessage> = emptyList()
     private val attachedFiles = mutableListOf<LocalAttachment>()
     private val liveProcessLines = mutableListOf<String>()
+    private val nativeBindAttempts = mutableMapOf<String, Long>()
 
     @Volatile
     private var activeProcess: Process? = null
@@ -82,6 +86,15 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     @Volatile
     private var lastLiveRenderAtMs = 0L
+
+    @Volatile
+    private var nativeBindingInProgress = false
+
+    @Volatile
+    private var nativeBindingSessionId = ""
+
+    @Volatile
+    private var lastExecutionRoute = "未执行"
 
     private data class AgentRuntimeOptions(
         val allowSharedStorage: Boolean,
@@ -223,7 +236,9 @@ class CliAgentChatActivity : AppCompatActivity() {
         super.onResume()
         val preferredSession = intent.getStringExtra(EXTRA_SESSION_ID)
         activeSession = AgentSessionStore.ensureActiveSession(this, agentId, preferredSession)
+        refreshIdleRouteLabel()
         renderSession()
+        ensureNativeSessionBoundIfNeeded(trigger = "resume")
     }
 
     override fun onDestroy() {
@@ -246,9 +261,8 @@ class CliAgentChatActivity : AppCompatActivity() {
             val shared = if (runtimeOptions.allowSharedStorage) "开" else "关"
             val danger = if (runtimeOptions.dangerousAutoApprove) "开" else "关"
             val mode = if (runtimeOptions.claudeNativeSession) "原生会话" else "兼容会话"
-            val nativeShort = activeSession.nativeSessionId.trim().take(8)
-            val nativeTag = if (nativeShort.isBlank()) "未绑定" else nativeShort
-            "就绪 · 共享存储:$shared · 高权限:$danger · 会话模式:$mode · native:$nativeTag"
+            val nativeTag = buildNativeStatusTag()
+            "就绪 · 共享存储:$shared · 高权限:$danger · 会话模式:$mode · native:$nativeTag · 链路:$lastExecutionRoute"
         }
         tvAttachmentSummary.text = buildAttachmentSummary()
         renderBottomTabState()
@@ -305,11 +319,121 @@ class CliAgentChatActivity : AppCompatActivity() {
         btnClaude.isEnabled = agentId != ExternalAgentId.CLAUDE_CODE
     }
 
+    private fun buildNativeStatusTag(): String {
+        if (agentId != ExternalAgentId.CLAUDE_CODE) return "n/a"
+        if (!runtimeOptions.claudeNativeSession) return "关闭"
+        val nativeId = activeSession.nativeSessionId.trim()
+        if (nativeId.isNotBlank()) {
+            return "已绑定(${nativeId.take(10)})"
+        }
+        if (nativeBindingInProgress && nativeBindingSessionId == activeSession.sessionId) {
+            return "绑定中"
+        }
+        return "已启用(自动绑定)"
+    }
+
+    private fun refreshIdleRouteLabel() {
+        if (sending) return
+        lastExecutionRoute = when {
+            agentId != ExternalAgentId.CLAUDE_CODE -> "兼容链路"
+            runtimeOptions.claudeNativeSession && activeSession.nativeSessionId.isNotBlank() -> "原生链路"
+            runtimeOptions.claudeNativeSession -> "原生链路(自动绑定)"
+            else -> "兼容链路"
+        }
+    }
+
+    private fun markRouteOnStart(useNativeSession: Boolean) {
+        lastExecutionRoute = if (useNativeSession) "原生链路(执行中)" else "兼容链路(执行中)"
+        clearLiveProcessLines()
+        if (useNativeSession) {
+            val nativeId = activeSession.nativeSessionId.trim()
+            appendClaudeProcessLine(
+                liveProcessLines,
+                if (nativeId.isBlank()) "执行链路: 原生会话链路（本轮自动绑定）" else "执行链路: 原生会话链路（已绑定 ${nativeId.take(10)}）",
+            )
+        } else {
+            appendClaudeProcessLine(liveProcessLines, "执行链路: 兼容会话链路")
+        }
+    }
+
+    private fun ensureNativeSessionBoundIfNeeded(trigger: String, force: Boolean = false) {
+        if (agentId != ExternalAgentId.CLAUDE_CODE) return
+        if (!runtimeOptions.claudeNativeSession) return
+        if (sending) return
+        val snapshot = activeSession
+        if (snapshot.nativeSessionId.isNotBlank()) return
+        if (nativeBindingInProgress && nativeBindingSessionId == snapshot.sessionId) return
+
+        val now = System.currentTimeMillis()
+        val allowAttempt = synchronized(nativeBindAttempts) {
+            val lastAt = nativeBindAttempts[snapshot.sessionId] ?: 0L
+            val ready = force || now - lastAt >= NATIVE_BIND_RETRY_COOLDOWN_MS
+            if (ready) {
+                nativeBindAttempts[snapshot.sessionId] = now
+            }
+            ready
+        }
+        if (!allowAttempt) return
+
+        val modelConfig = AgentModelConfigStore.loadCurrentConfig(this, agentId) ?: return
+        nativeBindingInProgress = true
+        nativeBindingSessionId = snapshot.sessionId
+        renderSession()
+
+        Thread {
+            val result = runCatching {
+                runClaudePrint(
+                    config = modelConfig,
+                    prompt = buildNativeBindPrompt(trigger),
+                    options = runtimeOptions,
+                    sendPromptViaStdin = false,
+                )
+            }.getOrNull()
+            val capturedNative = result?.nativeSessionId?.trim().orEmpty()
+            var updated = snapshot
+            if (capturedNative.isNotBlank()) {
+                updated = AgentSessionStore.updateNativeSession(
+                    context = this,
+                    agentId = agentId,
+                    sessionId = snapshot.sessionId,
+                    nativeSessionId = capturedNative,
+                    nativeSessionMode = CLAUDE_NATIVE_SESSION_MODE,
+                ) ?: snapshot
+            }
+            runOnUiThread {
+                nativeBindingInProgress = false
+                nativeBindingSessionId = ""
+                if (activeSession.sessionId == updated.sessionId) {
+                    activeSession = updated
+                }
+                if (capturedNative.isNotBlank()) {
+                    lastExecutionRoute = "原生链路(已绑定)"
+                } else {
+                    refreshIdleRouteLabel()
+                }
+                renderSession()
+            }
+        }.start()
+    }
+
+    private fun buildNativeBindPrompt(trigger: String): String {
+        return buildString {
+            appendLine("你现在只执行原生会话绑定握手。")
+            appendLine("要求：")
+            appendLine("1) 不调用任何工具。")
+            appendLine("2) 不做解释。")
+            appendLine("3) 仅输出一行：NATIVE_SESSION_READY")
+            appendLine("trigger=$trigger")
+        }.trim()
+    }
+
     private fun createNewSession() {
         activeSession = AgentSessionStore.createSession(this, agentId)
         attachedFiles.clear()
         clearLiveProcessLines()
+        refreshIdleRouteLabel()
         renderSession()
+        ensureNativeSessionBoundIfNeeded(trigger = "new_session", force = true)
         Toast.makeText(this, "已新建会话", Toast.LENGTH_SHORT).show()
     }
 
@@ -328,24 +452,12 @@ class CliAgentChatActivity : AppCompatActivity() {
             runNativeManualCompaction()
             return
         }
-        val compacted = maybeCompactSessionIfNeeded(trigger = "manual_button", force = true)
-        if (compacted) {
-            renderSession()
-            Toast.makeText(this, getString(R.string.cli_compact_done), Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(this, getString(R.string.cli_compact_not_needed), Toast.LENGTH_SHORT).show()
-        }
+        runCompatibilityCompactionAndMaybeBind(trigger = "manual_button")
     }
 
     private fun runNativeManualCompaction() {
         if (activeSession.nativeSessionId.isBlank()) {
-            val compacted = maybeCompactSessionIfNeeded(trigger = "manual_button_native_fallback", force = true)
-            if (compacted) {
-                renderSession()
-                Toast.makeText(this, getString(R.string.cli_compact_done), Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, getString(R.string.cli_compact_not_needed), Toast.LENGTH_SHORT).show()
-            }
+            runCompatibilityCompactionAndMaybeBind(trigger = "manual_button_native_no_bind", forceBind = true)
             return
         }
         val modelConfig = AgentModelConfigStore.loadCurrentConfig(this, agentId)
@@ -355,7 +467,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
         sending = true
         abortRequested = false
-        clearLiveProcessLines()
+        markRouteOnStart(useNativeSession = true)
         renderSession()
         Thread {
             val result = runCatching {
@@ -364,7 +476,7 @@ class CliAgentChatActivity : AppCompatActivity() {
                     prompt = "/compact",
                     options = runtimeOptions,
                     resumeSessionId = activeSession.nativeSessionId.trim(),
-                    sendPromptViaStdin = true,
+                    sendPromptViaStdin = false,
                 )
             }.getOrElse { error ->
                 AgentRunResult(
@@ -372,7 +484,17 @@ class CliAgentChatActivity : AppCompatActivity() {
                     processText = snapshotLiveProcessLines().joinToString("\n").trim(),
                 )
             }
-            val nativeCompactFailed = result.assistantText.startsWith("上下文压缩执行失败：")
+            val nativeCompactFailed = result.assistantText.startsWith("上下文压缩执行失败：") || isNativeResultUnusable(result)
+            if (nativeCompactFailed) {
+                runOnUiThread {
+                    sending = false
+                    activeProcess = null
+                    clearLiveProcessLines()
+                    lastExecutionRoute = "原生压缩失败→兼容压缩回退"
+                    runCompatibilityCompactionAndMaybeBind(trigger = "manual_button_native_fallback_after_failure", forceBind = true)
+                }
+                return@Thread
+            }
             var nextSession = activeSession
             if (result.nativeSessionId.isNotBlank()) {
                 nextSession = AgentSessionStore.updateNativeSession(
@@ -404,14 +526,25 @@ class CliAgentChatActivity : AppCompatActivity() {
                 sending = false
                 activeProcess = null
                 clearLiveProcessLines()
+                lastExecutionRoute = "原生链路"
                 renderSession()
-                if (nativeCompactFailed) {
-                    Toast.makeText(this, getString(R.string.cli_compact_failed), Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, getString(R.string.cli_compact_done_native), Toast.LENGTH_SHORT).show()
-                }
+                Toast.makeText(this, getString(R.string.cli_compact_done_native), Toast.LENGTH_SHORT).show()
             }
         }.start()
+    }
+
+    private fun runCompatibilityCompactionAndMaybeBind(trigger: String, forceBind: Boolean = false) {
+        val compacted = maybeCompactSessionIfNeeded(trigger = trigger, force = true)
+        if (compacted) {
+            lastExecutionRoute = "兼容压缩链路"
+            renderSession()
+            Toast.makeText(this, getString(R.string.cli_compact_done), Toast.LENGTH_SHORT).show()
+            if (runtimeOptions.claudeNativeSession) {
+                ensureNativeSessionBoundIfNeeded(trigger = "post_compact_$trigger", force = forceBind)
+            }
+        } else {
+            Toast.makeText(this, getString(R.string.cli_compact_not_needed), Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun maybeCompactSessionIfNeeded(trigger: String, force: Boolean = false): Boolean {
@@ -630,6 +763,13 @@ class CliAgentChatActivity : AppCompatActivity() {
         return message.contains("argument list too long") || message.contains("error=7")
     }
 
+    private fun isNativeResultUnusable(result: AgentRunResult): Boolean {
+        val assistant = result.assistantText.trim()
+        if (assistant.isBlank()) return true
+        if (assistant == "Claude 未返回可解析内容") return true
+        return false
+    }
+
     private fun loadOlderMessages() {
         historyWindowSize = (historyWindowSize + HISTORY_STEP).coerceAtMost(MAX_VISIBLE_HISTORY)
         saveHistoryWindowSize(historyWindowSize)
@@ -681,7 +821,15 @@ class CliAgentChatActivity : AppCompatActivity() {
         switchNative.setOnCheckedChangeListener { _, checked ->
             runtimeOptions = runtimeOptions.copy(claudeNativeSession = checked)
             saveRuntimeOptions(runtimeOptions)
+            if (!checked) {
+                nativeBindingInProgress = false
+                nativeBindingSessionId = ""
+            }
+            refreshIdleRouteLabel()
             renderSession()
+            if (checked) {
+                ensureNativeSessionBoundIfNeeded(trigger = "switch_on", force = true)
+            }
         }
 
         val visible = filteredMessagesForDisplay()
@@ -757,15 +905,20 @@ class CliAgentChatActivity : AppCompatActivity() {
         val userText = buildUserMessageText(input, attachmentsSnapshot)
         inputMessage.setText("")
         activeSession = AgentSessionStore.appendMessage(this, agentId, activeSession.sessionId, "user", userText)
-        clearLiveProcessLines()
+        markRouteOnStart(useNativeSession)
         sending = true
         abortRequested = false
         renderSession()
 
         Thread {
+            var usedCompatibilityFallback = false
+            var capturedNativeSessionId = ""
             val result = runCatching {
                 val nativeSessionId = activeSession.nativeSessionId.trim()
                 val bootstrapFromHistory = useNativeSession && nativeSessionId.isBlank()
+                if (nativeSessionId.isNotBlank()) {
+                    capturedNativeSessionId = nativeSessionId
+                }
                 if (agentId == ExternalAgentId.CLAUDE_CODE &&
                     !useNativeSession &&
                     maybeCompactSessionIfNeeded(trigger = "auto_threshold")
@@ -793,15 +946,35 @@ class CliAgentChatActivity : AppCompatActivity() {
                     }
                     prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
                 }
-                when (agentId) {
+                var firstResult = when (agentId) {
                     ExternalAgentId.CLAUDE_CODE -> runClaudePrint(
                         config = modelConfig,
                         prompt = prompt,
                         options = runtimeOptions,
                         resumeSessionId = if (useNativeSession) nativeSessionId else "",
-                        sendPromptViaStdin = true,
+                        sendPromptViaStdin = !useNativeSession || bootstrapFromHistory,
                     )
                 }
+                if (firstResult.nativeSessionId.isNotBlank()) {
+                    capturedNativeSessionId = firstResult.nativeSessionId
+                }
+                if (useNativeSession && isNativeResultUnusable(firstResult)) {
+                    usedCompatibilityFallback = true
+                    appendClaudeProcessLine(liveProcessLines, "原生链路未返回可解析结果，自动回退兼容链路重试")
+                    val retryPrompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                    firstResult = when (agentId) {
+                        ExternalAgentId.CLAUDE_CODE -> runClaudePrint(
+                            config = modelConfig,
+                            prompt = retryPrompt,
+                            options = runtimeOptions,
+                            sendPromptViaStdin = true,
+                        )
+                    }
+                    if (firstResult.nativeSessionId.isNotBlank()) {
+                        capturedNativeSessionId = firstResult.nativeSessionId
+                    }
+                }
+                firstResult
             }.recoverCatching { error ->
                 if (agentId == ExternalAgentId.CLAUDE_CODE &&
                     !useNativeSession &&
@@ -814,6 +987,18 @@ class CliAgentChatActivity : AppCompatActivity() {
                         }
                     }
                     val retryPrompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                    when (agentId) {
+                        ExternalAgentId.CLAUDE_CODE -> runClaudePrint(
+                            config = modelConfig,
+                            prompt = retryPrompt,
+                            options = runtimeOptions,
+                            sendPromptViaStdin = true,
+                        )
+                    }
+                } else if (agentId == ExternalAgentId.CLAUDE_CODE && useNativeSession) {
+                    appendClaudeProcessLine(liveProcessLines, "原生链路异常，自动回退兼容链路重试")
+                    val retryPrompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                    usedCompatibilityFallback = true
                     when (agentId) {
                         ExternalAgentId.CLAUDE_CODE -> runClaudePrint(
                             config = modelConfig,
@@ -836,12 +1021,13 @@ class CliAgentChatActivity : AppCompatActivity() {
             }
 
             var nextSession = activeSession
-            if (useNativeSession && result.nativeSessionId.isNotBlank()) {
+            val nativeSessionToPersist = capturedNativeSessionId.ifBlank { result.nativeSessionId }
+            if (useNativeSession && nativeSessionToPersist.isNotBlank()) {
                 nextSession = AgentSessionStore.updateNativeSession(
                     context = this,
                     agentId = agentId,
                     sessionId = nextSession.sessionId,
-                    nativeSessionId = result.nativeSessionId,
+                    nativeSessionId = nativeSessionToPersist,
                     nativeSessionMode = CLAUDE_NATIVE_SESSION_MODE,
                 ) ?: nextSession
             }
@@ -867,6 +1053,11 @@ class CliAgentChatActivity : AppCompatActivity() {
                 sending = false
                 activeProcess = null
                 clearLiveProcessLines()
+                lastExecutionRoute = when {
+                    useNativeSession && usedCompatibilityFallback -> "原生失败→兼容回退"
+                    useNativeSession -> "原生链路"
+                    else -> "兼容链路"
+                }
                 renderSession()
             }
         }.start()
@@ -886,22 +1077,14 @@ class CliAgentChatActivity : AppCompatActivity() {
             out.appendLine("3) Ubuntu 命令使用 ubuntu-shell <command> 或直接 Linux 命令。")
             out.appendLine("4) 先做必要验证再给结论，且不要复述整段预检文本。")
             out.appendLine("5) 若某链路失败，需明确失败原因并自动切换可用链路继续。")
-            if (agentId == ExternalAgentId.CLAUDE_CODE) {
-                out.appendLine("6) 本会话已注入 AnyClaw MCP 工具箱，调用时优先使用 mcp__anyclaw_toolbox__ 前缀工具名。")
-                out.appendLine("7) 网页自动化调用请使用 mcp__anyclaw_toolbox__start_web/stop_web/web_*，避免裸 start_web/web_*。")
-                out.appendLine("8) 若 anyclaw_ 工具不可见或调用失败，必须输出 MCP_TOOLBOX_STATUS=UNAVAILABLE，并给出 reason 与 step。")
-                out.appendLine("9) 联网检索优先 mcp__anyclaw_toolbox__anyclaw_exa_search；若 Exa 超时将自动回退到 Tavily。")
-                out.appendLine("10) 需要 Exa 高级能力时，优先使用 anyclaw_exa_search_advanced / anyclaw_exa_search_api / anyclaw_exa_contents_api。")
-            }
+            appendToolRoutingRules(out)
             out.appendLine()
             out.appendLine("自动注入预检结果：")
             out.appendLine(buildRuntimeProbeBlock(options))
             out.appendLine()
-            if (agentId == ExternalAgentId.CLAUDE_CODE) {
-                out.appendLine("AnyClaw MCP注入状态：")
-                out.appendLine(buildClaudeMcpProbeBlock(options))
-                out.appendLine()
-            }
+            out.appendLine("AnyClaw MCP注入状态：")
+            out.appendLine(buildClaudeMcpProbeBlock(options))
+            out.appendLine()
         }
         out.appendLine("会话上下文如下：")
         recent.forEach { msg ->
@@ -926,9 +1109,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         out.appendLine("1) Android 系统级命令必须使用 system-shell <command>。")
         out.appendLine("2) Ubuntu 命令使用 ubuntu-shell <command> 或直接 Linux 命令。")
         out.appendLine("3) 若某链路失败，明确失败原因并自动切换可用链路继续。")
-        out.appendLine("4) 本会话已注入 AnyClaw MCP 工具箱，优先使用 mcp__anyclaw_toolbox__ 前缀工具名。")
-        out.appendLine("5) 网页自动化请使用 mcp__anyclaw_toolbox__start_web/stop_web/web_*。")
-        out.appendLine("6) 若 anyclaw 工具不可见或调用失败，输出 MCP_TOOLBOX_STATUS=UNAVAILABLE 并给出 reason 与 step。")
+        appendToolRoutingRules(out)
         out.appendLine()
         out.appendLine("自动注入预检结果：")
         out.appendLine(buildRuntimeProbeBlock(options))
@@ -939,6 +1120,18 @@ class CliAgentChatActivity : AppCompatActivity() {
         out.appendLine("当前用户请求：")
         out.appendLine(userText)
         return out.toString().trim()
+    }
+
+    private fun appendToolRoutingRules(out: StringBuilder) {
+        out.appendLine("6) 本会话已注入 AnyClaw MCP 工具箱，调用时优先使用 mcp__anyclaw_toolbox__ 前缀工具名。")
+        out.appendLine("7) 文件检索/读写/构建/测试优先 anyclaw_terminal；确定性文件改写优先 anyclaw_apply_file。")
+        out.appendLine("8) anyclaw_terminal 默认 cwd 在 workspace_root，并可通过绝对路径访问共享存储（如 /sdcard）。")
+        out.appendLine("9) anyclaw_apply_file 仅允许 workspace_root 内路径，不可用于工作区外写入。")
+        out.appendLine("10) Android 设备控制（蓝牙/WiFi/应用列表/UI自动化）才使用 anyclaw_device_exec/device_uiautomator_dump。")
+        out.appendLine("11) 禁止使用 anyclaw_device_exec 做工作区文件搜索/移动/编辑。")
+        out.appendLine("12) 联网搜索优先 anyclaw_exa_search 系列（含 advanced/api/contents）；不可用再回退 anyclaw_tavily_search。")
+        out.appendLine("13) 网页自动化调用请使用 mcp__anyclaw_toolbox__start_web/stop_web/web_*，避免裸 start_web/web_*。")
+        out.appendLine("14) 若 anyclaw_ 工具不可见或调用失败，必须输出 MCP_TOOLBOX_STATUS=UNAVAILABLE，并给出 reason 与 step。")
     }
 
     private fun runClaudePrint(
@@ -1123,8 +1316,13 @@ class CliAgentChatActivity : AppCompatActivity() {
     }
 
     private fun parseClaudeStreamLine(line: String, state: ClaudeStreamParseState): Boolean {
-        if (!line.startsWith("{")) return false
-        val payload = runCatching { JSONObject(line) }.getOrNull() ?: return false
+        val jsonText = if (line.startsWith("data:")) line.removePrefix("data:").trim() else line
+        if (!jsonText.startsWith("{")) {
+            maybeCaptureNativeSessionIdFromText(line, state)
+            return false
+        }
+        val payload = runCatching { JSONObject(jsonText) }.getOrNull() ?: return false
+        maybeCaptureNativeSessionIdFromPayload(payload, state)
         val type = payload.optString("type").trim()
         if (type.isBlank()) return false
 
@@ -1132,10 +1330,6 @@ class CliAgentChatActivity : AppCompatActivity() {
             "system" -> {
                 val subtype = payload.optString("subtype").trim()
                 if (subtype.equals("init", ignoreCase = true)) {
-                    val sessionId = payload.optString("session_id").trim()
-                    if (sessionId.isNotBlank()) {
-                        state.sessionId = sessionId
-                    }
                     appendClaudeProcessLine(state.processLines, "Claude 会话已初始化")
                 }
             }
@@ -1176,6 +1370,58 @@ class CliAgentChatActivity : AppCompatActivity() {
             }
         }
         return true
+    }
+
+    private fun maybeCaptureNativeSessionIdFromPayload(payload: JSONObject, state: ClaudeStreamParseState) {
+        if (state.sessionId.isNotBlank()) return
+        val candidates = mutableListOf<String>()
+        listOf(
+            payload.optString("session_id").trim(),
+            payload.optString("sessionId").trim(),
+            payload.optString("conversation_id").trim(),
+        ).filter { it.isNotBlank() }.forEach { candidates += it }
+
+        val sessionObj = payload.optJSONObject("session")
+        if (sessionObj != null) {
+            listOf(
+                sessionObj.optString("id").trim(),
+                sessionObj.optString("session_id").trim(),
+                sessionObj.optString("sessionId").trim(),
+            ).filter { it.isNotBlank() }.forEach { candidates += it }
+        }
+
+        val match = candidates.firstOrNull { looksLikeNativeSessionId(it) }
+        if (!match.isNullOrBlank()) {
+            state.sessionId = match.trim()
+            return
+        }
+        val claudeStyle = CLAUDE_SESSION_ID_REGEX.find(payload.toString())?.value?.trim().orEmpty()
+        if (claudeStyle.isNotBlank()) {
+            state.sessionId = claudeStyle
+        }
+    }
+
+    private fun maybeCaptureNativeSessionIdFromText(raw: String, state: ClaudeStreamParseState) {
+        if (state.sessionId.isNotBlank()) return
+        val claudeStyle = CLAUDE_SESSION_ID_REGEX.find(raw)?.value?.trim().orEmpty()
+        if (claudeStyle.isNotBlank()) {
+            state.sessionId = claudeStyle
+            return
+        }
+        val normalized = raw.lowercase(Locale.US)
+        if (!normalized.contains("session")) return
+        val uuidStyle = UUID_SESSION_ID_REGEX.find(raw)?.value?.trim().orEmpty()
+        if (uuidStyle.isNotBlank()) {
+            state.sessionId = uuidStyle
+        }
+    }
+
+    private fun looksLikeNativeSessionId(value: String): Boolean {
+        val normalized = value.trim()
+        if (normalized.isBlank()) return false
+        if (normalized.startsWith("claude-code-")) return true
+        if (UUID_SESSION_ID_REGEX.matches(normalized)) return true
+        return false
     }
 
     private fun parseClaudeMessageContent(message: JSONObject, state: ClaudeStreamParseState) {
@@ -1256,9 +1502,10 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun isClaudeStdinWarningLine(line: String): Boolean {
         val normalized = line.trim().lowercase(Locale.US)
-        if (normalized.startsWith("warning: no stdin data received")) return true
-        if (normalized.startsWith("claude code warning: no stdin data received")) return true
-        if (normalized.startsWith("if piping from a slow command, redirect stdin explicitly")) return true
+        if (normalized.contains("warning: no stdin data received")) return true
+        if (normalized.contains("claude code warning: no stdin data received")) return true
+        if (normalized.contains("if piping from a slow command, redirect stdin explicitly")) return true
+        if (normalized.contains("< /dev/null to skip, or wait longer")) return true
         return false
     }
 
@@ -1546,6 +1793,10 @@ class CliAgentChatActivity : AppCompatActivity() {
             appendLine("required_probe_tools=${required.joinToString(",")}")
             appendLine("required_probe_missing=${if (missing.isEmpty()) "none" else missing.joinToString(",")}")
             appendLine("mcp_toolbox_status_hint=$statusHint")
+            appendLine("tool_boundary_anyclaw_terminal=local_shell_default_cwd_workspace_root_shared_storage_rw_supported")
+            appendLine("tool_boundary_anyclaw_apply_file=workspace_root_only")
+            appendLine("tool_boundary_anyclaw_device_exec=android_system_shell_uid2000_no_app_private_home_access")
+            appendLine("tool_priority_hint=file_ops:anyclaw_terminal>anyclaw_apply_file search:anyclaw_exa_* fallback:anyclaw_tavily_search device_ops:anyclaw_device_exec")
             appendLine("if_tools_unavailable_report=MCP_TOOLBOX_STATUS=UNAVAILABLE reason=<no_anyclaw_tools|tool_call_error|tool_timeout> step=<list|device|search|github>")
         }.trim()
     }
