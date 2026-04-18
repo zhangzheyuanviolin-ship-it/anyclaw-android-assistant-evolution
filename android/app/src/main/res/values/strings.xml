@@ -78,7 +78,7 @@
     <string name="model_manager_claude_button_text">Claude Code 模型</string>
     <string name="model_manager_codex_button_text">Codex 模型</string>
     <string name="codex_model_manager_title">Codex 模型管理</string>
-    <string name="codex_model_manager_subtitle">支持 Token 与 API Key 两种鉴权，可选择常见 OpenAI 兼容提供商预设，支持新增、编辑、删除、切换默认和连接测试。</string>
+    <string name="codex_model_manager_subtitle">支持 Token 与 API Key 两种鉴权；自动索引浏览器登录账号可用模型，支持新增、编辑、切换当前模型、连接测试与生效校验。</string>
     <string name="model_manager_refresh">刷新</string>
     <string name="model_manager_create_button">手动创建新模型</string>
     <string name="model_manager_test_connection">测试连接</string>

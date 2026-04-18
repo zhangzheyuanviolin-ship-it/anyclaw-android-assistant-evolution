@@ -726,9 +726,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Step 3: Codex is optional on first run. Do not block OpenClaw-only users.
-        val codexCliInstalled = serverManager.isCodexInstalled()
+        var codexCliInstalled = serverManager.isCodexInstalled()
+        var codexBinaryInstalled = serverManager.isPlatformBinaryInstalled()
         if (codexCliInstalled) {
-            serverManager.ensureCodexWrapperScript()
+            updateStatus("Checking Codex runtime integrity…")
+            val integrityOk = serverManager.ensureCodexRuntimeIntegrity { msg -> updateDetail(msg) }
+            codexCliInstalled = serverManager.isCodexInstalled()
+            codexBinaryInstalled = serverManager.isPlatformBinaryInstalled()
+            if (!integrityOk) {
+                updateStatus("Codex integrity check failed", "You can repair Codex in Permission Center")
+            }
         } else {
             updateStatus("Skipping optional Codex CLI install", "You can install it later in Permission Center")
         }
@@ -738,7 +745,6 @@ class MainActivity : AppCompatActivity() {
         serverManager.installServerBundle { msg -> updateDetail(msg) }
 
         // Step 3b: Codex platform binary is also optional and can be installed later.
-        val codexBinaryInstalled = serverManager.isPlatformBinaryInstalled()
         when {
             codexCliInstalled && codexBinaryInstalled -> updateStatus("Codex ready")
             codexCliInstalled -> updateStatus("Codex native binary not installed", "You can complete it later in Permission Center")

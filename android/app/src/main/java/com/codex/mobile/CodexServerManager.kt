@@ -7,6 +7,7 @@ import java.io.File
 import java.io.InputStreamReader
 import java.io.InterruptedIOException
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
@@ -2466,6 +2467,70 @@ WEOF
         Log.i(TAG, "Created codex wrapper at $codexBin")
     }
 
+    fun ensureCodexRuntimeIntegrity(onProgress: (String) -> Unit): Boolean {
+        if (!isCodexInstalled()) {
+            onProgress("Codex CLI not installed; skip integrity check")
+            return true
+        }
+
+        var repaired = false
+        var cliVersion = getInstalledCodexVersion()
+        if (cliVersion.isBlank() || cliVersion != CODEX_VERSION) {
+            onProgress("Codex CLI version mismatch (installed=${cliVersion.ifBlank { "unknown" }}, expected=$CODEX_VERSION), repairing…")
+            if (!installCodex(onProgress)) {
+                onProgress("Codex CLI repair failed")
+                return false
+            }
+            repaired = true
+            cliVersion = getInstalledCodexVersion()
+        }
+
+        ensureCodexWrapperScript()
+        val paths = BootstrapInstaller.getPaths(context)
+        val wrapperFile = File(paths.prefixDir, "bin/codex")
+        if (!isCodexWrapperHealthy(wrapperFile)) {
+            onProgress("Codex wrapper check failed after repair")
+            return false
+        }
+
+        val nativeInstalled = isPlatformBinaryInstalled()
+        val nativeVersion = getInstalledCodexNativeVersion()
+        val needNativeRepair = !nativeInstalled ||
+            nativeVersion.isBlank() ||
+            (cliVersion.isNotBlank() && nativeVersion != cliVersion)
+
+        if (needNativeRepair) {
+            onProgress(
+                "Codex native binary mismatch (installed=${nativeVersion.ifBlank { "missing" }}, expected=${cliVersion.ifBlank { CODEX_VERSION }}), repairing…",
+            )
+            if (!installPlatformBinary(onProgress)) {
+                onProgress("Codex native binary repair failed")
+                return false
+            }
+            repaired = true
+        }
+
+        val finalCli = getInstalledCodexVersion()
+        val finalNative = getInstalledCodexNativeVersion()
+        if (!isPlatformBinaryInstalled()) {
+            onProgress("Codex native binary missing after repair")
+            return false
+        }
+        if (finalCli.isNotBlank() && finalNative.isNotBlank() && finalCli != finalNative) {
+            onProgress("Codex version still mismatched after repair: cli=$finalCli native=$finalNative")
+            return false
+        }
+
+        onProgress(
+            if (repaired) {
+                "Codex wrapper/native integrity repaired and verified (cli=${finalCli.ifBlank { "unknown" }}, native=${finalNative.ifBlank { "unknown" }})"
+            } else {
+                "Codex wrapper/native integrity verified (cli=${finalCli.ifBlank { "unknown" }}, native=${finalNative.ifBlank { "unknown" }})"
+            },
+        )
+        return true
+    }
+
     private fun isCodexWrapperHealthy(codexBin: File): Boolean {
         return runCatching {
             if (!codexBin.exists()) return false
@@ -3831,6 +3896,10 @@ EOF
             }
 
             val selected = CodexModelConfigStore.loadCurrentConfig(context)
+            if (selected != null && selected.baseUrl.isNotBlank() && !isSafeCodexBaseUrl(selected.baseUrl)) {
+                Log.w(TAG, "Refusing unsafe Codex baseUrl in selected model config: ${selected.baseUrl}")
+                return@runCatching false
+            }
             val managedBody = buildCodexManagedConfigBlock(selected)
             val changed = upsertManagedBlock(
                 file = configFile,
@@ -3899,11 +3968,18 @@ EOF
     private fun normalizeCodexModelName(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed.isBlank()) return ""
-        return if (trimmed.contains('/')) {
-            trimmed.substringAfterLast('/').trim()
-        } else {
-            trimmed
-        }
+        return trimmed
+    }
+
+    private fun isSafeCodexBaseUrl(raw: String): Boolean {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return true
+        val uri = runCatching { URI(trimmed) }.getOrNull() ?: return false
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        val host = uri.host?.lowercase().orEmpty()
+        if (scheme == "https") return true
+        if (scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1")) return true
+        return false
     }
 
     private fun sanitizeTomlKey(raw: String): String {

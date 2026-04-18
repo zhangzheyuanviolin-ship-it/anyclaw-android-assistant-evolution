@@ -17,14 +17,48 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import java.io.File
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
+import java.security.MessageDigest
+import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 
 class CodexModelManagerActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TOKEN_CATALOG_PREFIX = "codex-token-runtime-"
+        private const val TOKEN_PROVIDER_ID = "openai_token_catalog"
+        private const val TOKEN_PROVIDER_NAME = "OpenAI 登录模型"
+    }
 
     private data class AuthModeOption(
         val mode: CodexAuthMode,
         val label: String,
+    )
+
+    private data class RuntimeModelOption(
+        val modelId: String,
+        val displayName: String,
+        val isDefault: Boolean,
+    )
+
+    private data class RuntimeSnapshot(
+        val loggedIn: Boolean,
+        val accountEmail: String,
+        val models: List<RuntimeModelOption>,
+        val runtimeModel: String,
+        val runtimeProvider: String,
+        val runtimeBaseUrl: String,
+    )
+
+    private data class ApplyVerification(
+        val matched: Boolean?,
+        val actualModel: String,
+        val actualProvider: String,
+        val source: String,
     )
 
     private lateinit var tvTitle: TextView
@@ -36,6 +70,7 @@ class CodexModelManagerActivity : AppCompatActivity() {
 
     private val serverManager by lazy { CodexServerManager(this) }
     private var rows: List<CodexModelConfig> = emptyList()
+    private var runtimeSnapshot: RuntimeSnapshot? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,11 +96,23 @@ class CodexModelManagerActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        rows = CodexModelConfigStore.loadConfigs(this)
-        renderRows()
+        btnRefresh.isEnabled = false
+        tvStatus.text = "正在刷新 Codex 模型配置与运行态…"
+        Thread {
+            val snapshot = loadRuntimeSnapshot()
+            runtimeSnapshot = snapshot
+            runCatching { syncRuntimeTokenCatalog(snapshot) }
+            val updatedRows = CodexModelConfigStore.loadConfigs(this)
+            val statusText = buildStatusText(updatedRows, snapshot)
+            runOnUiThread {
+                rows = updatedRows
+                btnRefresh.isEnabled = true
+                renderRows(statusText)
+            }
+        }.start()
     }
 
-    private fun renderRows() {
+    private fun renderRows(statusText: String) {
         listView.adapter = object : BaseAdapter() {
             override fun getCount(): Int = rows.size
 
@@ -77,39 +124,70 @@ class CodexModelManagerActivity : AppCompatActivity() {
                 val rowView = convertView ?: LayoutInflater.from(this@CodexModelManagerActivity)
                     .inflate(R.layout.item_agent_model_row, parent, false)
                 val row = rows[position]
+                val runtimeCatalog = isRuntimeCatalogRow(row)
                 val checkedPrefix = if (row.isDefault) "✓ " else ""
                 rowView.findViewById<TextView>(R.id.tvAgentModelRowTitle).text = "$checkedPrefix${row.displayName}"
                 rowView.findViewById<TextView>(R.id.tvAgentModelRowMeta).text =
-                    "model=${row.modelId} | provider=${row.providerName}\nauth=${authLabel(row.authMode)}\n${row.baseUrl.ifBlank { "baseUrl=默认" }}"
+                    "model=${row.modelId} | provider=${row.providerName}\nauth=${authLabel(row.authMode)} | source=${if (runtimeCatalog) "runtime_catalog" else "manual"}\n${row.baseUrl.ifBlank { "baseUrl=默认" }}"
 
                 rowView.findViewById<Button>(R.id.btnAgentModelRowSelect).setOnClickListener {
                     CodexModelConfigStore.setDefault(this@CodexModelManagerActivity, row.id)
-                    applySelectedConfigInBackground(showToast = true)
-                    refresh()
+                    applySelectedConfigInBackground(showToast = true, expected = row)
                 }
-                rowView.findViewById<Button>(R.id.btnAgentModelRowEdit).setOnClickListener {
-                    showEditDialog(row)
+                val btnEdit = rowView.findViewById<Button>(R.id.btnAgentModelRowEdit)
+                val btnDelete = rowView.findViewById<Button>(R.id.btnAgentModelRowDelete)
+                btnEdit.isEnabled = !runtimeCatalog
+                btnDelete.isEnabled = !runtimeCatalog
+                btnEdit.alpha = if (runtimeCatalog) 0.55f else 1f
+                btnDelete.alpha = if (runtimeCatalog) 0.55f else 1f
+
+                btnEdit.setOnClickListener {
+                    if (runtimeCatalog) {
+                        Toast.makeText(
+                            this@CodexModelManagerActivity,
+                            "登录态模型由系统自动维护，不能直接编辑。",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    } else {
+                        showEditDialog(row)
+                    }
                 }
-                rowView.findViewById<Button>(R.id.btnAgentModelRowDelete).setOnClickListener {
-                    confirmDelete(row)
+                btnDelete.setOnClickListener {
+                    if (runtimeCatalog) {
+                        Toast.makeText(
+                            this@CodexModelManagerActivity,
+                            "登录态模型由系统自动维护，不能直接删除。",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    } else {
+                        confirmDelete(row)
+                    }
                 }
-                rowView.setOnClickListener { showEditDialog(row) }
+                rowView.setOnClickListener {
+                    if (!runtimeCatalog) {
+                        showEditDialog(row)
+                    }
+                }
                 return rowView
             }
         }
 
-        tvStatus.text = if (rows.isEmpty()) "暂无 Codex 模型配置" else "共 ${rows.size} 条 Codex 模型配置"
+        tvStatus.text = statusText
     }
 
     private fun confirmDelete(config: CodexModelConfig) {
+        if (isRuntimeCatalogRow(config)) {
+            Toast.makeText(this, "登录态模型由系统自动维护，不能删除。", Toast.LENGTH_SHORT).show()
+            return
+        }
         AlertDialog.Builder(this)
             .setTitle("删除模型")
             .setMessage("确定删除 ${config.displayName} 吗？")
             .setNegativeButton(getString(R.string.cancel), null)
             .setPositiveButton(getString(R.string.conversation_action_delete)) { _, _ ->
                 CodexModelConfigStore.deleteConfig(this, config.id)
-                applySelectedConfigInBackground(showToast = false)
-                refresh()
+                val expected = CodexModelConfigStore.loadCurrentConfig(this)
+                applySelectedConfigInBackground(showToast = false, expected = expected)
                 Toast.makeText(this, "模型已删除", Toast.LENGTH_SHORT).show()
             }
             .show()
@@ -135,7 +213,7 @@ class CodexModelManagerActivity : AppCompatActivity() {
         }
 
         val modelIdHelp = TextView(this).apply {
-            text = "模型ID支持两种写法：`gpt-5.4` 或 `provider/gpt-5.4`。已选预设时推荐只填模型名。"
+            text = "模型ID默认填写模型名（如 gpt-5.4）；若服务商要求 provider/model（如 deepseek/deepseek-chat）也可直接填写，系统会原样保存。"
             textSize = 12f
         }
 
@@ -290,8 +368,8 @@ class CodexModelManagerActivity : AppCompatActivity() {
                 ) ?: return@setOnClickListener
 
                 CodexModelConfigStore.saveConfig(this, config)
-                applySelectedConfigInBackground(showToast = true)
-                refresh()
+                val expected = if (config.isDefault) config else CodexModelConfigStore.loadCurrentConfig(this)
+                applySelectedConfigInBackground(showToast = true, expected = expected)
                 dialog.dismiss()
             }
         }
@@ -325,6 +403,11 @@ class CodexModelManagerActivity : AppCompatActivity() {
                 baseUrlInput.error = "API 模式下 Base URL 必填"
                 return null
             }
+            val baseUrlError = validateApiBaseUrl(baseUrl)
+            if (baseUrlError != null) {
+                baseUrlInput.error = baseUrlError
+                return null
+            }
             if (apiKey.isBlank()) {
                 apiKeyInput.error = "API 模式下 API Key 必填"
                 return null
@@ -349,9 +432,7 @@ class CodexModelManagerActivity : AppCompatActivity() {
     }
 
     private fun normalizeModelId(raw: String): String {
-        val trimmed = raw.trim()
-        if (trimmed.isBlank()) return ""
-        return if (trimmed.contains('/')) trimmed.substringAfterLast('/').trim() else trimmed
+        return raw.trim()
     }
 
     private fun authLabel(mode: CodexAuthMode): String {
@@ -367,10 +448,17 @@ class CodexModelManagerActivity : AppCompatActivity() {
             val message = when (config.authMode) {
                 CodexAuthMode.TOKEN -> {
                     val ok = runCatching { serverManager.isLoggedIn() }.getOrElse { false }
-                    if (ok) {
-                        "连接测试通过：Token 模式已登录 Codex。"
-                    } else {
+                    if (!ok) {
                         "连接测试失败：当前未登录 Codex，请先在权限中心完成登录。"
+                    } else {
+                        val runtimeIds = runCatching { loadRuntimeModelIds() }.getOrElse { emptySet() }
+                        if (runtimeIds.isEmpty()) {
+                            "连接测试通过：Token 模式已登录 Codex（未取到模型目录，建议稍后刷新重试）。"
+                        } else if (runtimeIds.contains(config.modelId.trim())) {
+                            "连接测试通过：Token 模式已登录，且模型 ${config.modelId} 可用。"
+                        } else {
+                            "连接测试提示：已登录，但当前账号模型目录未包含 ${config.modelId}。"
+                        }
                     }
                 }
 
@@ -387,6 +475,17 @@ class CodexModelManagerActivity : AppCompatActivity() {
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show()
             }
         }.start()
+    }
+
+    private fun validateApiBaseUrl(baseUrl: String): String? {
+        val trimmed = baseUrl.trim()
+        if (trimmed.isBlank()) return "Base URL 不能为空"
+        val uri = runCatching { URI(trimmed) }.getOrNull() ?: return "Base URL 格式无效"
+        val scheme = uri.scheme?.lowercase(Locale.US).orEmpty()
+        val host = uri.host?.lowercase(Locale.US).orEmpty()
+        if (scheme == "https") return null
+        if (scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1")) return null
+        return "仅允许 https 端点；若为本机调试可使用 http://localhost"
     }
 
     private fun probeApiProvider(baseUrl: String, apiKey: String): Pair<Boolean, String> {
@@ -426,18 +525,269 @@ class CodexModelManagerActivity : AppCompatActivity() {
         return false to lastError
     }
 
-    private fun applySelectedConfigInBackground(showToast: Boolean) {
+    private fun applySelectedConfigInBackground(
+        showToast: Boolean,
+        expected: CodexModelConfig?,
+    ) {
         Thread {
             val ok = runCatching { serverManager.applySelectedCodexModelConfig(force = true) }.getOrElse { false }
+            val verify = if (ok) verifyAppliedConfig(expected) else null
             runOnUiThread {
                 if (showToast) {
                     if (ok) {
-                        Toast.makeText(this, "模型配置已保存并生效", Toast.LENGTH_SHORT).show()
+                        val verifyMsg = when (verify?.matched) {
+                            true -> "已验证生效：${verify.actualProvider.ifBlank { "unknown" }}/${verify.actualModel.ifBlank { "unknown" }} (${verify.source})"
+                            false -> "应用完成，但运行态与预期不一致：实际 ${verify.actualProvider.ifBlank { "unknown" }}/${verify.actualModel.ifBlank { "unknown" }} (${verify.source})"
+                            null -> "模型配置已应用（运行态暂不可验证）"
+                        }
+                        Toast.makeText(this, verifyMsg, Toast.LENGTH_LONG).show()
                     } else {
                         Toast.makeText(this, "模型配置已保存，但应用配置失败，请重试", Toast.LENGTH_LONG).show()
                     }
                 }
+                refresh()
             }
         }.start()
+    }
+
+    private fun verifyAppliedConfig(expected: CodexModelConfig?): ApplyVerification {
+        val expectedModel = normalizeModelId(expected?.modelId.orEmpty())
+        val expectedProvider = expected?.let { expectedProviderFor(it) }.orEmpty()
+
+        val rpcResult = runCatching { readRuntimeEffectiveModelFromRpc() }.getOrNull()
+        if (rpcResult != null) {
+            val actualModel = normalizeModelId(rpcResult.first)
+            val actualProvider = rpcResult.second.trim()
+            if (actualModel.isNotBlank()) {
+                val matched = expectedModel.isNotBlank() &&
+                    expectedModel.equals(actualModel, ignoreCase = true) &&
+                    (expectedProvider.isBlank() || expectedProvider.equals(actualProvider, ignoreCase = true))
+                return ApplyVerification(
+                    matched = matched,
+                    actualModel = actualModel,
+                    actualProvider = actualProvider,
+                    source = "rpc",
+                )
+            }
+        }
+
+        val fileResult = runCatching { readManagedModelFromConfigFile() }.getOrNull()
+        if (fileResult != null) {
+            val actualModel = normalizeModelId(fileResult.first)
+            val actualProvider = fileResult.second.trim()
+            if (actualModel.isNotBlank()) {
+                val matched = expectedModel.isNotBlank() &&
+                    expectedModel.equals(actualModel, ignoreCase = true) &&
+                    (expectedProvider.isBlank() || expectedProvider.equals(actualProvider, ignoreCase = true))
+                return ApplyVerification(
+                    matched = matched,
+                    actualModel = actualModel,
+                    actualProvider = actualProvider,
+                    source = "config.toml",
+                )
+            }
+        }
+
+        return ApplyVerification(
+            matched = null,
+            actualModel = "",
+            actualProvider = "",
+            source = "unavailable",
+        )
+    }
+
+    private fun expectedProviderFor(config: CodexModelConfig): String {
+        return if (config.authMode == CodexAuthMode.TOKEN) {
+            "openai"
+        } else {
+            config.providerId.trim().ifBlank { "custom_openai_compatible" }
+                .replace(Regex("[^a-zA-Z0-9_]+"), "_")
+                .trim('_')
+                .ifBlank { "custom_openai_compatible" }
+                .let { key ->
+                    when (key) {
+                        "openai", "ollama", "lmstudio" -> "${key}_proxy"
+                        else -> key
+                    }
+                }
+        }
+    }
+
+    private fun readRuntimeEffectiveModelFromRpc(): Pair<String, String> {
+        val result = LocalBridgeClients.callCodexRpc("config/read")
+        val config = result.optJSONObject("config") ?: JSONObject()
+        val model = normalizeModelId(config.optString("model", ""))
+        val provider = config.optString("model_provider", "").trim()
+        return model to provider
+    }
+
+    private fun readManagedModelFromConfigFile(): Pair<String, String> {
+        val paths = BootstrapInstaller.getPaths(this)
+        val configFile = File(paths.homeDir, ".codex/config.toml")
+        if (!configFile.exists()) return "" to ""
+        val text = configFile.readText()
+        val startMarker = "# >>> pocketlobster-codex-model >>>"
+        val endMarker = "# <<< pocketlobster-codex-model <<<"
+        val start = text.indexOf(startMarker)
+        val end = text.indexOf(endMarker)
+        if (start < 0 || end <= start) return "" to ""
+        val block = text.substring(start + startMarker.length, end)
+        val model = Regex("(?m)^\\s*model\\s*=\\s*\"([^\"]+)\"")
+            .find(block)
+            ?.groupValues
+            ?.getOrNull(1)
+            .orEmpty()
+            .trim()
+        val provider = Regex("(?m)^\\s*model_provider\\s*=\\s*\"([^\"]+)\"")
+            .find(block)
+            ?.groupValues
+            ?.getOrNull(1)
+            .orEmpty()
+            .trim()
+        return model to provider
+    }
+
+    private fun isRuntimeCatalogRow(config: CodexModelConfig): Boolean {
+        return config.id.startsWith(TOKEN_CATALOG_PREFIX)
+    }
+
+    private fun loadRuntimeSnapshot(): RuntimeSnapshot {
+        val loggedIn = runCatching { serverManager.isLoggedIn() }.getOrElse { false }
+        val accountEmail = runCatching {
+            LocalBridgeClients.callCodexRpc("account/read")
+                .optJSONObject("account")
+                ?.optString("email", "")
+                .orEmpty()
+                .trim()
+        }.getOrElse { "" }
+
+        val models = mutableListOf<RuntimeModelOption>()
+        runCatching {
+            val payload = LocalBridgeClients.callCodexRpc("model/list")
+            val data = payload.optJSONArray("data") ?: JSONArray()
+            for (index in 0 until data.length()) {
+                val item = data.optJSONObject(index) ?: continue
+                val modelId = normalizeModelId(item.optString("id", ""))
+                if (modelId.isBlank()) continue
+                models += RuntimeModelOption(
+                    modelId = modelId,
+                    displayName = item.optString("displayName", modelId).trim().ifBlank { modelId },
+                    isDefault = item.optBoolean("isDefault", false),
+                )
+            }
+        }
+
+        var runtimeModel = ""
+        var runtimeProvider = ""
+        var runtimeBaseUrl = ""
+        runCatching {
+            val config = LocalBridgeClients.callCodexRpc("config/read").optJSONObject("config") ?: JSONObject()
+            runtimeModel = normalizeModelId(config.optString("model", ""))
+            runtimeProvider = config.optString("model_provider", "").trim()
+            runtimeBaseUrl = config.optString("openai_base_url", "").trim().trimEnd('/')
+        }
+
+        if (runtimeModel.isBlank()) {
+            runtimeModel = models.firstOrNull { it.isDefault }?.modelId.orEmpty()
+        }
+        if (runtimeProvider.isBlank() && runtimeModel.isNotBlank()) {
+            runtimeProvider = "openai"
+        }
+
+        return RuntimeSnapshot(
+            loggedIn = loggedIn,
+            accountEmail = accountEmail,
+            models = models.distinctBy { it.modelId },
+            runtimeModel = runtimeModel,
+            runtimeProvider = runtimeProvider,
+            runtimeBaseUrl = runtimeBaseUrl,
+        )
+    }
+
+    private fun loadRuntimeModelIds(): Set<String> {
+        val snapshot = loadRuntimeSnapshot()
+        return snapshot.models.map { it.modelId }.filter { it.isNotBlank() }.toSet()
+    }
+
+    private fun syncRuntimeTokenCatalog(snapshot: RuntimeSnapshot) {
+        if (snapshot.models.isEmpty()) return
+        val existing = CodexModelConfigStore.loadConfigs(this)
+        val existingById = existing.associateBy { it.id }
+        val existingByModel = existing
+            .filter { isRuntimeCatalogRow(it) }
+            .associateBy { normalizeModelId(it.modelId) }
+        var changed = false
+
+        snapshot.models.forEach { runtimeModel ->
+            val modelId = normalizeModelId(runtimeModel.modelId)
+            if (modelId.isBlank()) return@forEach
+            val rowId = runtimeTokenConfigId(modelId)
+            val existingRow = existingById[rowId] ?: existingByModel[modelId]
+            val desired = CodexModelConfig(
+                id = rowId,
+                displayName = runtimeModel.displayName.ifBlank { modelId },
+                providerId = TOKEN_PROVIDER_ID,
+                providerName = TOKEN_PROVIDER_NAME,
+                baseUrl = snapshot.runtimeBaseUrl,
+                modelId = modelId,
+                authMode = CodexAuthMode.TOKEN,
+                apiKey = "",
+                isDefault = existingRow?.isDefault ?: false,
+            )
+            if (existingRow == null || existingRow != desired) {
+                CodexModelConfigStore.saveConfig(this, desired)
+                changed = true
+            }
+        }
+
+        val updated = CodexModelConfigStore.loadConfigs(this)
+        if (updated.none { it.isDefault }) {
+            val targetModel = normalizeModelId(snapshot.runtimeModel)
+            val target = updated.firstOrNull {
+                it.authMode == CodexAuthMode.TOKEN && normalizeModelId(it.modelId).equals(targetModel, ignoreCase = true)
+            } ?: updated.firstOrNull()
+            if (target != null) {
+                CodexModelConfigStore.setDefault(this, target.id)
+                changed = true
+            }
+        }
+
+        if (changed) {
+            runCatching { serverManager.applySelectedCodexModelConfig(force = false) }
+        }
+    }
+
+    private fun runtimeTokenConfigId(modelId: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(modelId.toByteArray(Charsets.UTF_8))
+        val hex = digest.take(8).joinToString("") { byte -> "%02x".format(byte) }
+        return "$TOKEN_CATALOG_PREFIX$hex"
+    }
+
+    private fun buildStatusText(
+        rowList: List<CodexModelConfig>,
+        snapshot: RuntimeSnapshot?,
+    ): String {
+        val selected = rowList.firstOrNull { it.isDefault }
+        val tokenCount = rowList.count { it.authMode == CodexAuthMode.TOKEN }
+        val apiCount = rowList.count { it.authMode == CodexAuthMode.API }
+        val runtimeModel = snapshot?.runtimeModel?.ifBlank { "未返回" } ?: "未返回"
+        val runtimeProvider = snapshot?.runtimeProvider?.ifBlank { "未返回" } ?: "未返回"
+        val loginState = if (snapshot?.loggedIn == true) {
+            "已登录${snapshot.accountEmail.takeIf { it.isNotBlank() }?.let { "($it)" } ?: ""}"
+        } else {
+            "未登录"
+        }
+        val cliVersion = serverManager.getInstalledCodexVersion().ifBlank { "unknown" }
+        val nativeVersion = serverManager.getInstalledCodexNativeVersion().ifBlank { "unknown" }
+        val versionState = if (cliVersion != "unknown" && nativeVersion != "unknown" && cliVersion == nativeVersion) {
+            "一致"
+        } else {
+            "存在差异"
+        }
+        val configPath = File(BootstrapInstaller.getPaths(this).homeDir, ".codex/config.toml").absolutePath
+        val selectedText = selected?.let {
+            "${it.modelId} (${authLabel(it.authMode)})"
+        } ?: "未选择"
+        return "共 ${rowList.size} 条（Token=$tokenCount，API=$apiCount） | 当前选中=$selectedText | 运行态=$runtimeProvider/$runtimeModel | 登录=$loginState | CLI=$cliVersion Native=$nativeVersion($versionState)\n配置文件：$configPath"
     }
 }
