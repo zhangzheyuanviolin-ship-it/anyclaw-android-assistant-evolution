@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const SERVER_INFO = { name: "anyclaw-toolbox", version: "2.0.0" };
+const SERVER_INFO = { name: "anyclaw-toolbox", version: "2.1.0" };
 const DEFAULT_TIMEOUT_MS = 30000;
 const MAX_STDIO_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SEARCH_LIMIT = 6;
@@ -303,6 +303,10 @@ const TOOL_DEFS = [
     cwd: { type: "string" },
     timeoutMs: { type: "integer", minimum: 1000, maximum: 120000 }
   }, ["command"]),
+  tool("anyclaw_ubuntu", "Execute command inside bundled Ubuntu runtime.", {
+    command: { type: "string", minLength: 1 },
+    timeoutMs: { type: "integer", minimum: 1000, maximum: 120000 }
+  }, ["command"]),
   tool("anyclaw_github_repo_info", "Get repository metadata.", {
     repo: { type: "string", minLength: 3 },
     token: { type: "string" }
@@ -598,6 +602,52 @@ function runLocalShell(command, cwd, timeoutMs = DEFAULT_TIMEOUT_MS) {
   });
   const stdout = String(result.stdout || "").trim();
   const stderr = String(result.stderr || "").trim();
+  const status = typeof result.status === "number" ? result.status : 1;
+  if (result.error) {
+    return { ok: false, code: status, stdout, stderr, error: String(result.error.message || result.error) };
+  }
+  return { ok: status === 0, code: status, stdout, stderr };
+}
+
+function resolveUbuntuShellBin() {
+  const envBin = String(process.env.ANYCLAW_UBUNTU_BIN || "").trim();
+  if (envBin && fs.existsSync(envBin)) return envBin;
+  const homeDir = String(process.env.HOME || "").trim();
+  if (!homeDir) return "";
+  const fallback = path.join(homeDir, ".openclaw-android", "linux-runtime", "bin", "ubuntu-shell.sh");
+  if (fs.existsSync(fallback)) return fallback;
+  return "";
+}
+
+function normalizeUbuntuOutput(value) {
+  const lines = String(value || "")
+    .split(/\r?\n/)
+    .filter((line) => {
+      const normalized = line.trim();
+      if (!normalized) return false;
+      return normalized !== "LOGIN_SUCCESSFUL" && normalized !== "TERMINAL_READY";
+    });
+  return lines.join("\n").trim();
+}
+
+function runUbuntuShell(command, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const ubuntuBin = resolveUbuntuShellBin();
+  if (!ubuntuBin) {
+    return {
+      ok: false,
+      code: 127,
+      stdout: "",
+      stderr: "",
+      error: "ubuntu_shell_missing"
+    };
+  }
+  const result = spawnSync(ubuntuBin, ["--command", String(command)], {
+    encoding: "utf8",
+    timeout: clampInt(timeoutMs, 1000, 180000),
+    maxBuffer: MAX_STDIO_BYTES
+  });
+  const stdout = normalizeUbuntuOutput(result.stdout || "");
+  const stderr = normalizeUbuntuOutput(result.stderr || "");
   const status = typeof result.status === "number" ? result.status : 1;
   if (result.error) {
     return { ok: false, code: status, stdout, stderr, error: String(result.error.message || result.error) };
@@ -1973,6 +2023,20 @@ async function callTool(name, args) {
         stderr: String(run.stderr || "").slice(0, 12000),
         error: run.error,
         cwd
+      };
+    }
+    case "anyclaw_ubuntu": {
+      const command = toStringSafe(args.command, "").trim();
+      if (!command) throw new Error("command is required");
+      const timeoutMs = clampInt(toInt(args.timeoutMs, 30000), 1000, 120000);
+      const run = runUbuntuShell(command, timeoutMs);
+      return {
+        ok: run.ok,
+        exitCode: run.code,
+        stdout: String(run.stdout || "").slice(0, 12000),
+        stderr: String(run.stderr || "").slice(0, 12000),
+        error: run.error,
+        runtime: "ubuntu"
       };
     }
     case "anyclaw_github_repo_info": {

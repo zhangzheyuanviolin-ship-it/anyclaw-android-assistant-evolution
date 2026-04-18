@@ -1,17 +1,23 @@
 package com.codex.mobile
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.speech.tts.TextToSpeech
 import android.view.LayoutInflater
+import android.view.Menu
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ListView
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,6 +48,11 @@ class CliAgentChatActivity : AppCompatActivity() {
         private const val CLAUDE_SUMMARY_TOTAL_MAX_CHARS = 12_000
         private const val CLAUDE_NATIVE_SESSION_MODE = "claude_native_v1"
         private const val NATIVE_BIND_RETRY_COOLDOWN_MS = 20_000L
+        private const val MENU_ACTION_COPY = 1
+        private const val MENU_ACTION_DELETE = 2
+        private const val MENU_ACTION_ROLLBACK = 3
+        private const val MENU_ACTION_BRANCH = 4
+        private const val MENU_ACTION_SPEAK = 5
         private val CLAUDE_SESSION_ID_REGEX = Regex("""claude-code-[A-Za-z0-9._-]+""")
         private val UUID_SESSION_ID_REGEX = Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
     }
@@ -96,6 +107,9 @@ class CliAgentChatActivity : AppCompatActivity() {
     @Volatile
     private var lastExecutionRoute = "未执行"
 
+    private var ttsEngine: TextToSpeech? = null
+    private var ttsReady = false
+
     private data class AgentRuntimeOptions(
         val allowSharedStorage: Boolean,
         val dangerousAutoApprove: Boolean,
@@ -115,6 +129,9 @@ class CliAgentChatActivity : AppCompatActivity() {
     private data class DisplayMessage(
         val roleText: String,
         val body: String,
+        val sourceRole: String,
+        val sessionMessageIndex: Int? = null,
+        val isLiveProcess: Boolean = false,
     )
 
     private data class AgentRunResult(
@@ -248,6 +265,10 @@ class CliAgentChatActivity : AppCompatActivity() {
         if (isFinishing) {
             activeProcess?.destroy()
         }
+        ttsEngine?.stop()
+        ttsEngine?.shutdown()
+        ttsEngine = null
+        ttsReady = false
     }
 
     private fun renderSession() {
@@ -276,10 +297,11 @@ class CliAgentChatActivity : AppCompatActivity() {
         btnSend.isEnabled = !sending
         inputMessage.isEnabled = !sending
 
-        val storedMessages = filteredMessagesForDisplay()
+        val storedMessages = filteredMessagesForDisplayIndexed()
 
         val displayItems = mutableListOf<DisplayMessage>()
-        storedMessages.forEach { msg ->
+        storedMessages.forEach { indexed ->
+            val msg = indexed.value
             val role = msg.role.lowercase(Locale.getDefault())
             val roleText = when (role) {
                 "user" -> "您"
@@ -287,7 +309,12 @@ class CliAgentChatActivity : AppCompatActivity() {
                 "process" -> getString(R.string.cli_process_role)
                 else -> role
             }
-            displayItems += DisplayMessage(roleText = roleText, body = msg.text)
+            displayItems += DisplayMessage(
+                roleText = roleText,
+                body = msg.text,
+                sourceRole = role,
+                sessionMessageIndex = indexed.index,
+            )
         }
         if (showProcess) {
             val live = snapshotLiveProcessLines().joinToString("\n").trim()
@@ -295,6 +322,8 @@ class CliAgentChatActivity : AppCompatActivity() {
                 displayItems += DisplayMessage(
                     roleText = getString(R.string.cli_process_role),
                     body = live,
+                    sourceRole = "process",
+                    isLiveProcess = true,
                 )
             }
         }
@@ -308,13 +337,15 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
     }
 
-    private fun filteredMessagesForDisplay(): List<AgentChatMessage> {
-        val base = if (showProcess) {
-            activeSession.messages
-        } else {
-            activeSession.messages.filterNot { it.role.equals("process", ignoreCase = true) }
+    private fun filteredMessagesForDisplayIndexed(): List<IndexedValue<AgentChatMessage>> {
+        val base = activeSession.messages.withIndex().filter {
+            showProcess || !it.value.role.equals("process", ignoreCase = true)
         }
         return if (base.size <= historyWindowSize) base else base.takeLast(historyWindowSize)
+    }
+
+    private fun filteredMessagesForDisplay(): List<AgentChatMessage> {
+        return filteredMessagesForDisplayIndexed().map { it.value }
     }
 
     private fun renderBottomTabState() {
@@ -443,6 +474,168 @@ class CliAgentChatActivity : AppCompatActivity() {
         attachedFiles.clear()
         renderSession()
         Toast.makeText(this, getString(R.string.cli_attachment_cleared), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showMessageActionMenu(anchor: View, message: DisplayMessage) {
+        if (message.body.isBlank()) return
+        val popup = PopupMenu(this, anchor)
+        popup.menu.add(Menu.NONE, MENU_ACTION_COPY, 0, getString(R.string.cli_message_action_copy))
+        popup.menu.add(Menu.NONE, MENU_ACTION_DELETE, 1, getString(R.string.cli_message_action_delete))
+        popup.menu.add(Menu.NONE, MENU_ACTION_ROLLBACK, 2, getString(R.string.cli_message_action_rollback))
+        popup.menu.add(Menu.NONE, MENU_ACTION_BRANCH, 3, getString(R.string.cli_message_action_branch))
+        popup.menu.add(Menu.NONE, MENU_ACTION_SPEAK, 4, getString(R.string.cli_message_action_speak))
+
+        val canMutate = message.sessionMessageIndex != null && !sending
+        popup.menu.findItem(MENU_ACTION_DELETE)?.isEnabled = canMutate
+        popup.menu.findItem(MENU_ACTION_ROLLBACK)?.isEnabled = canMutate
+        popup.menu.findItem(MENU_ACTION_BRANCH)?.isEnabled = canMutate
+
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                MENU_ACTION_COPY -> {
+                    copyMessageText(message.body)
+                    true
+                }
+                MENU_ACTION_DELETE -> {
+                    confirmDeleteFromMessage(message)
+                    true
+                }
+                MENU_ACTION_ROLLBACK -> {
+                    confirmRollbackToMessage(message)
+                    true
+                }
+                MENU_ACTION_BRANCH -> {
+                    createBranchFromMessage(message)
+                    true
+                }
+                MENU_ACTION_SPEAK -> {
+                    speakMessageText(message.body)
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun copyMessageText(text: String) {
+        val clipManager = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        if (clipManager == null) {
+            Toast.makeText(this, getString(R.string.conversation_copy_failed), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clip = ClipData.newPlainText("cli_message", text)
+        clipManager.setPrimaryClip(clip)
+        Toast.makeText(this, getString(R.string.conversation_copied_toast), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun confirmDeleteFromMessage(message: DisplayMessage) {
+        val targetIndex = message.sessionMessageIndex ?: return
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.cli_message_action_delete_title))
+            .setMessage(getString(R.string.cli_message_action_delete_confirm))
+            .setNegativeButton(getString(R.string.cancel), null)
+            .setPositiveButton(getString(R.string.ok)) { _, _ ->
+                deleteSingleMessage(targetIndex)
+            }
+            .show()
+    }
+
+    private fun deleteSingleMessage(targetIndex: Int) {
+        val current = activeSession
+        if (targetIndex !in current.messages.indices) return
+        val nextMessages = current.messages.toMutableList()
+        nextMessages.removeAt(targetIndex)
+        applySessionMutation(nextMessages)
+        Toast.makeText(this, getString(R.string.cli_message_action_delete_done), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun confirmRollbackToMessage(message: DisplayMessage) {
+        val targetIndex = message.sessionMessageIndex ?: return
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.cli_message_action_rollback_title))
+            .setMessage(getString(R.string.cli_message_action_rollback_confirm))
+            .setNegativeButton(getString(R.string.cancel), null)
+            .setPositiveButton(getString(R.string.ok)) { _, _ ->
+                rollbackToMessage(targetIndex)
+            }
+            .show()
+    }
+
+    private fun rollbackToMessage(targetIndex: Int) {
+        val current = activeSession
+        if (targetIndex !in current.messages.indices) return
+        val nextMessages = current.messages.take(targetIndex + 1)
+        applySessionMutation(nextMessages)
+        Toast.makeText(this, getString(R.string.cli_message_action_rollback_done), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun createBranchFromMessage(message: DisplayMessage) {
+        val targetIndex = message.sessionMessageIndex ?: return
+        val current = activeSession
+        if (targetIndex !in current.messages.indices) return
+        val branchedMessages = current.messages.take(targetIndex + 1)
+        val baseTitle = current.title.trim().ifEmpty { "Claude Code 会话" }
+        val branchTitle = "$baseTitle（分支）"
+        var next = AgentSessionStore.createSession(this, agentId, branchTitle)
+        next = next.copy(
+            updatedAtMs = System.currentTimeMillis(),
+            messages = branchedMessages,
+            nativeSessionId = "",
+            nativeSessionMode = "",
+        )
+        activeSession = AgentSessionStore.overwriteSession(this, next)
+        attachedFiles.clear()
+        clearLiveProcessLines()
+        refreshIdleRouteLabel()
+        renderSession()
+        Toast.makeText(this, getString(R.string.cli_message_action_branch_done), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun applySessionMutation(messages: List<AgentChatMessage>) {
+        val current = activeSession
+        val clearNative = agentId == ExternalAgentId.CLAUDE_CODE
+        val next = current.copy(
+            updatedAtMs = System.currentTimeMillis(),
+            messages = messages,
+            nativeSessionId = if (clearNative) "" else current.nativeSessionId,
+            nativeSessionMode = if (clearNative) "" else current.nativeSessionMode,
+        )
+        activeSession = AgentSessionStore.overwriteSession(this, next)
+        attachedFiles.clear()
+        clearLiveProcessLines()
+        refreshIdleRouteLabel()
+        renderSession()
+    }
+
+    private fun speakMessageText(text: String) {
+        val normalized = text.trim()
+        if (normalized.isEmpty()) return
+        val engine = ttsEngine
+        if (engine != null && ttsReady) {
+            engine.stop()
+            engine.speak(normalized, TextToSpeech.QUEUE_FLUSH, null, "cli-message")
+            return
+        }
+        ttsEngine = TextToSpeech(this) { status ->
+            if (status != TextToSpeech.SUCCESS) {
+                Toast.makeText(this, getString(R.string.cli_message_action_speak_failed), Toast.LENGTH_SHORT).show()
+                return@TextToSpeech
+            }
+            val tts = ttsEngine ?: return@TextToSpeech
+            val zhResult = tts.setLanguage(Locale.CHINA)
+            ttsReady = zhResult != TextToSpeech.LANG_MISSING_DATA && zhResult != TextToSpeech.LANG_NOT_SUPPORTED
+            if (!ttsReady) {
+                val fallback = tts.setLanguage(Locale.getDefault())
+                ttsReady = fallback != TextToSpeech.LANG_MISSING_DATA && fallback != TextToSpeech.LANG_NOT_SUPPORTED
+            }
+            if (!ttsReady) {
+                Toast.makeText(this, getString(R.string.cli_message_action_speak_failed), Toast.LENGTH_SHORT).show()
+                return@TextToSpeech
+            }
+            tts.stop()
+            tts.speak(normalized, TextToSpeech.QUEUE_FLUSH, null, "cli-message")
+        }
     }
 
     private fun compactSessionManually() {
@@ -1120,7 +1313,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         out.appendLine("9) anyclaw_apply_file 仅允许 workspace_root 内路径，越界写入会失败。")
         out.appendLine("10) 大文件读取规则：若文件可能超过 25000 tokens 或约 120KB，禁止用 Read，必须改用 anyclaw_terminal + head/tail/sed -n 分段读取。")
         out.appendLine("11) 联网搜索首选 anyclaw_exa_search 系列（含 advanced/api/contents），不可用时回退 anyclaw_tavily_search。")
-        out.appendLine("12) Ubuntu 命令通过 anyclaw_terminal 调用 ubuntu-shell <command> 执行。")
+        out.appendLine("12) Ubuntu 命令优先使用 anyclaw_ubuntu；仅在兼容场景下再用 anyclaw_terminal + ubuntu-shell。")
         out.appendLine("13) 内置 Bash 工具存在噪声与截断风险，仅用于简单命令；复杂任务优先 anyclaw_terminal。")
         out.appendLine("14) 未经用户明确授权，禁止调用 anyclaw_device_exec / anyclaw_device_uiautomator_dump。")
         out.appendLine("15) 即使授权设备工具，也禁止将其用于工作区文件搜索、移动、编辑。")
@@ -1787,6 +1980,7 @@ class CliAgentChatActivity : AppCompatActivity() {
             "anyclaw_duckduckgo_search",
             "anyclaw_github_repo",
             "anyclaw_github_repo_info",
+            "anyclaw_ubuntu",
             "start_web",
             "web_snapshot",
         )
@@ -1808,9 +2002,10 @@ class CliAgentChatActivity : AppCompatActivity() {
             appendLine("required_probe_missing=${if (missing.isEmpty()) "none" else missing.joinToString(",")}")
             appendLine("mcp_toolbox_status_hint=$statusHint")
             appendLine("tool_boundary_anyclaw_terminal=local_shell_default_cwd_workspace_root_shared_storage_rw_supported")
+            appendLine("tool_boundary_anyclaw_ubuntu=ubuntu_runtime_shell_for_glibc_and_root_paths")
             appendLine("tool_boundary_anyclaw_apply_file=workspace_root_only")
             appendLine("tool_boundary_anyclaw_device_exec=android_system_shell_uid2000_no_app_private_home_access")
-            appendLine("tool_priority_hint=file_ops:anyclaw_terminal>anyclaw_apply_file search:anyclaw_exa_* fallback:anyclaw_tavily_search ubuntu:anyclaw_terminal+ubuntu-shell")
+            appendLine("tool_priority_hint=file_ops:anyclaw_terminal>anyclaw_apply_file search:anyclaw_exa_* fallback:anyclaw_tavily_search ubuntu:anyclaw_ubuntu>anyclaw_terminal+ubuntu-shell")
             appendLine("large_file_reading_hint=if_estimated_tokens_gt_25000_or_file_gt_120kb_use_anyclaw_terminal_head_tail_sed_not_Read")
             appendLine("device_tool_policy=deny_by_default_require_explicit_user_approval")
             appendLine("bash_tool_hint=built_in_bash_can_include_noise_or_truncation_prefer_anyclaw_terminal")
@@ -1950,6 +2145,7 @@ class CliAgentChatActivity : AppCompatActivity() {
             .put("ANYCLAW_EXA_API_BASE_URL", "https://api.exa.ai")
             .put("ANYCLAW_GITHUB_API_BASE_URL", "https://api.github.com")
             .put("ANYCLAW_WORKSPACE_ROOT", "${paths.homeDir}/.openclaw/workspace")
+            .put("ANYCLAW_UBUNTU_BIN", "${paths.homeDir}/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh")
             .put("ANYCLAW_ALLOW_SHARED_STORAGE", if (options.allowSharedStorage) "1" else "0")
             .put("ANYCLAW_MCP_CONFIG_PATH", configFile.absolutePath)
         val passThroughEnv = listOf(
@@ -2063,6 +2259,10 @@ class CliAgentChatActivity : AppCompatActivity() {
             val msg = visibleMessages[position]
             rowView.findViewById<TextView>(R.id.tvAgentChatRole).text = msg.roleText
             rowView.findViewById<TextView>(R.id.tvAgentChatText).text = msg.body
+            rowView.setOnLongClickListener {
+                showMessageActionMenu(it, msg)
+                true
+            }
             return rowView
         }
     }

@@ -137,6 +137,11 @@ object AgentSessionStore {
         return createSession(context, agentId)
     }
 
+    fun overwriteSession(context: Context, session: AgentChatSession): AgentChatSession {
+        saveSession(context, session)
+        return session
+    }
+
     fun transcript(session: AgentChatSession): String {
         val out = StringBuilder()
         out.appendLine(session.title)

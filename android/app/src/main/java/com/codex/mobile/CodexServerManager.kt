@@ -2911,6 +2911,36 @@ EOF
 exec "${'$'}HOME/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh" --status
 EOF
               chmod 700 "${paths.prefixDir}/bin/ubuntu-status" 2>/dev/null || true
+
+              # Keep rg usable in Android local shell. If Codex bundled binary is
+              # not linkable on bionic, fallback to Ubuntu runtime transparently.
+              cat > "${paths.prefixDir}/bin/rg" <<'EOF'
+#!/system/bin/sh
+set +e
+PREFIX_DIR="${'$'}{PREFIX:-/data/data/com.termux/files/usr}"
+HOME_DIR="${'$'}{HOME:-/data/data/com.termux/files/home}"
+RG_CANDIDATE="${'$'}PREFIX_DIR/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/path/rg"
+if [ -x "${'$'}RG_CANDIDATE" ]; then
+  "${'$'}RG_CANDIDATE" --version >/dev/null 2>&1
+  if [ "${'$'}?" -eq 0 ]; then
+    exec "${'$'}RG_CANDIDATE" "${'$'}@"
+  fi
+fi
+UBUNTU_BIN="${'$'}{ANYCLAW_UBUNTU_BIN:-${'$'}HOME_DIR/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh}"
+if [ -x "${'$'}UBUNTU_BIN" ]; then
+  quote_arg() {
+    printf "'%s'" "${'$'}(printf "%s" "${'$'}1" | sed "s/'/'\"'\"'/g")"
+  }
+  cmd="cd ${'$'}(quote_arg "${'$'}{PWD:-${'$'}HOME_DIR}") 2>/dev/null || true; rg"
+  for arg in "${'$'}@"; do
+    cmd="${'$'}cmd ${'$'}(quote_arg "${'$'}arg")"
+  done
+  exec "${'$'}UBUNTU_BIN" --command "${'$'}cmd"
+fi
+echo "rg unavailable: native binary failed and ubuntu runtime missing." >&2
+exit 127
+EOF
+              chmod 700 "${paths.prefixDir}/bin/rg" 2>/dev/null || true
             fi
         """.trimIndent()
 
