@@ -141,6 +141,11 @@ class PermissionManagerActivity : AppCompatActivity() {
             } else {
                 ""
             }
+            val codexNativeVersion = if (binaryInstalled) {
+                runCatching { serverManager.getInstalledCodexNativeVersion() }.getOrElse { "" }
+            } else {
+                ""
+            }
             val loggedIn = if (cliInstalled && binaryInstalled) {
                 runCatching { serverManager.isLoggedIn() }.getOrElse { false }
             } else {
@@ -153,7 +158,14 @@ class PermissionManagerActivity : AppCompatActivity() {
                     loggedIn -> getString(R.string.codex_auth_status_logged_in)
                     else -> getString(R.string.codex_auth_status_logged_out)
                 }
-                val textWithVersion = if (codexVersion.isBlank()) text else "$text · CLI $codexVersion"
+                val versionText = buildString {
+                    if (codexVersion.isNotBlank()) append("CLI $codexVersion")
+                    if (codexNativeVersion.isNotBlank()) {
+                        if (isNotEmpty()) append(" · ")
+                        append("Native $codexNativeVersion")
+                    }
+                }
+                val textWithVersion = if (versionText.isBlank()) text else "$text · $versionText"
                 tvCodexAuthStatus.text = getString(R.string.codex_auth_status_template, textWithVersion)
                 btnCodexAuthBrowser.isEnabled = !codexLoginRunning && cliInstalled && binaryInstalled
                 btnCodexInstall.isEnabled = !codexInstallRunning

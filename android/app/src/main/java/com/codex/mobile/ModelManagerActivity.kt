@@ -58,6 +58,7 @@ class ModelManagerActivity : AppCompatActivity() {
     private lateinit var btnTestConnection: Button
     private lateinit var btnFetchModels: Button
     private lateinit var btnClaudeModelManager: Button
+    private lateinit var btnCodexModelManager: Button
     private lateinit var tvCurrentModel: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var tvStatus: TextView
@@ -83,6 +84,7 @@ class ModelManagerActivity : AppCompatActivity() {
         btnTestConnection = findViewById(R.id.btnModelTestConnection)
         btnFetchModels = findViewById(R.id.btnModelFetchModels)
         btnClaudeModelManager = findViewById(R.id.btnClaudeModelManager)
+        btnCodexModelManager = findViewById(R.id.btnCodexModelManager)
         tvCurrentModel = findViewById(R.id.tvCurrentModel)
         progressBar = findViewById(R.id.progressModel)
         tvStatus = findViewById(R.id.tvModelStatus)
@@ -98,6 +100,9 @@ class ModelManagerActivity : AppCompatActivity() {
                     putExtra(AgentModelManagerActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
                 },
             )
+        }
+        btnCodexModelManager.setOnClickListener {
+            startActivity(android.content.Intent(this, CodexModelManagerActivity::class.java))
         }
     }
 

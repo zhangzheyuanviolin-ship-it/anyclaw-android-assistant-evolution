@@ -44,6 +44,9 @@ class CodexServerManager(private val context: Context) {
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MIN = 20
         private const val OPENCLAW_CHAT_HISTORY_LIMIT_MAX = 400
         private const val OPENCLAW_CHAT_HISTORY_MAX_BYTES = 1 * 1024 * 1024
+        private const val CODEX_MODEL_ENV_KEY = "POCKETLOBSTER_CODEX_API_KEY"
+        private const val CODEX_MODEL_BLOCK_START = "# >>> pocketlobster-codex-model >>>"
+        private const val CODEX_MODEL_BLOCK_END = "# <<< pocketlobster-codex-model <<<"
     }
 
     private var serverProcess: Process? = null
@@ -237,6 +240,15 @@ class CodexServerManager(private val context: Context) {
     fun getInstalledCodexVersion(): String {
         val paths = BootstrapInstaller.getPaths(context)
         val pkg = File(paths.prefixDir, "lib/node_modules/@openai/codex/package.json")
+        if (!pkg.exists()) return ""
+        return runCatching {
+            JSONObject(pkg.readText()).optString("version", "").trim()
+        }.getOrDefault("")
+    }
+
+    fun getInstalledCodexNativeVersion(): String {
+        val paths = BootstrapInstaller.getPaths(context)
+        val pkg = File(paths.prefixDir, "lib/node_modules/@openai/codex-linux-arm64/package.json")
         if (!pkg.exists()) return ""
         return runCatching {
             JSONObject(pkg.readText()).optString("version", "").trim()
@@ -2439,7 +2451,7 @@ EOF
         val codexBin = File(prefix, "bin/codex")
 
         if (!codexJs.exists()) return
-        if (codexBin.exists()) return
+        if (codexBin.exists() && isCodexWrapperHealthy(codexBin)) return
 
         val wrapperCmd = """
             rm -f "$prefix/bin/codex"
@@ -2452,6 +2464,15 @@ WEOF
         """.trimIndent()
         runInPrefix(wrapperCmd)
         Log.i(TAG, "Created codex wrapper at $codexBin")
+    }
+
+    private fun isCodexWrapperHealthy(codexBin: File): Boolean {
+        return runCatching {
+            if (!codexBin.exists()) return false
+            val raw = codexBin.readText()
+            raw.contains("#!/system/bin/sh") &&
+                raw.contains("/lib/node_modules/@openai/codex/bin/codex.js")
+        }.getOrDefault(false)
     }
 
     fun installServerBundle(onProgress: (String) -> Unit): Boolean {
@@ -2768,6 +2789,9 @@ WEOF
             Log.i(TAG, "Server already running")
             return true
         }
+
+        runCatching { ensureCodexWrapperScript() }
+        runCatching { applySelectedCodexModelConfig(force = false) }
 
         val paths = BootstrapInstaller.getPaths(context)
         val env = buildEnvironment(paths).toMutableMap()
@@ -3796,6 +3820,136 @@ EOF
         Log.i(TAG, "Wrote full-access config to $configFile")
     }
 
+    fun applySelectedCodexModelConfig(force: Boolean = false): Boolean {
+        return runCatching {
+            ensureFullAccessConfig()
+            val paths = BootstrapInstaller.getPaths(context)
+            val configFile = File(paths.homeDir, ".codex/config.toml")
+            if (!configFile.exists()) {
+                configFile.parentFile?.mkdirs()
+                configFile.writeText("")
+            }
+
+            val selected = CodexModelConfigStore.loadCurrentConfig(context)
+            val managedBody = buildCodexManagedConfigBlock(selected)
+            val changed = upsertManagedBlock(
+                file = configFile,
+                startMarker = CODEX_MODEL_BLOCK_START,
+                endMarker = CODEX_MODEL_BLOCK_END,
+                body = managedBody,
+            )
+
+            if ((changed || force) && isRunning) {
+                Log.i(TAG, "Codex model config changed, restarting codex-web-local")
+                stopServer()
+                Thread.sleep(200)
+                startServer()
+            }
+            true
+        }.getOrElse { error ->
+            Log.w(TAG, "Failed to apply selected codex model config: ${error.message}")
+            false
+        }
+    }
+
+    private fun buildCodexManagedConfigBlock(config: CodexModelConfig?): String {
+        if (config == null) {
+            return "## No selected Codex model config from Pocket Lobster."
+        }
+
+        val model = normalizeCodexModelName(config.modelId)
+        if (model.isBlank()) {
+            return "## Selected Codex model config is invalid: model is empty."
+        }
+
+        if (config.authMode == CodexAuthMode.TOKEN) {
+            return buildString {
+                appendLine("## Managed by Pocket Lobster: Codex model selection (token mode)")
+                appendLine("model = \"${tomlEscape(model)}\"")
+                appendLine("model_provider = \"openai\"")
+                val baseUrl = config.baseUrl.trim().trimEnd('/')
+                if (baseUrl.isNotBlank()) {
+                    appendLine("openai_base_url = \"${tomlEscape(baseUrl)}\"")
+                }
+            }.trimEnd()
+        }
+
+        val rawProviderKey = config.providerId.trim().ifBlank { "custom_openai_compatible" }
+        val providerKey = sanitizeTomlKey(rawProviderKey).ifBlank { "custom_openai_compatible" }
+        val safeProviderKey = when (providerKey) {
+            "openai", "ollama", "lmstudio" -> "${providerKey}_proxy"
+            else -> providerKey
+        }
+        val baseUrl = config.baseUrl.trim().trimEnd('/').ifBlank { "https://api.openai.com/v1" }
+        val providerName = config.providerName.trim().ifBlank { "Custom OpenAI Compatible" }
+
+        return buildString {
+            appendLine("## Managed by Pocket Lobster: Codex model selection (api mode)")
+            appendLine("model = \"${tomlEscape(model)}\"")
+            appendLine("model_provider = \"${tomlEscape(safeProviderKey)}\"")
+            appendLine("[model_providers.$safeProviderKey]")
+            appendLine("name = \"${tomlEscape(providerName)}\"")
+            appendLine("base_url = \"${tomlEscape(baseUrl)}\"")
+            appendLine("env_key = \"$CODEX_MODEL_ENV_KEY\"")
+            appendLine("wire_api = \"responses\"")
+            appendLine("requires_openai_auth = false")
+        }.trimEnd()
+    }
+
+    private fun normalizeCodexModelName(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ""
+        return if (trimmed.contains('/')) {
+            trimmed.substringAfterLast('/').trim()
+        } else {
+            trimmed
+        }
+    }
+
+    private fun sanitizeTomlKey(raw: String): String {
+        return raw.trim()
+            .lowercase()
+            .replace(Regex("[^a-z0-9_]+"), "_")
+            .trim('_')
+    }
+
+    private fun tomlEscape(raw: String): String {
+        return raw
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", " ")
+            .replace("\r", " ")
+    }
+
+    private fun upsertManagedBlock(
+        file: File,
+        startMarker: String,
+        endMarker: String,
+        body: String,
+    ): Boolean {
+        val block = "$startMarker\n${body.trim()}\n$endMarker\n"
+        val existing = if (file.exists()) file.readText() else ""
+
+        val updated = if (existing.contains(startMarker) && existing.contains(endMarker)) {
+            val startIndex = existing.indexOf(startMarker)
+            val endIndex = existing.indexOf(endMarker, startIndex)
+            if (startIndex >= 0 && endIndex >= startIndex) {
+                val suffixStart = endIndex + endMarker.length
+                existing.substring(0, startIndex) + block + existing.substring(suffixStart).trimStart('\n')
+            } else {
+                existing.trimEnd() + if (existing.isBlank()) "" else "\n" + block
+            }
+        } else {
+            existing.trimEnd() + if (existing.isBlank()) "" else "\n\n" + block
+        }
+
+        val normalizedUpdated = updated.trimEnd() + "\n"
+        if (normalizedUpdated == existing) return false
+        file.parentFile?.mkdirs()
+        file.writeText(normalizedUpdated)
+        return true
+    }
+
     private fun ensureShellInitFiles(paths: BootstrapInstaller.Paths) {
         val runtimeBinDir = "${paths.homeDir}/.openclaw-android/linux-runtime/bin"
         val shellBlock = """
@@ -4135,6 +4289,20 @@ EOF
             "NAPI_RS_NATIVE_LIBRARY_PATH" to "${paths.homeDir}/.openclaw-android/native/davey/davey.android-arm64.node",
             "CONTAINER" to "1",
         )
+
+        runCatching {
+            val codexConfig = CodexModelConfigStore.loadCurrentConfig(context)
+            val apiKey = codexConfig
+                ?.takeIf { it.authMode == CodexAuthMode.API }
+                ?.apiKey
+                ?.trim()
+                .orEmpty()
+            if (apiKey.isNotEmpty()) {
+                env[CODEX_MODEL_ENV_KEY] = apiKey
+            } else {
+                env.remove(CODEX_MODEL_ENV_KEY)
+            }
+        }
 
         val toolchainEnvFile = File(paths.homeDir, ".openclaw-android/state/toolchain.env")
         if (toolchainEnvFile.exists()) {
