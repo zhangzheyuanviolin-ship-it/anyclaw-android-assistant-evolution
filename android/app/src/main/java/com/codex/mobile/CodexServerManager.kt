@@ -2928,14 +2928,48 @@ if [ -x "${'$'}RG_CANDIDATE" ]; then
 fi
 UBUNTU_BIN="${'$'}{ANYCLAW_UBUNTU_BIN:-${'$'}HOME_DIR/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh}"
 if [ -x "${'$'}UBUNTU_BIN" ]; then
-  quote_arg() {
-    printf "'%s'" "${'$'}(printf "%s" "${'$'}1" | sed "s/'/'\"'\"'/g")"
-  }
-  cmd="cd ${'$'}(quote_arg "${'$'}{PWD:-${'$'}HOME_DIR}") 2>/dev/null || true; rg"
-  for arg in "${'$'}@"; do
-    cmd="${'$'}cmd ${'$'}(quote_arg "${'$'}arg")"
-  done
-  exec "${'$'}UBUNTU_BIN" --command "${'$'}cmd"
+  "${'$'}UBUNTU_BIN" --command "command -v rg >/dev/null 2>&1" >/dev/null 2>&1
+  if [ "${'$'}?" -ne 0 ]; then
+    "${'$'}UBUNTU_BIN" --command "if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y ripgrep >/dev/null 2>&1; fi" >/dev/null 2>&1
+  fi
+  "${'$'}UBUNTU_BIN" --command "command -v rg >/dev/null 2>&1" >/dev/null 2>&1
+  if [ "${'$'}?" -eq 0 ]; then
+    quote_arg() {
+      printf "'%s'" "${'$'}(printf "%s" "${'$'}1" | sed "s/'/'\"'\"'/g")"
+    }
+    cmd="cd ${'$'}(quote_arg "${'$'}{PWD:-${'$'}HOME_DIR}") 2>/dev/null || true; rg"
+    for arg in "${'$'}@"; do
+      cmd="${'$'}cmd ${'$'}(quote_arg "${'$'}arg")"
+    done
+    exec "${'$'}UBUNTU_BIN" --command "${'$'}cmd"
+  fi
+fi
+
+# Final compatibility fallback for environments without working rg.
+if [ "${'$'}{1:-}" = "--version" ]; then
+  echo "rg wrapper fallback (grep/find mode)"
+  exit 0
+fi
+if [ "${'$'}{1:-}" = "--files" ]; then
+  shift
+  if [ "${'$'}#" -eq 0 ]; then
+    set -- .
+  fi
+  find "${'$'}@" -type f 2>/dev/null
+  exit "${'$'}?"
+fi
+if [ "${'$'}#" -gt 0 ]; then
+  if [ "${'$'}{1:-}" = "-n" ] || [ "${'$'}{1:-}" = "--line-number" ]; then
+    shift
+  fi
+  pattern="${'$'}{1:-}"
+  if [ -n "${'$'}pattern" ]; then
+    shift
+    if [ "${'$'}#" -eq 0 ]; then
+      set -- .
+    fi
+    exec grep -R -n -- "${'$'}pattern" "${'$'}@"
+  fi
 fi
 echo "rg unavailable: native binary failed and ubuntu runtime missing." >&2
 exit 127

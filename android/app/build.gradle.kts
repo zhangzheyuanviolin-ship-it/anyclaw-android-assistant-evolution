@@ -45,8 +45,8 @@ android {
         // Android 10+ (targetSdk 29+) enforces W^X which blocks this via SELinux.
         // Termux (F-Droid) uses the same approach.
         targetSdk = 28
-        versionCode = 207
-        versionName = "1.0.38-claude-message-actions-ubuntu-tool-v207"
+        versionCode = 208
+        versionName = "1.0.39-claude-actions-ubuntu-rg-fallback-v208"
     }
 
     flavorDimensions += "channel"
