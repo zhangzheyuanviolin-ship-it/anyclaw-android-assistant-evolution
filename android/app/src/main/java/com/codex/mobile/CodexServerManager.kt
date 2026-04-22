@@ -4351,13 +4351,13 @@ EOF
 #!/system/bin/sh
 export HERMES_HOME="${'$'}HERMES_HOME"
 if [ -x "${'$'}INSTALL_DIR/.venv/bin/hermes" ]; then
-  exec "${'$'}INSTALL_DIR/.venv/bin/hermes" "\${@}"
+  exec "${'$'}INSTALL_DIR/.venv/bin/hermes" "${'$'}@"
 fi
 if [ -x "${'$'}HOME/.local/bin/hermes" ]; then
-  exec "${'$'}HOME/.local/bin/hermes" "\${@}"
+  exec "${'$'}HOME/.local/bin/hermes" "${'$'}@"
 fi
 if [ -x "${'$'}INSTALL_DIR/hermes" ]; then
-  exec "${'$'}INSTALL_DIR/hermes" "\${@}"
+  exec "${'$'}INSTALL_DIR/hermes" "${'$'}@"
 fi
 echo "Hermes CLI executable not found. Run installHermesAgent first." >&2
 exit 127
