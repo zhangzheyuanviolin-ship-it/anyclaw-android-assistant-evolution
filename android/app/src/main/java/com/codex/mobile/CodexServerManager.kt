@@ -56,6 +56,7 @@ class CodexServerManager(private val context: Context) {
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
     private var hermesGatewayProcess: Process? = null
+    private val hermesInstallLock = Any()
 
     /**
      * Use Android system shell for process bootstrap.
@@ -270,10 +271,9 @@ class CodexServerManager(private val context: Context) {
 
     fun isHermesAgentInstalled(): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
-        val installDir = hermesInstallDir(paths)
+        val installDir = resolveHermesInstallDir(paths) ?: return false
         val markerFile = hermesInstallMarkerFile(paths)
-        if (!File(installDir, ".venv/bin/hermes").exists()) return false
-        val installed = probeHermesInstallInUbuntu(paths)
+        val installed = probeHermesInstallInUbuntu(paths, installDir)
         if (installed) {
             if (!markerFile.exists() || markerFile.readText().trim() != HERMES_INSTALL_ENV_UBUNTU) {
                 runCatching {
@@ -285,17 +285,23 @@ class CodexServerManager(private val context: Context) {
         return installed
     }
 
+    fun isHermesRuntimeUsable(): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val installDir = resolveHermesInstallDir(paths) ?: return false
+        return probeHermesRuntimeUsableInUbuntu(paths, installDir)
+    }
+
     fun getInstalledHermesAgentVersion(): String {
         val paths = BootstrapInstaller.getPaths(context)
-        if (!probeHermesInstallInUbuntu(paths)) return ""
-        val installDir = hermesInstallDir(paths)
+        val installDir = resolveHermesInstallDir(paths) ?: return ""
+        if (!probeHermesInstallInUbuntu(paths, installDir)) return ""
         val versionText = runCaptureInUbuntu(
             """
             set +e
             INSTALL_DIR=${shellQuote(installDir.absolutePath)}
             cd "${'$'}INSTALL_DIR" || exit 1
             [ -x ".venv/bin/hermes" ] || exit 1
-            .venv/bin/hermes --version 2>/dev/null || true
+            .venv/bin/hermes --version 2>/dev/null || .venv/bin/hermes version 2>/dev/null || true
             """.trimIndent(),
         )
         return versionText
@@ -329,15 +335,36 @@ class CodexServerManager(private val context: Context) {
             .firstOrNull { it.isNotEmpty() } == "yes"
     }
 
-    private fun probeHermesInstallInUbuntu(paths: BootstrapInstaller.Paths): Boolean {
-        val installDir = hermesInstallDir(paths)
+    private fun probeHermesInstallInUbuntu(
+        paths: BootstrapInstaller.Paths,
+        installDir: File,
+    ): Boolean {
         val code = runInUbuntu(
             """
             set +e
             INSTALL_DIR=${shellQuote(installDir.absolutePath)}
             cd "${'$'}INSTALL_DIR" || exit 31
             [ -x ".venv/bin/hermes" ] || exit 32
-            .venv/bin/hermes --version >/dev/null 2>&1
+            .venv/bin/hermes --version >/dev/null 2>&1 || .venv/bin/hermes version >/dev/null 2>&1
+            exit "${'$'}?"
+            """.trimIndent(),
+            onOutput = { },
+        )
+        return code == 0
+    }
+
+    private fun probeHermesRuntimeUsableInUbuntu(
+        paths: BootstrapInstaller.Paths,
+        installDir: File,
+    ): Boolean {
+        val code = runInUbuntu(
+            """
+            set +e
+            export HERMES_HOME=${shellQuote(hermesHomeDir(paths).absolutePath)}
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            cd "${'$'}INSTALL_DIR" || exit 31
+            [ -x ".venv/bin/hermes" ] || exit 32
+            .venv/bin/hermes chat --help >/dev/null 2>&1
             exit "${'$'}?"
             """.trimIndent(),
             onOutput = { },
@@ -2526,110 +2553,142 @@ EOF
     }
 
     fun installHermesAgent(onProgress: (String) -> Unit): Boolean {
-        val paths = BootstrapInstaller.getPaths(context)
-        val home = hermesHomeDir(paths)
-        val installDir = hermesInstallDir(paths)
-        val markerFile = hermesInstallMarkerFile(paths)
-        val tmpDir = File(paths.tmpDir)
-        home.mkdirs()
-        installDir.parentFile?.mkdirs()
-        tmpDir.mkdirs()
+        return synchronized(hermesInstallLock) {
+            val paths = BootstrapInstaller.getPaths(context)
+            val home = hermesHomeDir(paths)
+            val installDir = hermesInstallDir(paths)
+            val legacyDir = hermesLegacyInstallDir(paths)
+            val tmpDir = File(paths.tmpDir)
+            home.mkdirs()
+            installDir.parentFile?.mkdirs()
+            tmpDir.mkdirs()
 
-        val ubuntuBridge = File(paths.homeDir, ".openclaw-android/linux-runtime/bin/ubuntu-shell.sh")
-        if (!ubuntuBridge.exists()) {
-            onProgress("Ubuntu runtime bridge missing")
-            return false
-        }
+            if (isHermesRuntimeUsable()) {
+                markHermesInstalled(paths)
+                ensureHermesWrapperScript()
+                return@synchronized true
+            }
 
-        onProgress("Preparing Hermes prerequisites in Ubuntu…")
-        if (!ensureHermesInstallPrerequisitesInUbuntu(onProgress)) {
-            onProgress("Hermes prerequisite preparation failed")
-            return false
-        }
-
-        val bundledAssetName = resolveBundledHermesAssetName()
-        if (!bundledAssetName.isNullOrBlank()) {
-            onProgress("Installing Hermes Agent from bundled source ($bundledAssetName)…")
-            val bundle = File(tmpDir, bundledAssetName)
-            if (!copyAssetFromApk("$HERMES_BUNDLE_DIR/$bundledAssetName", bundle)) {
-                onProgress("Bundled Hermes source not readable, fallback to online install")
-            } else {
-                val extractCode = runInUbuntu(
+            if (!installDir.exists() && File(legacyDir, ".venv/bin/hermes").exists()) {
+                onProgress("Detected legacy Hermes install path, migrating…")
+                val migrateCode = runInUbuntu(
                     """
                     set -e
+                    LEGACY_DIR=${shellQuote(legacyDir.absolutePath)}
                     INSTALL_DIR=${shellQuote(installDir.absolutePath)}
-                    BUNDLE_FILE=${shellQuote(bundle.absolutePath)}
                     rm -rf "${'$'}INSTALL_DIR"
-                    mkdir -p "${'$'}INSTALL_DIR"
-                    BUNDLE_SIG="${'$'}(od -An -tx1 -N2 "${'$'}BUNDLE_FILE" 2>/dev/null | tr -d ' \n')"
-                    if [ "${'$'}BUNDLE_SIG" = "1f8b" ]; then
-                      tar -xzf "${'$'}BUNDLE_FILE" -C "${'$'}INSTALL_DIR"
-                    else
-                      tar -xf "${'$'}BUNDLE_FILE" -C "${'$'}INSTALL_DIR"
-                    fi
-                    if [ ! -f "${'$'}INSTALL_DIR/pyproject.toml" ]; then
-                      PROJECT_FILE="${'$'}(find "${'$'}INSTALL_DIR" -mindepth 2 -maxdepth 2 -type f -name pyproject.toml 2>/dev/null | head -n 1)"
-                      if [ -n "${'$'}PROJECT_FILE" ]; then
-                        PROJECT_DIR="${'$'}(dirname "${'$'}PROJECT_FILE")"
-                        TMP_EXTRACT_DIR="${'$'}INSTALL_DIR.__tmp_extract__"
-                        rm -rf "${'$'}TMP_EXTRACT_DIR"
-                        mkdir -p "${'$'}TMP_EXTRACT_DIR"
-                        cp -a "${'$'}PROJECT_DIR"/. "${'$'}TMP_EXTRACT_DIR"/
-                        rm -rf "${'$'}INSTALL_DIR"
-                        mv "${'$'}TMP_EXTRACT_DIR" "${'$'}INSTALL_DIR"
-                      fi
-                    fi
-                    [ -f "${'$'}INSTALL_DIR/pyproject.toml" ] || exit 21
+                    mkdir -p "$(dirname "${'$'}INSTALL_DIR")"
+                    mv "${'$'}LEGACY_DIR" "${'$'}INSTALL_DIR"
                     """.trimIndent(),
                     onOutput = { onProgress(it) },
                 )
-                if (extractCode == 0) {
-                    val bundledInstallCode = runHermesEditableInstallInUbuntu(home, installDir, onProgress)
-                    if (bundledInstallCode == 0) {
-                        markerFile.parentFile?.mkdirs()
-                        markerFile.writeText("$HERMES_INSTALL_ENV_UBUNTU\n")
-                        ensureHermesWrapperScript()
-                        if (isHermesAgentInstalled()) {
-                            return true
-                        }
-                        onProgress("Bundled Hermes install verification failed, fallback to online install")
-                    } else {
-                        onProgress("Bundled Hermes pip install failed (code=$bundledInstallCode), fallback to online install")
-                    }
-                } else {
-                    onProgress("Bundled Hermes extraction failed (code=$extractCode), fallback to online install")
+                if (migrateCode == 0 && probeHermesRuntimeUsableInUbuntu(paths, installDir)) {
+                    markHermesInstalled(paths)
+                    ensureHermesWrapperScript()
+                    return@synchronized true
                 }
             }
-        } else {
-            onProgress("Bundled Hermes source missing in APK assets, fallback to online install")
+
+            val ubuntuBridge = File(paths.homeDir, ".openclaw-android/linux-runtime/bin/ubuntu-shell.sh")
+            if (!ubuntuBridge.exists()) {
+                onProgress("Ubuntu runtime bridge missing")
+                return@synchronized false
+            }
+
+            onProgress("Preparing Hermes prerequisites in Ubuntu…")
+            if (!ensureHermesInstallPrerequisitesInUbuntu(onProgress)) {
+                onProgress("Hermes prerequisite preparation failed")
+                return@synchronized false
+            }
+
+            val bundledAssetName = resolveBundledHermesAssetName()
+            if (!bundledAssetName.isNullOrBlank()) {
+                onProgress("Installing Hermes Agent from bundled source ($bundledAssetName)…")
+                val bundle = File(tmpDir, bundledAssetName)
+                if (!copyAssetFromApk("$HERMES_BUNDLE_DIR/$bundledAssetName", bundle)) {
+                    onProgress("Bundled Hermes source not readable, fallback to online install")
+                } else {
+                    val extractCode = runInUbuntu(
+                        """
+                        set -e
+                        INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+                        BUNDLE_FILE=${shellQuote(bundle.absolutePath)}
+                        rm -rf "${'$'}INSTALL_DIR"
+                        mkdir -p "${'$'}INSTALL_DIR"
+                        BUNDLE_SIG="${'$'}(od -An -tx1 -N2 "${'$'}BUNDLE_FILE" 2>/dev/null | tr -d ' \n')"
+                        if [ "${'$'}BUNDLE_SIG" = "1f8b" ]; then
+                          tar -xzf "${'$'}BUNDLE_FILE" -C "${'$'}INSTALL_DIR"
+                        else
+                          tar -xf "${'$'}BUNDLE_FILE" -C "${'$'}INSTALL_DIR"
+                        fi
+                        if [ ! -f "${'$'}INSTALL_DIR/pyproject.toml" ]; then
+                          PROJECT_FILE="${'$'}(find "${'$'}INSTALL_DIR" -mindepth 2 -maxdepth 2 -type f -name pyproject.toml 2>/dev/null | head -n 1)"
+                          if [ -n "${'$'}PROJECT_FILE" ]; then
+                            PROJECT_DIR="${'$'}(dirname "${'$'}PROJECT_FILE")"
+                            TMP_EXTRACT_DIR="${'$'}INSTALL_DIR.__tmp_extract__"
+                            rm -rf "${'$'}TMP_EXTRACT_DIR"
+                            mkdir -p "${'$'}TMP_EXTRACT_DIR"
+                            cp -a "${'$'}PROJECT_DIR"/. "${'$'}TMP_EXTRACT_DIR"/
+                            rm -rf "${'$'}INSTALL_DIR"
+                            mv "${'$'}TMP_EXTRACT_DIR" "${'$'}INSTALL_DIR"
+                          fi
+                        fi
+                        [ -f "${'$'}INSTALL_DIR/pyproject.toml" ] || exit 21
+                        """.trimIndent(),
+                        onOutput = { onProgress(it) },
+                    )
+                    if (extractCode == 0) {
+                        val bundledInstallCode = runHermesEditableInstallInUbuntu(home, installDir, onProgress)
+                        if (bundledInstallCode == 0) {
+                            val verifyCode = verifyHermesInstallInUbuntu(home, installDir, onProgress)
+                            if (verifyCode == 0) {
+                                markHermesInstalled(paths)
+                                ensureHermesWrapperScript()
+                                return@synchronized true
+                            }
+                            onProgress("Bundled Hermes install verification failed (code=$verifyCode), fallback to online install")
+                        } else {
+                            onProgress("Bundled Hermes pip install failed (code=$bundledInstallCode), fallback to online install")
+                        }
+                    } else {
+                        onProgress("Bundled Hermes extraction failed (code=$extractCode), fallback to online install")
+                    }
+                }
+            } else {
+                onProgress("Bundled Hermes source missing in APK assets, fallback to online install")
+            }
+
+            onProgress("Bundled install unavailable, fallback to source clone…")
+
+            val cloneCode = runInUbuntu(
+                """
+                set -e
+                INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+                rm -rf "${'$'}INSTALL_DIR"
+                git clone --depth=1 ${shellQuote(HERMES_REPO_URL)} "${'$'}INSTALL_DIR" 2>&1
+                """.trimIndent(),
+                onOutput = { onProgress(it) },
+            )
+            if (cloneCode != 0) {
+                Log.e(TAG, "Hermes source clone failed with code $cloneCode")
+                return@synchronized false
+            }
+
+            val cloneInstallCode = runHermesEditableInstallInUbuntu(home, installDir, onProgress)
+            if (cloneInstallCode != 0) {
+                Log.e(TAG, "Hermes editable pip install failed with code $cloneInstallCode")
+                return@synchronized false
+            }
+
+            val verifyCode = verifyHermesInstallInUbuntu(home, installDir, onProgress)
+            if (verifyCode != 0) {
+                onProgress("Hermes install verification failed after clone (code=$verifyCode)")
+                return@synchronized false
+            }
+            markHermesInstalled(paths)
+            ensureHermesWrapperScript()
+            true
         }
-
-        onProgress("Bundled install unavailable, fallback to source clone…")
-
-        val cloneCode = runInUbuntu(
-            """
-            set -e
-            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
-            rm -rf "${'$'}INSTALL_DIR"
-            git clone --depth=1 ${shellQuote(HERMES_REPO_URL)} "${'$'}INSTALL_DIR" 2>&1
-            """.trimIndent(),
-            onOutput = { onProgress(it) },
-        )
-        if (cloneCode != 0) {
-            Log.e(TAG, "Hermes source clone failed with code $cloneCode")
-            return false
-        }
-
-        val cloneInstallCode = runHermesEditableInstallInUbuntu(home, installDir, onProgress)
-        if (cloneInstallCode != 0) {
-            Log.e(TAG, "Hermes editable pip install failed with code $cloneInstallCode")
-            return false
-        }
-
-        markerFile.parentFile?.mkdirs()
-        markerFile.writeText("$HERMES_INSTALL_ENV_UBUNTU\n")
-        ensureHermesWrapperScript()
-        return isHermesAgentInstalled()
     }
 
     private fun resolveBundledHermesAssetName(): String? {
@@ -2684,6 +2743,29 @@ EOF
         )
     }
 
+    private fun verifyHermesInstallInUbuntu(
+        home: File,
+        installDir: File,
+        onProgress: (String) -> Unit,
+    ): Int {
+        return runInUbuntu(
+            """
+            set +e
+            export HERMES_HOME=${shellQuote(home.absolutePath)}
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            cd "${'$'}INSTALL_DIR" || exit 31
+            [ -x ".venv/bin/python" ] || exit 32
+            [ -x ".venv/bin/hermes" ] || exit 33
+            .venv/bin/python -c "import hermes_cli" >/dev/null 2>&1 || exit 34
+            .venv/bin/hermes --version >/dev/null 2>&1 || .venv/bin/hermes version >/dev/null 2>&1 || exit 35
+            .venv/bin/hermes chat --help >/dev/null 2>&1 || exit 36
+            echo "hermes-install-verify-ok"
+            exit 0
+            """.trimIndent(),
+            onOutput = { onProgress(it) },
+        )
+    }
+
     fun startHermesGateway(): Boolean {
         val existing = hermesGatewayProcess
         if (existing != null) {
@@ -2695,7 +2777,7 @@ EOF
             }
             if (alive) return true
         }
-        if (!isHermesAgentInstalled()) return false
+        if (!isHermesRuntimeUsable()) return false
 
         val paths = BootstrapInstaller.getPaths(context)
         return try {
@@ -2737,7 +2819,7 @@ EOF
         extraEnv: Map<String, String>,
         hermesHomePath: String = hermesHomeDir(paths).absolutePath,
     ): String {
-        val installDir = hermesInstallDir(paths)
+        val installDir = resolveHermesInstallDir(paths) ?: hermesInstallDir(paths)
         val exports = extraEnv.entries
             .filter { (key, value) -> key.isNotBlank() && value.isNotBlank() && key.matches(Regex("^[A-Za-z_][A-Za-z0-9_]*$")) }
             .joinToString("\n") { (key, value) -> "export $key=${shellQuote(value)}" }
@@ -4519,8 +4601,26 @@ EOF
         return File(hermesHomeDir(paths), "hermes-agent")
     }
 
+    private fun hermesLegacyInstallDir(paths: BootstrapInstaller.Paths): File {
+        return File(hermesHomeDir(paths), "hermes-agent-ubuntu")
+    }
+
+    private fun resolveHermesInstallDir(paths: BootstrapInstaller.Paths): File? {
+        val primary = hermesInstallDir(paths)
+        if (File(primary, ".venv/bin/hermes").exists()) return primary
+        val legacy = hermesLegacyInstallDir(paths)
+        if (File(legacy, ".venv/bin/hermes").exists()) return legacy
+        return null
+    }
+
     private fun hermesInstallMarkerFile(paths: BootstrapInstaller.Paths): File {
         return File(hermesHomeDir(paths), "install-env.txt")
+    }
+
+    private fun markHermesInstalled(paths: BootstrapInstaller.Paths) {
+        val markerFile = hermesInstallMarkerFile(paths)
+        markerFile.parentFile?.mkdirs()
+        markerFile.writeText("$HERMES_INSTALL_ENV_UBUNTU\n")
     }
 
     private fun ensureHermesWrapperScript() {
@@ -4528,9 +4628,11 @@ EOF
         val prefix = paths.prefixDir
         val home = paths.homeDir
         val installDir = hermesInstallDir(paths)
+        val legacyInstallDir = hermesLegacyInstallDir(paths)
         val hermesHome = shellQuote(hermesHomeDir(paths).absolutePath)
         val ubuntuBin = "$home/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh"
         val installPath = shellQuote(installDir.absolutePath)
+        val legacyInstallPath = shellQuote(legacyInstallDir.absolutePath)
 
         val wrapperCmd = """
             set -e
@@ -4545,12 +4647,17 @@ if [ ! -x "${'$'}UBUNTU_BIN" ]; then
   echo "Hermes runtime bridge missing: ${'$'}UBUNTU_BIN" >&2
   exit 127
 fi
-INSTALL_DIR=$installPath
-if [ ! -x "${'$'}INSTALL_DIR/.venv/bin/hermes" ]; then
+INSTALL_DIR_PRIMARY=$installPath
+INSTALL_DIR_LEGACY=$legacyInstallPath
+if [ -x "${'$'}INSTALL_DIR_PRIMARY/.venv/bin/hermes" ]; then
+  INSTALL_DIR="${'$'}INSTALL_DIR_PRIMARY"
+elif [ -x "${'$'}INSTALL_DIR_LEGACY/.venv/bin/hermes" ]; then
+  INSTALL_DIR="${'$'}INSTALL_DIR_LEGACY"
+else
   echo "Hermes CLI executable not found. Run installHermesAgent first." >&2
   exit 127
 fi
-CMD="export HERMES_HOME=$hermesHome; cd $installPath; exec .venv/bin/hermes"
+CMD="export HERMES_HOME=$hermesHome; cd \"${'$'}INSTALL_DIR\"; exec .venv/bin/hermes"
 for ARG in "${'$'}@"; do
   ESCAPED="${'$'}(printf "%s" "${'$'}ARG" | sed "s/'/'\"'\"'/g")"
   CMD="${'$'}CMD '${'$'}ESCAPED'"

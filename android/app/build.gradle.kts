@@ -65,8 +65,8 @@ android {
         create("beta") {
             dimension = "channel"
             applicationId = "com.codex.mobile.pocketlobster.beta"
-            versionCode = 227
-            versionNameSuffix = "-beta-v227-hermes-probe-exec-fix"
+            versionCode = 228
+            versionNameSuffix = "-beta-v228-hermes-runtime-hardening"
             resValue("string", "app_name", "\"口袋大龙虾测试版\"")
         }
     }

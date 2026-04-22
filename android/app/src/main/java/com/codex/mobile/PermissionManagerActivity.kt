@@ -367,18 +367,7 @@ class PermissionManagerActivity : AppCompatActivity() {
                 }
             }
             val failureDetail = synchronized(progressLines) {
-                progressLines
-                    .asReversed()
-                    .firstOrNull { line ->
-                        val normalized = line.trim()
-                        normalized.isNotEmpty() &&
-                            !normalized.startsWith("Installing") &&
-                            !normalized.startsWith("Preparing") &&
-                            !normalized.startsWith("Collecting") &&
-                            !normalized.startsWith("Using")
-                    }
-                    ?.trim()
-                    .orEmpty()
+                extractHermesInstallFailureDetail(progressLines)
             }
             runOnUiThread {
                 hermesInstallRunning = false
@@ -392,6 +381,40 @@ class PermissionManagerActivity : AppCompatActivity() {
                 refreshOptionalAgentInstallStatus()
             }
         }.start()
+    }
+
+    private fun extractHermesInstallFailureDetail(lines: List<String>): String {
+        val ignoredPrefixes = listOf(
+            "Installing",
+            "Preparing",
+            "Collecting",
+            "Using",
+            "Requirement already satisfied",
+            "Successfully installed",
+            "Installing collected packages",
+            "Building wheels for collected packages",
+            "Installing build dependencies",
+            "Checking if build backend",
+            "Getting requirements to build editable",
+            "Preparing editable metadata",
+            "Created wheel for",
+            "Stored in directory:",
+            "Obtaining file://",
+            "Hit:",
+            "Reading package lists",
+            "Building dependency tree",
+            "Reading state information",
+            "LOGIN_SUCCESSFUL",
+            "TERMINAL_READY",
+            "hermes-install-verify-ok",
+        )
+        return lines
+            .asReversed()
+            .map { it.trim() }
+            .firstOrNull { line ->
+                line.isNotEmpty() && ignoredPrefixes.none { prefix -> line.startsWith(prefix) }
+            }
+            .orEmpty()
     }
 
     private fun openShizukuApp() {

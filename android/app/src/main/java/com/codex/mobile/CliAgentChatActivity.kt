@@ -1462,11 +1462,13 @@ class CliAgentChatActivity : AppCompatActivity() {
         options: AgentRuntimeOptions,
         resumeSessionId: String = "",
     ): AgentRunResult {
-        if (!serverManager.isHermesAgentInstalled()) {
-            val installed = serverManager.installHermesAgent { line ->
+        var runtimeReady = serverManager.isHermesRuntimeUsable()
+        if (!runtimeReady) {
+            serverManager.installHermesAgent { line ->
                 appendClaudeProcessLine(liveProcessLines, "Hermes安装: ${clipProcessText(line)}")
             }
-            if (!installed || !serverManager.isHermesAgentInstalled()) {
+            runtimeReady = serverManager.isHermesRuntimeUsable()
+            if (!runtimeReady) {
                 throw IllegalStateException("Hermes Agent 未安装，且自动安装失败")
             }
         }
@@ -1904,6 +1906,20 @@ class CliAgentChatActivity : AppCompatActivity() {
     private fun appendClaudeProcessLine(lines: MutableList<String>, line: String) {
         val normalized = line.trim()
         if (normalized.isBlank()) return
+        if (lines === liveProcessLines) {
+            val appended = synchronized(liveProcessLines) {
+                if (liveProcessLines.lastOrNull() == normalized) {
+                    false
+                } else {
+                    liveProcessLines += normalized
+                    true
+                }
+            }
+            if (appended) {
+                scheduleLiveProcessRender()
+            }
+            return
+        }
         if (lines.lastOrNull() == normalized) return
         lines += normalized
         recordLiveProcessLine(normalized)
@@ -1940,6 +1956,10 @@ class CliAgentChatActivity : AppCompatActivity() {
         synchronized(liveProcessLines) {
             liveProcessLines += line
         }
+        scheduleLiveProcessRender()
+    }
+
+    private fun scheduleLiveProcessRender() {
         val now = System.currentTimeMillis()
         if (now - lastLiveRenderAtMs < 350L) return
         lastLiveRenderAtMs = now
