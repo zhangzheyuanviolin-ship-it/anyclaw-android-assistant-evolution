@@ -273,19 +273,31 @@ class CodexServerManager(private val context: Context) {
         val installDir = hermesInstallDir(paths)
         val markerFile = hermesInstallMarkerFile(paths)
         if (!File(installDir, ".venv/bin/hermes").exists()) return false
-        if (!markerFile.exists() || markerFile.readText().trim() != HERMES_INSTALL_ENV_UBUNTU) return false
-        val command = buildHermesUbuntuCommand(paths, listOf("--version"), emptyMap())
-        val probe = runCaptureInUbuntu("$command >/dev/null 2>&1 && echo yes || echo no")
-        return probe
-            .lineSequence()
-            .map { it.trim().lowercase() }
-            .firstOrNull { it.isNotEmpty() } == "yes"
+        val installed = probeHermesInstallInUbuntu(paths)
+        if (installed) {
+            if (!markerFile.exists() || markerFile.readText().trim() != HERMES_INSTALL_ENV_UBUNTU) {
+                runCatching {
+                    markerFile.parentFile?.mkdirs()
+                    markerFile.writeText("$HERMES_INSTALL_ENV_UBUNTU\n")
+                }
+            }
+        }
+        return installed
     }
 
     fun getInstalledHermesAgentVersion(): String {
         val paths = BootstrapInstaller.getPaths(context)
-        if (!File(hermesInstallDir(paths), ".venv/bin/hermes").exists()) return ""
-        val versionText = runCaptureInUbuntu(buildHermesUbuntuCommand(paths, listOf("--version"), emptyMap()))
+        if (!probeHermesInstallInUbuntu(paths)) return ""
+        val installDir = hermesInstallDir(paths)
+        val versionText = runCaptureInUbuntu(
+            """
+            set +e
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            cd "${'$'}INSTALL_DIR" || exit 1
+            [ -x ".venv/bin/hermes" ] || exit 1
+            .venv/bin/hermes --version 2>/dev/null || true
+            """.trimIndent(),
+        )
         return versionText
             .lineSequence()
             .map { it.trim() }
@@ -315,6 +327,22 @@ class CodexServerManager(private val context: Context) {
             .lineSequence()
             .map { it.trim().lowercase() }
             .firstOrNull { it.isNotEmpty() } == "yes"
+    }
+
+    private fun probeHermesInstallInUbuntu(paths: BootstrapInstaller.Paths): Boolean {
+        val installDir = hermesInstallDir(paths)
+        val code = runInUbuntu(
+            """
+            set +e
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            cd "${'$'}INSTALL_DIR" || exit 31
+            [ -x ".venv/bin/hermes" ] || exit 32
+            .venv/bin/hermes --version >/dev/null 2>&1
+            exit "${'$'}?"
+            """.trimIndent(),
+            onOutput = { },
+        )
+        return code == 0
     }
 
     fun isServerBundleInstalled(): Boolean = false
