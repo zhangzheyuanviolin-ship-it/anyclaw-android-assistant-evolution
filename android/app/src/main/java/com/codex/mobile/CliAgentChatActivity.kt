@@ -1505,37 +1505,151 @@ class CliAgentChatActivity : AppCompatActivity() {
             }
         }
 
-        val hermesHomePath = ensureHermesRuntimeConfig(config, options).absolutePath
+        var gatewayStarted = false
         if (options.hermesGatewayEnabled) {
-            val started = runCatching { serverManager.startHermesGateway() }.getOrElse { false }
+            gatewayStarted = runCatching { serverManager.startHermesGateway() }.getOrElse { false }
             appendClaudeProcessLine(
                 liveProcessLines,
-                if (started) "Hermes 网关：已启动" else "Hermes 网关：启动失败，回退直连",
+                if (gatewayStarted) "Hermes 网关：已启动" else "Hermes 网关：启动失败，回退直连",
             )
         } else {
             runCatching { serverManager.stopHermesGateway() }
         }
 
-        val args = mutableListOf(
-            "chat",
-            "-Q",
-            "-q",
-            prompt,
-            "--source",
-            "pocketlobster",
+        data class HermesAttempt(
+            val quietMode: Boolean,
+            val resume: String,
+            val useGateway: Boolean,
+            val includeToolbox: Boolean,
+            val reason: String,
         )
-        if (resumeSessionId.isNotBlank()) {
-            args += listOf("--resume", resumeSessionId.trim())
+
+        val attempts = mutableListOf<HermesAttempt>()
+        val attemptKeys = linkedSetOf<String>()
+        fun addAttempt(
+            quietMode: Boolean,
+            resume: String,
+            useGateway: Boolean,
+            includeToolbox: Boolean,
+            reason: String,
+        ) {
+            val key = listOf(
+                if (quietMode) "quiet" else "diag",
+                resume.trim(),
+                if (useGateway) "gw" else "nogw",
+                if (includeToolbox) "toolbox" else "plain",
+            ).joinToString("|")
+            if (!attemptKeys.add(key)) return
+            attempts += HermesAttempt(
+                quietMode = quietMode,
+                resume = resume.trim(),
+                useGateway = useGateway,
+                includeToolbox = includeToolbox,
+                reason = reason,
+            )
         }
 
-        val process = serverManager.startHermesExecProcess(
-            args = args,
-            extraEnv = mapOf(
-                "HERMES_HOME" to hermesHomePath,
-                "HERMES_QUIET" to "1",
-            ),
+        val normalizedResume = resumeSessionId.trim()
+        addAttempt(
+            quietMode = true,
+            resume = normalizedResume,
+            useGateway = gatewayStarted,
+            includeToolbox = true,
+            reason = "主链路",
         )
-        return runHermesQuietOutput(process)
+        if (normalizedResume.isNotBlank()) {
+            addAttempt(
+                quietMode = true,
+                resume = "",
+                useGateway = gatewayStarted,
+                includeToolbox = true,
+                reason = "移除会话续接",
+            )
+        }
+        if (gatewayStarted) {
+            addAttempt(
+                quietMode = true,
+                resume = "",
+                useGateway = false,
+                includeToolbox = true,
+                reason = "绕过网关",
+            )
+        }
+        addAttempt(
+            quietMode = true,
+            resume = "",
+            useGateway = false,
+            includeToolbox = false,
+            reason = "关闭MCP注入",
+        )
+        addAttempt(
+            quietMode = false,
+            resume = "",
+            useGateway = false,
+            includeToolbox = false,
+            reason = "诊断模式",
+        )
+
+        var lastError: Throwable? = null
+        attempts.forEachIndexed { index, attempt ->
+            if (index > 0) {
+                appendClaudeProcessLine(
+                    liveProcessLines,
+                    "Hermes重试: ${attempt.reason}",
+                )
+            }
+            if (!attempt.useGateway) {
+                if (gatewayStarted) {
+                    appendClaudeProcessLine(liveProcessLines, "Hermes 网关：本轮自动绕过")
+                }
+                runCatching { serverManager.stopHermesGateway() }
+            }
+            val hermesHomePath = ensureHermesRuntimeConfig(
+                config = config,
+                options = options,
+                includeToolbox = attempt.includeToolbox,
+            ).absolutePath
+            val args = mutableListOf("chat")
+            if (attempt.quietMode) {
+                args += "-Q"
+            }
+            args += listOf(
+                "-q",
+                prompt,
+                "--source",
+                "pocketlobster",
+            )
+            if (attempt.resume.isNotBlank()) {
+                args += listOf("--resume", attempt.resume)
+            }
+
+            val extraEnv = mutableMapOf(
+                "HERMES_HOME" to hermesHomePath,
+            )
+            if (attempt.quietMode) {
+                extraEnv["HERMES_QUIET"] = "1"
+            }
+
+            val result = runCatching {
+                val process = serverManager.startHermesExecProcess(
+                    args = args,
+                    extraEnv = extraEnv,
+                )
+                if (attempt.quietMode) runHermesQuietOutput(process) else runHermesDiagnosticOutput(process)
+            }
+            if (result.isSuccess) {
+                return result.getOrThrow()
+            }
+            val error = result.exceptionOrNull()
+            lastError = error
+            val reason = clipProcessText(error?.message ?: "unknown error", maxChars = 260)
+            appendClaudeProcessLine(
+                liveProcessLines,
+                "Hermes重试失败(${attempt.reason}): $reason",
+            )
+        }
+
+        throw IllegalStateException(lastError?.message ?: "command exit code=1")
     }
 
     private fun runHermesQuietOutput(process: Process): AgentRunResult {
@@ -1590,14 +1704,67 @@ class CliAgentChatActivity : AppCompatActivity() {
         )
     }
 
-    private fun ensureHermesRuntimeConfig(config: AgentModelConfig, options: AgentRuntimeOptions): File {
+    private fun runHermesDiagnosticOutput(process: Process): AgentRunResult {
+        activeProcess = process
+        val lines = mutableListOf<String>()
+        var sessionId = ""
+
+        BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+            var line = reader.readLine()
+            while (line != null) {
+                val cleaned = stripAnsi(line).trim()
+                if (shouldIgnoreProcessLine(cleaned)) {
+                    line = reader.readLine()
+                    continue
+                }
+                if (cleaned.isNotBlank()) {
+                    val sessionMatch = HERMES_SESSION_ID_LINE_REGEX.find(cleaned)
+                    if (sessionMatch != null) {
+                        val parsed = sessionMatch.groupValues.getOrNull(1).orEmpty().trim()
+                        if (parsed.isNotBlank()) {
+                            sessionId = parsed
+                        }
+                    } else {
+                        lines += cleaned
+                    }
+                }
+                line = reader.readLine()
+            }
+        }
+        val exitCode = process.waitFor()
+        activeProcess = null
+
+        val raw = lines.joinToString("\n").trim()
+        if (abortRequested) {
+            return AgentRunResult(
+                assistantText = getString(R.string.cli_task_aborted),
+                processText = raw,
+                nativeSessionId = sessionId,
+            )
+        }
+        if (exitCode != 0) {
+            throw IllegalStateException(raw.ifBlank { "command exit code=$exitCode" })
+        }
+        return AgentRunResult(
+            assistantText = cleanClaudeOutput(raw).ifBlank { "Hermes 未返回可解析内容" },
+            processText = "",
+            nativeSessionId = sessionId,
+        )
+    }
+
+    private fun ensureHermesRuntimeConfig(
+        config: AgentModelConfig,
+        options: AgentRuntimeOptions,
+        includeToolbox: Boolean = true,
+    ): File {
         val paths = BootstrapInstaller.getPaths(this)
         val hermesHome = File(paths.homeDir, ".pocketlobster/hermes")
         if (!hermesHome.exists()) {
             hermesHome.mkdirs()
         }
         val configFile = File(hermesHome, "config.yaml")
-        val toolboxAvailable = runCatching { serverManager.canHermesToolboxRunInUbuntu() }.getOrElse { false }
+        val toolboxAvailable = includeToolbox &&
+            runCatching { serverManager.canHermesToolboxRunInUbuntu() }.getOrElse { false }
         val mcpConfig = if (toolboxAvailable) ensureClaudeAnyClawMcpConfig(options) else null
         val serverFile = mcpConfig?.let { File(it.parentFile, "anyclaw-toolbox-server.cjs") }
 
