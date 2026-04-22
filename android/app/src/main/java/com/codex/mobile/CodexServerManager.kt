@@ -274,7 +274,7 @@ class CodexServerManager(private val context: Context) {
         val markerFile = hermesInstallMarkerFile(paths)
         if (!File(installDir, ".venv/bin/hermes").exists()) return false
         if (!markerFile.exists() || markerFile.readText().trim() != HERMES_INSTALL_ENV_UBUNTU) return false
-        val command = buildHermesUbuntuCommand(paths, listOf("--version", "--quiet"), emptyMap())
+        val command = buildHermesUbuntuCommand(paths, listOf("--version"), emptyMap())
         val probe = runCaptureInUbuntu("$command >/dev/null 2>&1 && echo yes || echo no")
         return probe
             .lineSequence()
