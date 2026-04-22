@@ -44,8 +44,10 @@ class CliAgentChatActivity : AppCompatActivity() {
         private const val MAX_VISIBLE_HISTORY = 240
         private const val CLAUDE_AUTO_COMPACT_PROMPT_BYTES = 96 * 1024
         private const val CLAUDE_HARD_PROMPT_BYTES = 140 * 1024
+        private const val HERMES_HARD_PROMPT_BYTES = 120 * 1024
         private const val CLAUDE_SUMMARY_CLIP_CHARS = 420
         private const val CLAUDE_SUMMARY_TOTAL_MAX_CHARS = 12_000
+        private const val HERMES_PROMPT_CLIP_NOTICE = "提示：上下文过长，已自动裁剪为最近会话片段。"
         private const val CLAUDE_NATIVE_SESSION_MODE = "claude_native_v1"
         private const val NATIVE_BIND_RETRY_COOLDOWN_MS = 20_000L
         private const val MENU_ACTION_COPY = 1
@@ -964,6 +966,26 @@ class CliAgentChatActivity : AppCompatActivity() {
         return value.toByteArray(Charsets.UTF_8).size
     }
 
+    private fun trimToUtf8Tail(value: String, maxBytes: Int): String {
+        if (maxBytes <= 0) return ""
+        if (promptUtf8Bytes(value) <= maxBytes) return value
+        var start = 0
+        var bytes = promptUtf8Bytes(value)
+        while (start < value.length && bytes > maxBytes) {
+            val step = if (start + 1 < value.length &&
+                Character.isHighSurrogate(value[start]) &&
+                Character.isLowSurrogate(value[start + 1])
+            ) {
+                2
+            } else {
+                1
+            }
+            bytes -= value.substring(start, start + step).toByteArray(Charsets.UTF_8).size
+            start += step
+        }
+        return value.substring(start)
+    }
+
     private fun isArgumentListTooLong(error: Throwable): Boolean {
         val message = error.message?.lowercase(Locale.US).orEmpty()
         return message.contains("argument list too long") || message.contains("error=7")
@@ -1162,6 +1184,16 @@ class CliAgentChatActivity : AppCompatActivity() {
                         }
                     }
                     prompt = buildPromptWithHistory(activeSession.messages, runtimeOptions)
+                }
+                if (agentId == ExternalAgentId.HERMES_AGENT &&
+                    promptUtf8Bytes(prompt) > HERMES_HARD_PROMPT_BYTES
+                ) {
+                    val reserveBytes =
+                        (HERMES_HARD_PROMPT_BYTES - promptUtf8Bytes(HERMES_PROMPT_CLIP_NOTICE) - 1)
+                            .coerceAtLeast(16 * 1024)
+                    val tail = trimToUtf8Tail(prompt, reserveBytes)
+                    prompt = "$HERMES_PROMPT_CLIP_NOTICE\n$tail"
+                    appendClaudeProcessLine(liveProcessLines, "Hermes 提示词过长，已自动裁剪后继续发送")
                 }
                 var firstResult = when (agentId) {
                     ExternalAgentId.CLAUDE_CODE -> runClaudePrint(
@@ -1485,7 +1517,6 @@ class CliAgentChatActivity : AppCompatActivity() {
         }
 
         val args = mutableListOf(
-            "hermes",
             "chat",
             "-Q",
             "-q",

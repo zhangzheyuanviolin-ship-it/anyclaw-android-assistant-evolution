@@ -745,7 +745,7 @@ class MainActivity : AppCompatActivity() {
 
         // Step 3a: Hermes is optional but should be prepared on first install so
         // Permission Center reflects the bundled state immediately.
-        if (serverManager.isHermesAgentInstalled()) {
+        if (serverManager.isHermesRuntimeUsable()) {
             updateStatus("Hermes Agent ready")
         } else {
             updateStatus("Installing Hermes Agent (optional)…", "Using bundled source when available")

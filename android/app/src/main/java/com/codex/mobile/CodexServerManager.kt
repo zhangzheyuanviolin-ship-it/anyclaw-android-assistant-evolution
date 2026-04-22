@@ -273,7 +273,7 @@ class CodexServerManager(private val context: Context) {
         val paths = BootstrapInstaller.getPaths(context)
         val installDir = resolveHermesInstallDir(paths) ?: return false
         val markerFile = hermesInstallMarkerFile(paths)
-        val installed = probeHermesInstallInUbuntu(paths, installDir)
+        val installed = probeHermesRuntimeUsableInUbuntu(paths, installDir)
         if (installed) {
             if (!markerFile.exists() || markerFile.readText().trim() != HERMES_INSTALL_ENV_UBUNTU) {
                 runCatching {
@@ -2820,10 +2820,13 @@ EOF
         hermesHomePath: String = hermesHomeDir(paths).absolutePath,
     ): String {
         val installDir = resolveHermesInstallDir(paths) ?: hermesInstallDir(paths)
+        val normalizedArgs = args
+            .dropWhile { it.trim().equals("hermes", ignoreCase = true) }
+            .ifEmpty { listOf("--help") }
         val exports = extraEnv.entries
             .filter { (key, value) -> key.isNotBlank() && value.isNotBlank() && key.matches(Regex("^[A-Za-z_][A-Za-z0-9_]*$")) }
             .joinToString("\n") { (key, value) -> "export $key=${shellQuote(value)}" }
-        val argString = args.joinToString(" ") { shellQuote(it) }
+        val argString = normalizedArgs.joinToString(" ") { shellQuote(it) }
         val envBlock = if (exports.isBlank()) "" else "$exports\n"
         return """
             set -e

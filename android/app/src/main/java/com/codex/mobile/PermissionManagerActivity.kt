@@ -289,7 +289,7 @@ class PermissionManagerActivity : AppCompatActivity() {
             } else {
                 ""
             }
-            val hermesInstalled = runCatching { serverManager.isHermesAgentInstalled() }.getOrElse { false }
+            val hermesInstalled = runCatching { serverManager.isHermesRuntimeUsable() }.getOrElse { false }
             val hermesVersion = if (hermesInstalled) {
                 runCatching { serverManager.getInstalledHermesAgentVersion() }.getOrElse { "" }
             } else {
