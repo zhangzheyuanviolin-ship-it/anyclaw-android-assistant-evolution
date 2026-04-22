@@ -1495,7 +1495,7 @@ class CliAgentChatActivity : AppCompatActivity() {
             args += listOf("--resume", resumeSessionId.trim())
         }
 
-        val process = serverManager.startPrefixExecProcess(
+        val process = serverManager.startHermesExecProcess(
             args = args,
             extraEnv = mapOf(
                 "HERMES_HOME" to hermesHomePath,
@@ -1564,8 +1564,9 @@ class CliAgentChatActivity : AppCompatActivity() {
             hermesHome.mkdirs()
         }
         val configFile = File(hermesHome, "config.yaml")
-        val mcpConfig = ensureClaudeAnyClawMcpConfig(options)
-        val serverFile = File(mcpConfig.parentFile, "anyclaw-toolbox-server.cjs")
+        val toolboxAvailable = runCatching { serverManager.canHermesToolboxRunInUbuntu() }.getOrElse { false }
+        val mcpConfig = if (toolboxAvailable) ensureClaudeAnyClawMcpConfig(options) else null
+        val serverFile = mcpConfig?.let { File(it.parentFile, "anyclaw-toolbox-server.cjs") }
 
         val yaml = buildString {
             appendLine("model:")
@@ -1578,20 +1579,22 @@ class CliAgentChatActivity : AppCompatActivity() {
             appendLine("terminal:")
             appendLine("  backend: local")
             appendLine("  cwd: ${yamlQuote("${paths.homeDir}/.openclaw/workspace")}")
-            appendLine("mcp_servers:")
-            appendLine("  anyclaw_toolbox:")
-            appendLine("    command: ${yamlQuote("${paths.prefixDir}/bin/node")}")
-            appendLine("    args:")
-            appendLine("      - ${yamlQuote(serverFile.absolutePath)}")
-            appendLine("    env:")
-            appendLine("      HOME: ${yamlQuote(paths.homeDir)}")
-            appendLine("      PREFIX: ${yamlQuote(paths.prefixDir)}")
-            appendLine("      PATH: ${yamlQuote("${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin")}")
-            appendLine("      ANYCLAW_WEB_BRIDGE_URL: ${yamlQuote("http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")}")
-            appendLine("      ANYCLAW_UBUNTU_BIN: ${yamlQuote("${paths.homeDir}/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh")}")
-            appendLine("      ANYCLAW_WORKSPACE_ROOT: ${yamlQuote("${paths.homeDir}/.openclaw/workspace")}")
-            appendLine("      ANYCLAW_ALLOW_SHARED_STORAGE: ${yamlQuote(if (options.allowSharedStorage) "1" else "0")}")
-            appendLine("      ANYCLAW_MCP_CONFIG_PATH: ${yamlQuote(mcpConfig.absolutePath)}")
+            if (toolboxAvailable && mcpConfig != null && serverFile != null) {
+                appendLine("mcp_servers:")
+                appendLine("  anyclaw_toolbox:")
+                appendLine("    command: ${yamlQuote("${paths.prefixDir}/bin/node")}")
+                appendLine("    args:")
+                appendLine("      - ${yamlQuote(serverFile.absolutePath)}")
+                appendLine("    env:")
+                appendLine("      HOME: ${yamlQuote(paths.homeDir)}")
+                appendLine("      PREFIX: ${yamlQuote(paths.prefixDir)}")
+                appendLine("      PATH: ${yamlQuote("${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin")}")
+                appendLine("      ANYCLAW_WEB_BRIDGE_URL: ${yamlQuote("http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")}")
+                appendLine("      ANYCLAW_UBUNTU_BIN: ${yamlQuote("${paths.homeDir}/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh")}")
+                appendLine("      ANYCLAW_WORKSPACE_ROOT: ${yamlQuote("${paths.homeDir}/.openclaw/workspace")}")
+                appendLine("      ANYCLAW_ALLOW_SHARED_STORAGE: ${yamlQuote(if (options.allowSharedStorage) "1" else "0")}")
+                appendLine("      ANYCLAW_MCP_CONFIG_PATH: ${yamlQuote(mcpConfig.absolutePath)}")
+            }
         }.trim() + "\n"
 
         writeTextIfChanged(configFile, yaml)

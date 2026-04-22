@@ -199,11 +199,11 @@
     <string name="claude_install_success">Claude Code 组件安装或升级完成。</string>
     <string name="claude_install_failed">Claude Code 组件安装失败，请检查网络后重试。</string>
     <string name="hermes_install_title">Hermes Agent 组件</string>
-    <string name="hermes_install_subtitle">优先使用安装包内置源码离线安装；若离线资源不可用，将自动回退官方安装流程。</string>
+    <string name="hermes_install_subtitle">优先使用安装包内置源码在内置Ubuntu环境安装；若离线资源不可用，将自动回退源码克隆安装。</string>
     <string name="hermes_install_button_text">安装或修复 Hermes Agent</string>
     <string name="hermes_install_starting">正在安装或修复 Hermes Agent…</string>
     <string name="hermes_install_success">Hermes Agent 组件安装或修复完成。</string>
-    <string name="hermes_install_failed">Hermes Agent 组件安装失败，请检查网络后重试。</string>
+    <string name="hermes_install_failed">Hermes Agent 组件安装失败，请查看报错原因后重试。</string>
     <string name="cli_option_allow_shared_storage">允许访问共享存储（/sdcard）</string>
     <string name="cli_option_dangerous_mode">高权限自动放行（谨慎使用）</string>
     <string name="cli_option_show_process">显示执行过程</string>

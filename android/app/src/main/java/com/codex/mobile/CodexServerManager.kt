@@ -28,10 +28,11 @@ class CodexServerManager(private val context: Context) {
         private const val PROXY_PORT = 18924
         private const val CODEX_VERSION = "0.121.0"
         private const val CLAUDE_CODE_VERSION = "2.1.112"
-        private const val HERMES_INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
+        private const val HERMES_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
         private const val HERMES_BUNDLE_DIR = "hermes-agent-bundle"
         private const val HERMES_BUNDLE_TAR = "hermes-agent-src.tar"
         private const val HERMES_BUNDLE_TAR_GZ = "hermes-agent-src.tar.gz"
+        private const val HERMES_INSTALL_ENV_UBUNTU = "ubuntu"
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
@@ -215,6 +216,16 @@ class CodexServerManager(private val context: Context) {
         return sb.toString().trim()
     }
 
+    private fun runCaptureInUbuntu(command: String): String {
+        val sb = StringBuilder()
+        runInUbuntu(command) { line ->
+            val cleaned = line.trim()
+            if (cleaned == "LOGIN_SUCCESSFUL" || cleaned == "TERMINAL_READY") return@runInUbuntu
+            sb.appendLine(line)
+        }
+        return sb.toString().trim()
+    }
+
     // ── Install checks ─────────────────────────────────────────────────────
 
     fun isProotInstalled(): Boolean {
@@ -259,21 +270,51 @@ class CodexServerManager(private val context: Context) {
 
     fun isHermesAgentInstalled(): Boolean {
         val paths = BootstrapInstaller.getPaths(context)
-        val wrapper = File(paths.prefixDir, "bin/hermes")
-        if (!wrapper.exists()) return false
-        val home = hermesHomeDir(paths)
-        val command = "HERMES_HOME='${home.absolutePath}' hermes --version >/dev/null 2>&1 && echo yes || echo no"
-        return runCapture(command) == "yes"
+        val installDir = hermesInstallDir(paths)
+        val markerFile = hermesInstallMarkerFile(paths)
+        if (!File(installDir, ".venv/bin/hermes").exists()) return false
+        if (!markerFile.exists() || markerFile.readText().trim() != HERMES_INSTALL_ENV_UBUNTU) return false
+        val command = buildHermesUbuntuCommand(paths, listOf("--version", "--quiet"), emptyMap())
+        val probe = runCaptureInUbuntu("$command >/dev/null 2>&1 && echo yes || echo no")
+        return probe
+            .lineSequence()
+            .map { it.trim().lowercase() }
+            .firstOrNull { it.isNotEmpty() } == "yes"
     }
 
     fun getInstalledHermesAgentVersion(): String {
         val paths = BootstrapInstaller.getPaths(context)
-        val home = hermesHomeDir(paths)
-        return runCapture("HERMES_HOME='${home.absolutePath}' hermes --version 2>/dev/null | head -n 1")
+        if (!File(hermesInstallDir(paths), ".venv/bin/hermes").exists()) return ""
+        val versionText = runCaptureInUbuntu(buildHermesUbuntuCommand(paths, listOf("--version"), emptyMap()))
+        return versionText
             .lineSequence()
-            .firstOrNull()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .firstOrNull { !it.equals("Up to date", ignoreCase = true) }
             .orEmpty()
             .trim()
+    }
+
+    fun canHermesToolboxRunInUbuntu(): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val nodePath = "${paths.prefixDir}/bin/node"
+        val check = runCaptureInUbuntu(
+            """
+            set +e
+            NODE=${shellQuote(nodePath)}
+            if [ ! -x "${'$'}NODE" ]; then
+              echo no
+              exit 0
+            fi
+            "${'$'}NODE" --version >/dev/null 2>&1 || { echo no; exit 0; }
+            echo yes
+            exit 0
+            """.trimIndent(),
+        )
+        return check
+            .lineSequence()
+            .map { it.trim().lowercase() }
+            .firstOrNull { it.isNotEmpty() } == "yes"
     }
 
     fun isServerBundleInstalled(): Boolean = false
@@ -2460,13 +2501,20 @@ EOF
         val paths = BootstrapInstaller.getPaths(context)
         val home = hermesHomeDir(paths)
         val installDir = hermesInstallDir(paths)
+        val markerFile = hermesInstallMarkerFile(paths)
         val tmpDir = File(paths.tmpDir)
         home.mkdirs()
         installDir.parentFile?.mkdirs()
         tmpDir.mkdirs()
 
-        onProgress("Preparing Hermes prerequisites…")
-        if (!ensureHermesInstallPrerequisites(onProgress)) {
+        val ubuntuBridge = File(paths.homeDir, ".openclaw-android/linux-runtime/bin/ubuntu-shell.sh")
+        if (!ubuntuBridge.exists()) {
+            onProgress("Ubuntu runtime bridge missing")
+            return false
+        }
+
+        onProgress("Preparing Hermes prerequisites in Ubuntu…")
+        if (!ensureHermesInstallPrerequisitesInUbuntu(onProgress)) {
             onProgress("Hermes prerequisite preparation failed")
             return false
         }
@@ -2478,7 +2526,7 @@ EOF
             if (!copyAssetFromApk("$HERMES_BUNDLE_DIR/$bundledAssetName", bundle)) {
                 onProgress("Bundled Hermes source not readable, fallback to online install")
             } else {
-                val extractCode = runInPrefix(
+                val extractCode = runInUbuntu(
                     """
                     set -e
                     INSTALL_DIR=${shellQuote(installDir.absolutePath)}
@@ -2508,8 +2556,10 @@ EOF
                     onOutput = { onProgress(it) },
                 )
                 if (extractCode == 0) {
-                    val bundledInstallCode = runHermesEditableInstall(home, installDir, onProgress)
+                    val bundledInstallCode = runHermesEditableInstallInUbuntu(home, installDir, onProgress)
                     if (bundledInstallCode == 0) {
+                        markerFile.parentFile?.mkdirs()
+                        markerFile.writeText("$HERMES_INSTALL_ENV_UBUNTU\n")
                         ensureHermesWrapperScript()
                         if (isHermesAgentInstalled()) {
                             return true
@@ -2526,43 +2576,14 @@ EOF
             onProgress("Bundled Hermes source missing in APK assets, fallback to online install")
         }
 
-        onProgress("Installing Hermes Agent via official installer…")
-        val onlineCode = runInPrefix(
-            """
-            set -e
-            export HERMES_HOME=${shellQuote(home.absolutePath)}
-            export HERMES_INSTALL_DIR=${shellQuote(installDir.absolutePath)}
-            export TERMUX_VERSION=anyclaw
-            export PREFIX=${shellQuote(paths.prefixDir)}
-            mkdir -p "${'$'}HERMES_HOME"
-            if command -v curl >/dev/null 2>&1; then
-              curl -fsSL ${shellQuote(HERMES_INSTALLER_URL)} | bash -s -- \
-                --no-venv --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
-            elif command -v wget >/dev/null 2>&1; then
-              wget -qO- ${shellQuote(HERMES_INSTALLER_URL)} | bash -s -- \
-                --no-venv --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
-            else
-              exit 42
-            fi
-            """.trimIndent(),
-            onOutput = { onProgress(it) },
-        )
-        if (onlineCode == 0) {
-            ensureHermesWrapperScript()
-            if (isHermesAgentInstalled()) {
-                return true
-            }
-            onProgress("Official installer finished but Hermes command unavailable, fallback to source clone")
-        } else {
-            onProgress("Official installer failed (code=$onlineCode), fallback to source clone")
-        }
+        onProgress("Bundled install unavailable, fallback to source clone…")
 
-        val cloneCode = runInPrefix(
+        val cloneCode = runInUbuntu(
             """
             set -e
             INSTALL_DIR=${shellQuote(installDir.absolutePath)}
             rm -rf "${'$'}INSTALL_DIR"
-            git clone --depth=1 https://github.com/NousResearch/hermes-agent.git "${'$'}INSTALL_DIR" 2>&1
+            git clone --depth=1 ${shellQuote(HERMES_REPO_URL)} "${'$'}INSTALL_DIR" 2>&1
             """.trimIndent(),
             onOutput = { onProgress(it) },
         )
@@ -2571,12 +2592,14 @@ EOF
             return false
         }
 
-        val cloneInstallCode = runHermesEditableInstall(home, installDir, onProgress)
+        val cloneInstallCode = runHermesEditableInstallInUbuntu(home, installDir, onProgress)
         if (cloneInstallCode != 0) {
             Log.e(TAG, "Hermes editable pip install failed with code $cloneInstallCode")
             return false
         }
 
+        markerFile.parentFile?.mkdirs()
+        markerFile.writeText("$HERMES_INSTALL_ENV_UBUNTU\n")
         ensureHermesWrapperScript()
         return isHermesAgentInstalled()
     }
@@ -2592,55 +2615,19 @@ EOF
         }
     }
 
-    private fun ensureHermesInstallPrerequisites(onProgress: (String) -> Unit): Boolean {
-        if (!isPythonInstalled()) {
-            onProgress("Python is missing, installing runtime first…")
-            if (!installPython(onProgress) || !isPythonInstalled()) {
-                return false
-            }
-        }
-
-        val paths = BootstrapInstaller.getPaths(context)
-        val prefix = paths.prefixDir
-        val termuxPrefix = "/data/data/com.termux/files/usr"
-        val code = runInPrefix(
+    private fun ensureHermesInstallPrerequisitesInUbuntu(onProgress: (String) -> Unit): Boolean {
+        val code = runInUbuntu(
             """
             set +e
-            PREFIX=${shellQuote(prefix)}
-            TERMUX_PREFIX=${shellQuote(termuxPrefix)}
-            cd "${'$'}PREFIX/tmp" || exit 60
-            apt-get update --allow-insecure-repositories 2>&1 || true
-            apt-get download --allow-unauthenticated \
-              python-pip git tar xz-utils make pkg-config clang rust libffi openssl libexpat 2>&1 || true
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update 2>&1 || true
+            apt-get install -y python3 python3-venv python3-pip git curl ca-certificates build-essential pkg-config libffi-dev libssl-dev 2>&1 || true
 
-            mkdir -p _hermes_stage
-            found=0
-            for deb in *.deb; do
-              [ -f "${'$'}deb" ] || continue
-              found=1
-              dpkg-deb -x "${'$'}deb" _hermes_stage/ 2>&1 || true
-            done
-            if [ "${'$'}found" = "1" ]; then
-              if [ -d "_hermes_stage${'$'}TERMUX_PREFIX" ]; then
-                cp -a _hermes_stage${'$'}TERMUX_PREFIX/* "${'$'}PREFIX/" 2>&1 || true
-              elif [ -d "_hermes_stage/usr" ]; then
-                cp -a _hermes_stage/usr/* "${'$'}PREFIX/" 2>&1 || true
-              fi
-            fi
-            rm -rf _hermes_stage *.deb 2>/dev/null || true
-            if [ -f "${'$'}PREFIX/bin/python3" ] && [ ! -f "${'$'}PREFIX/bin/python" ]; then
-              ln -sf python3 "${'$'}PREFIX/bin/python"
-            fi
-
-            if command -v python >/dev/null 2>&1; then
-              python -m ensurepip --upgrade 2>&1 || true
-              python -m pip --version >/dev/null 2>&1 || pip --version >/dev/null 2>&1 || exit 62
-            else
-              exit 61
-            fi
-            command -v git >/dev/null 2>&1 || exit 63
-            command -v tar >/dev/null 2>&1 || exit 64
-            echo "hermes-prereq-ready"
+            command -v python3 >/dev/null 2>&1 || exit 71
+            python3 -m venv --help >/dev/null 2>&1 || exit 72
+            command -v git >/dev/null 2>&1 || exit 73
+            command -v tar >/dev/null 2>&1 || exit 74
+            echo "hermes-ubuntu-prereq-ready"
             exit 0
             """.trimIndent(),
             onOutput = { onProgress(it) },
@@ -2648,27 +2635,22 @@ EOF
         return code == 0
     }
 
-    private fun runHermesEditableInstall(
+    private fun runHermesEditableInstallInUbuntu(
         home: File,
         installDir: File,
         onProgress: (String) -> Unit,
     ): Int {
-        return runInPrefix(
+        return runInUbuntu(
             """
             set -e
             export HERMES_HOME=${shellQuote(home.absolutePath)}
             INSTALL_DIR=${shellQuote(installDir.absolutePath)}
             cd "${'$'}INSTALL_DIR"
-            PYTHON_BIN="python"
-            python -m venv .venv 2>&1 || true
-            if [ -x ".venv/bin/python" ]; then
-              PYTHON_BIN=".venv/bin/python"
-            fi
-            "${'$'}PYTHON_BIN" -m ensurepip --upgrade 2>&1 || true
-            "${'$'}PYTHON_BIN" -m pip install -U pip setuptools wheel 2>&1 || true
-            "${'$'}PYTHON_BIN" -m pip install -e '.[termux]' -c constraints-termux.txt 2>&1 || \
-              "${'$'}PYTHON_BIN" -m pip install -e . -c constraints-termux.txt 2>&1 || \
-              "${'$'}PYTHON_BIN" -m pip install -e . 2>&1
+            python3 -m venv .venv
+            .venv/bin/python -m pip install -U pip setuptools wheel 2>&1
+            .venv/bin/python -m pip install -e '.[termux]' -c constraints-termux.txt 2>&1 || \
+              .venv/bin/python -m pip install -e . -c constraints-termux.txt 2>&1 || \
+              .venv/bin/python -m pip install -e . 2>&1
             """.trimIndent(),
             onOutput = { onProgress(it) },
         )
@@ -2688,10 +2670,12 @@ EOF
         if (!isHermesAgentInstalled()) return false
 
         val paths = BootstrapInstaller.getPaths(context)
-        val home = hermesHomeDir(paths)
-        val command = "HERMES_HOME=${shellQuote(home.absolutePath)} hermes gateway run --quiet --replace"
         return try {
-            val process = startPrefixProcess(command)
+            val process = startHermesExecProcess(
+                args = listOf("gateway", "run", "--quiet", "--replace"),
+                extraEnv = mapOf("HERMES_QUIET" to "1"),
+                hermesHomePath = hermesHomeDir(paths).absolutePath,
+            )
             hermesGatewayProcess = process
             startProcessLogThread(process, "HermesGateway")
             Thread.sleep(900)
@@ -2705,6 +2689,41 @@ EOF
             Log.e(TAG, "Failed to start Hermes gateway: ${error.message}")
             false
         }
+    }
+
+    fun startHermesExecProcess(
+        args: List<String>,
+        extraEnv: Map<String, String> = emptyMap(),
+        hermesHomePath: String? = null,
+    ): Process {
+        require(args.isNotEmpty()) { "args must not be empty" }
+        val paths = BootstrapInstaller.getPaths(context)
+        val homePath = hermesHomePath?.trim().takeUnless { it.isNullOrBlank() } ?: hermesHomeDir(paths).absolutePath
+        val command = buildHermesUbuntuCommand(paths, args, extraEnv, homePath)
+        return startUbuntuProcess(command)
+    }
+
+    private fun buildHermesUbuntuCommand(
+        paths: BootstrapInstaller.Paths,
+        args: List<String>,
+        extraEnv: Map<String, String>,
+        hermesHomePath: String = hermesHomeDir(paths).absolutePath,
+    ): String {
+        val installDir = hermesInstallDir(paths)
+        val exports = extraEnv.entries
+            .filter { (key, value) -> key.isNotBlank() && value.isNotBlank() && key.matches(Regex("^[A-Za-z_][A-Za-z0-9_]*$")) }
+            .joinToString("\n") { (key, value) -> "export $key=${shellQuote(value)}" }
+        val argString = args.joinToString(" ") { shellQuote(it) }
+        val envBlock = if (exports.isBlank()) "" else "$exports\n"
+        return """
+            set -e
+            export HERMES_HOME=${shellQuote(hermesHomePath)}
+            $envBlock
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            cd "${'$'}INSTALL_DIR"
+            [ -x ".venv/bin/hermes" ] || exit 127
+            exec .venv/bin/hermes $argString
+        """.trimIndent()
     }
 
     fun stopHermesGateway(): Boolean {
@@ -4472,16 +4491,18 @@ EOF
         return File(hermesHomeDir(paths), "hermes-agent")
     }
 
+    private fun hermesInstallMarkerFile(paths: BootstrapInstaller.Paths): File {
+        return File(hermesHomeDir(paths), "install-env.txt")
+    }
+
     private fun ensureHermesWrapperScript() {
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
-        val home = hermesHomeDir(paths)
+        val home = paths.homeDir
         val installDir = hermesInstallDir(paths)
-        val hermesHome = shellQuote(home.absolutePath)
-        val venvHermes = shellQuote("${installDir.absolutePath}/.venv/bin/hermes")
-        val localHermes = shellQuote("${paths.homeDir}/.local/bin/hermes")
-        val installHermes = shellQuote("${installDir.absolutePath}/hermes")
-        val prefixPython = shellQuote("${prefix}/bin/python")
+        val hermesHome = shellQuote(hermesHomeDir(paths).absolutePath)
+        val ubuntuBin = "$home/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh"
+        val installPath = shellQuote(installDir.absolutePath)
 
         val wrapperCmd = """
             set -e
@@ -4491,23 +4512,22 @@ EOF
             cat > "${'$'}TARGET" <<'EOF'
 #!/system/bin/sh
 export HERMES_HOME=$hermesHome
-if [ -x $venvHermes ]; then
-  exec $venvHermes "${'$'}@"
+UBUNTU_BIN="${'$'}{ANYCLAW_UBUNTU_BIN:-$ubuntuBin}"
+if [ ! -x "${'$'}UBUNTU_BIN" ]; then
+  echo "Hermes runtime bridge missing: ${'$'}UBUNTU_BIN" >&2
+  exit 127
 fi
-if [ -x $localHermes ]; then
-  exec $localHermes "${'$'}@"
+INSTALL_DIR=$installPath
+if [ ! -x "${'$'}INSTALL_DIR/.venv/bin/hermes" ]; then
+  echo "Hermes CLI executable not found. Run installHermesAgent first." >&2
+  exit 127
 fi
-if [ -x $installHermes ]; then
-  exec $installHermes "${'$'}@"
-fi
-if [ -x $prefixPython ]; then
-  exec $prefixPython -m hermes_cli.main "${'$'}@"
-fi
-if command -v python >/dev/null 2>&1; then
-  exec python -m hermes_cli.main "${'$'}@"
-fi
-echo "Hermes CLI executable not found. Run installHermesAgent first." >&2
-exit 127
+CMD="export HERMES_HOME=$hermesHome; cd $installPath; exec .venv/bin/hermes"
+for ARG in "${'$'}@"; do
+  ESCAPED="${'$'}(printf "%s" "${'$'}ARG" | sed "s/'/'\"'\"'/g")"
+  CMD="${'$'}CMD '${'$'}ESCAPED'"
+done
+exec "${'$'}UBUNTU_BIN" --command "${'$'}CMD"
 EOF
             chmod 700 "${'$'}TARGET"
         """.trimIndent()
