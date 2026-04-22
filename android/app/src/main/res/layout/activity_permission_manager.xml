@@ -203,6 +203,49 @@
             android:text="@string/claude_install_button_text"
             android:textAllCaps="false" />
 
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="20dp"
+            android:background="#1E293B" />
+
+        <TextView
+            android:id="@+id/tvHermesInstallTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/hermes_install_title"
+            android:textColor="#E2E8F0"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvHermesInstallSubtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/hermes_install_subtitle"
+            android:textColor="#94A3B8"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/tvHermesInstallStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/codex_auth_status_checking"
+            android:textColor="#CBD5E1"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btnHermesInstall"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:minHeight="48dp"
+            android:text="@string/hermes_install_button_text"
+            android:textAllCaps="false" />
+
         <TextView
             android:id="@+id/tvRevokeHint"
             android:layout_width="match_parent"

@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
         const val OPEN_TARGET_CODEX_THREAD = "codex_thread"
         const val OPEN_TARGET_OPENCLAW_SESSION = "openclaw_session"
         const val OPEN_TARGET_CLAUDE_SESSION = "claude_session"
+        const val OPEN_TARGET_HERMES_SESSION = "hermes_session"
     }
 
     private lateinit var webView: WebView
@@ -62,6 +63,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabOpenClawButton: Button
     private lateinit var tabCodexButton: Button
     private lateinit var tabClaudeButton: Button
+    private lateinit var tabHermesButton: Button
     private lateinit var serverManager: CodexServerManager
     private var setupStarted = false
     private var waitingForStorageGrant = false
@@ -154,6 +156,7 @@ class MainActivity : AppCompatActivity() {
         tabOpenClawButton = findViewById(R.id.btnTabOpenClaw)
         tabCodexButton = findViewById(R.id.btnTabCodex)
         tabClaudeButton = findViewById(R.id.btnTabClaude)
+        tabHermesButton = findViewById(R.id.btnTabHermes)
 
         serverManager = CodexServerManager(this)
 
@@ -197,6 +200,13 @@ class MainActivity : AppCompatActivity() {
             startActivity(
                 Intent(this, CliAgentChatActivity::class.java).apply {
                     putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
+                },
+            )
+        }
+        tabHermesButton.setOnClickListener {
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.HERMES_AGENT.value)
                 },
             )
         }
@@ -906,6 +916,16 @@ class MainActivity : AppCompatActivity() {
                     },
                 )
             }
+            OPEN_TARGET_HERMES_SESSION -> {
+                startActivity(
+                    Intent(this, CliAgentChatActivity::class.java).apply {
+                        putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.HERMES_AGENT.value)
+                        if (sessionId.isNotEmpty()) {
+                            putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, sessionId)
+                        }
+                    },
+                )
+            }
             else -> return false
         }
         finish()
@@ -968,6 +988,10 @@ class MainActivity : AppCompatActivity() {
                 buildOpenClawChatPageUrl(sessionKey)
             }
             OPEN_TARGET_CLAUDE_SESSION -> {
+                val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
+                buildClaudeChatPageUrl(sessionKey)
+            }
+            OPEN_TARGET_HERMES_SESSION -> {
                 val sessionKey = intent?.getStringExtra(EXTRA_SESSION_KEY)?.trim().orEmpty()
                 buildClaudeChatPageUrl(sessionKey)
             }

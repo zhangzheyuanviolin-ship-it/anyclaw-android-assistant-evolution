@@ -55,6 +55,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         private const val MENU_ACTION_SPEAK = 5
         private val CLAUDE_SESSION_ID_REGEX = Regex("""claude-code-[A-Za-z0-9._-]+""")
         private val UUID_SESSION_ID_REGEX = Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
+        private val HERMES_SESSION_ID_LINE_REGEX = Regex("""^session_id:\s*(.+)$""", RegexOption.IGNORE_CASE)
     }
 
     private lateinit var tvTitle: TextView
@@ -73,6 +74,7 @@ class CliAgentChatActivity : AppCompatActivity() {
     private lateinit var btnOpenClaw: Button
     private lateinit var btnCodex: Button
     private lateinit var btnClaude: Button
+    private lateinit var btnHermes: Button
 
     private lateinit var serverManager: CodexServerManager
     private lateinit var agentId: ExternalAgentId
@@ -114,6 +116,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         val allowSharedStorage: Boolean,
         val dangerousAutoApprove: Boolean,
         val claudeNativeSession: Boolean,
+        val hermesGatewayEnabled: Boolean,
     )
 
     private data class ProbeResult(
@@ -195,6 +198,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         btnOpenClaw = findViewById(R.id.btnCliTabOpenClaw)
         btnCodex = findViewById(R.id.btnCliTabCodex)
         btnClaude = findViewById(R.id.btnCliTabClaude)
+        btnHermes = findViewById(R.id.btnCliTabHermes)
 
         listView.adapter = messageAdapter
         tvTitle.text = AgentSessionStore.displayAgentName(agentId)
@@ -249,6 +253,10 @@ class CliAgentChatActivity : AppCompatActivity() {
             if (agentId == ExternalAgentId.CLAUDE_CODE) return@setOnClickListener
             restartWithAgent(ExternalAgentId.CLAUDE_CODE, null)
         }
+        btnHermes.setOnClickListener {
+            if (agentId == ExternalAgentId.HERMES_AGENT) return@setOnClickListener
+            restartWithAgent(ExternalAgentId.HERMES_AGENT, null)
+        }
     }
 
     override fun onResume() {
@@ -283,7 +291,10 @@ class CliAgentChatActivity : AppCompatActivity() {
         } else {
             val shared = if (runtimeOptions.allowSharedStorage) "开" else "关"
             val danger = if (runtimeOptions.dangerousAutoApprove) "开" else "关"
-            val mode = if (runtimeOptions.claudeNativeSession) "原生会话" else "兼容会话"
+            val mode = when (agentId) {
+                ExternalAgentId.CLAUDE_CODE -> if (runtimeOptions.claudeNativeSession) "原生会话" else "兼容会话"
+                ExternalAgentId.HERMES_AGENT -> if (runtimeOptions.hermesGatewayEnabled) "网关协同" else "直连会话"
+            }
             val nativeTag = buildNativeStatusTag()
             "就绪 · 共享存储:$shared · 高权限:$danger · 会话模式:$mode · native:$nativeTag · 链路:$lastExecutionRoute"
         }
@@ -350,9 +361,13 @@ class CliAgentChatActivity : AppCompatActivity() {
 
     private fun renderBottomTabState() {
         btnClaude.isEnabled = agentId != ExternalAgentId.CLAUDE_CODE
+        btnHermes.isEnabled = agentId != ExternalAgentId.HERMES_AGENT
     }
 
     private fun buildNativeStatusTag(): String {
+        if (agentId == ExternalAgentId.HERMES_AGENT) {
+            return if (runtimeOptions.hermesGatewayEnabled) "网关已启用" else "网关关闭"
+        }
         if (agentId != ExternalAgentId.CLAUDE_CODE) return "n/a"
         if (!runtimeOptions.claudeNativeSession) return "关闭"
         val nativeId = activeSession.nativeSessionId.trim()
@@ -368,6 +383,8 @@ class CliAgentChatActivity : AppCompatActivity() {
     private fun refreshIdleRouteLabel() {
         if (sending) return
         lastExecutionRoute = when {
+            agentId == ExternalAgentId.HERMES_AGENT && runtimeOptions.hermesGatewayEnabled -> "Hermes网关协同"
+            agentId == ExternalAgentId.HERMES_AGENT -> "Hermes直连"
             agentId != ExternalAgentId.CLAUDE_CODE -> "兼容链路"
             runtimeOptions.claudeNativeSession && activeSession.nativeSessionId.isNotBlank() -> "原生链路"
             runtimeOptions.claudeNativeSession -> "原生链路(自动绑定)"
@@ -376,7 +393,12 @@ class CliAgentChatActivity : AppCompatActivity() {
     }
 
     private fun markRouteOnStart(useNativeSession: Boolean) {
-        lastExecutionRoute = if (useNativeSession) "原生链路(执行中)" else "兼容链路(执行中)"
+        lastExecutionRoute = when {
+            agentId == ExternalAgentId.HERMES_AGENT && runtimeOptions.hermesGatewayEnabled -> "Hermes网关协同(执行中)"
+            agentId == ExternalAgentId.HERMES_AGENT -> "Hermes直连(执行中)"
+            useNativeSession -> "原生链路(执行中)"
+            else -> "兼容链路(执行中)"
+        }
         clearLiveProcessLines()
     }
 
@@ -974,6 +996,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         val switchDanger = view.findViewById<SwitchCompat>(R.id.switchCliSettingDangerousMode)
         val switchProcess = view.findViewById<SwitchCompat>(R.id.switchCliSettingShowProcess)
         val switchNative = view.findViewById<SwitchCompat>(R.id.switchCliSettingClaudeNativeSession)
+        val switchHermesGateway = view.findViewById<SwitchCompat>(R.id.switchCliSettingHermesGateway)
         val btnPermission = view.findViewById<Button>(R.id.btnCliSettingPermissionCenter)
         val btnPrompt = view.findViewById<Button>(R.id.btnCliSettingPromptManager)
         val btnConversation = view.findViewById<Button>(R.id.btnCliSettingConversationManager)
@@ -985,7 +1008,11 @@ class CliAgentChatActivity : AppCompatActivity() {
         switchDanger.isChecked = runtimeOptions.dangerousAutoApprove
         switchProcess.isChecked = showProcess
         switchNative.isChecked = runtimeOptions.claudeNativeSession
+        switchHermesGateway.isChecked = runtimeOptions.hermesGatewayEnabled
         switchNative.isEnabled = agentId == ExternalAgentId.CLAUDE_CODE
+        switchNative.visibility = if (agentId == ExternalAgentId.CLAUDE_CODE) View.VISIBLE else View.GONE
+        switchHermesGateway.isEnabled = agentId == ExternalAgentId.HERMES_AGENT
+        switchHermesGateway.visibility = if (agentId == ExternalAgentId.HERMES_AGENT) View.VISIBLE else View.GONE
 
         switchAllow.setOnCheckedChangeListener { _, checked ->
             runtimeOptions = runtimeOptions.copy(allowSharedStorage = checked)
@@ -1014,6 +1041,12 @@ class CliAgentChatActivity : AppCompatActivity() {
             if (checked) {
                 ensureNativeSessionBoundIfNeeded(trigger = "switch_on", force = true)
             }
+        }
+        switchHermesGateway.setOnCheckedChangeListener { _, checked ->
+            runtimeOptions = runtimeOptions.copy(hermesGatewayEnabled = checked)
+            saveRuntimeOptions(runtimeOptions)
+            refreshIdleRouteLabel()
+            renderSession()
         }
 
         val visible = filteredMessagesForDisplay()
@@ -1138,6 +1171,12 @@ class CliAgentChatActivity : AppCompatActivity() {
                         resumeSessionId = if (useNativeSession) nativeSessionId else "",
                         sendPromptViaStdin = !useNativeSession || bootstrapFromHistory,
                     )
+                    ExternalAgentId.HERMES_AGENT -> runHermesChat(
+                        config = modelConfig,
+                        prompt = prompt,
+                        options = runtimeOptions,
+                        resumeSessionId = activeSession.nativeSessionId.trim(),
+                    )
                 }
                 if (firstResult.nativeSessionId.isNotBlank()) {
                     capturedNativeSessionId = firstResult.nativeSessionId
@@ -1152,6 +1191,12 @@ class CliAgentChatActivity : AppCompatActivity() {
                             prompt = retryPrompt,
                             options = runtimeOptions,
                             sendPromptViaStdin = true,
+                        )
+                        ExternalAgentId.HERMES_AGENT -> runHermesChat(
+                            config = modelConfig,
+                            prompt = retryPrompt,
+                            options = runtimeOptions,
+                            resumeSessionId = activeSession.nativeSessionId.trim(),
                         )
                     }
                     if (firstResult.nativeSessionId.isNotBlank()) {
@@ -1178,6 +1223,12 @@ class CliAgentChatActivity : AppCompatActivity() {
                             options = runtimeOptions,
                             sendPromptViaStdin = true,
                         )
+                        ExternalAgentId.HERMES_AGENT -> runHermesChat(
+                            config = modelConfig,
+                            prompt = retryPrompt,
+                            options = runtimeOptions,
+                            resumeSessionId = activeSession.nativeSessionId.trim(),
+                        )
                     }
                 } else if (agentId == ExternalAgentId.CLAUDE_CODE && useNativeSession) {
                     appendClaudeProcessLine(liveProcessLines, "原生链路异常，自动回退兼容链路重试")
@@ -1189,6 +1240,12 @@ class CliAgentChatActivity : AppCompatActivity() {
                             prompt = retryPrompt,
                             options = runtimeOptions,
                             sendPromptViaStdin = true,
+                        )
+                        ExternalAgentId.HERMES_AGENT -> runHermesChat(
+                            config = modelConfig,
+                            prompt = retryPrompt,
+                            options = runtimeOptions,
+                            resumeSessionId = activeSession.nativeSessionId.trim(),
                         )
                     }
                 } else {
@@ -1214,6 +1271,14 @@ class CliAgentChatActivity : AppCompatActivity() {
                     nativeSessionId = nativeSessionToPersist,
                     nativeSessionMode = CLAUDE_NATIVE_SESSION_MODE,
                 ) ?: nextSession
+            } else if (agentId == ExternalAgentId.HERMES_AGENT && nativeSessionToPersist.isNotBlank()) {
+                nextSession = AgentSessionStore.updateNativeSession(
+                    context = this,
+                    agentId = agentId,
+                    sessionId = nextSession.sessionId,
+                    nativeSessionId = nativeSessionToPersist,
+                    nativeSessionMode = "hermes_quiet_v1",
+                ) ?: nextSession
             }
             if (result.processText.isNotBlank()) {
                 nextSession = AgentSessionStore.appendMessage(
@@ -1238,6 +1303,8 @@ class CliAgentChatActivity : AppCompatActivity() {
                 activeProcess = null
                 clearLiveProcessLines()
                 lastExecutionRoute = when {
+                    agentId == ExternalAgentId.HERMES_AGENT && runtimeOptions.hermesGatewayEnabled -> "Hermes网关协同"
+                    agentId == ExternalAgentId.HERMES_AGENT -> "Hermes直连"
                     useNativeSession && usedCompatibilityFallback -> "原生失败→兼容回退"
                     useNativeSession -> "原生链路"
                     else -> "兼容链路"
@@ -1254,7 +1321,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         val recent = messages.takeLast(historyWindowSize.coerceIn(20, 120))
         val out = StringBuilder()
         out.appendLine("你正在继续已有会话。请结合上下文回答，并在需要时执行可用工具。")
-        if (agentId == ExternalAgentId.CLAUDE_CODE) {
+        if (agentId == ExternalAgentId.CLAUDE_CODE || agentId == ExternalAgentId.HERMES_AGENT) {
             out.appendLine("高优先级运行规范（必须遵守）：")
             out.appendLine("1) 先阅读“自动注入预检结果”，再决定用哪条执行链路。")
             out.appendLine("2) Android 系统级命令必须使用 system-shell <command>。")
@@ -1262,12 +1329,15 @@ class CliAgentChatActivity : AppCompatActivity() {
             out.appendLine("4) 先做必要验证再给结论，且不要复述整段预检文本。")
             out.appendLine("5) 若某链路失败，需明确失败原因并自动切换可用链路继续。")
             appendToolRoutingRules(out)
+            if (agentId == ExternalAgentId.HERMES_AGENT) {
+                out.appendLine("18) 当前为 Hermes Agent CLI 链路，必要时可使用 --resume 会话续接。")
+            }
             out.appendLine()
             out.appendLine("自动注入预检结果：")
             out.appendLine(buildRuntimeProbeBlock(options))
             out.appendLine()
             out.appendLine("AnyClaw MCP注入状态：")
-            out.appendLine(buildClaudeMcpProbeBlock(options))
+            out.appendLine(buildAnyClawMcpProbeBlock(options))
             out.appendLine()
         }
         out.appendLine("会话上下文如下：")
@@ -1299,7 +1369,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         out.appendLine(buildRuntimeProbeBlock(options))
         out.appendLine()
         out.appendLine("AnyClaw MCP注入状态：")
-        out.appendLine(buildClaudeMcpProbeBlock(options))
+        out.appendLine(buildAnyClawMcpProbeBlock(options))
         out.appendLine()
         out.appendLine("当前用户请求：")
         out.appendLine(userText)
@@ -1384,6 +1454,153 @@ class CliAgentChatActivity : AppCompatActivity() {
             runCatching { process.outputStream.close() }
         }
         return runClaudeStreamJson(process)
+    }
+
+    private fun runHermesChat(
+        config: AgentModelConfig,
+        prompt: String,
+        options: AgentRuntimeOptions,
+        resumeSessionId: String = "",
+    ): AgentRunResult {
+        if (!serverManager.isHermesAgentInstalled()) {
+            val installed = serverManager.installHermesAgent { line ->
+                appendClaudeProcessLine(liveProcessLines, "Hermes安装: ${clipProcessText(line)}")
+            }
+            if (!installed || !serverManager.isHermesAgentInstalled()) {
+                throw IllegalStateException("Hermes Agent 未安装，且自动安装失败")
+            }
+        }
+
+        val hermesHomePath = ensureHermesRuntimeConfig(config, options).absolutePath
+        if (options.hermesGatewayEnabled) {
+            val started = runCatching { serverManager.startHermesGateway() }.getOrElse { false }
+            appendClaudeProcessLine(
+                liveProcessLines,
+                if (started) "Hermes 网关：已启动" else "Hermes 网关：启动失败，回退直连",
+            )
+        } else {
+            runCatching { serverManager.stopHermesGateway() }
+        }
+
+        val args = mutableListOf(
+            "hermes",
+            "chat",
+            "-Q",
+            "-q",
+            prompt,
+            "--source",
+            "pocketlobster",
+        )
+        if (resumeSessionId.isNotBlank()) {
+            args += listOf("--resume", resumeSessionId.trim())
+        }
+
+        val process = serverManager.startPrefixExecProcess(
+            args = args,
+            extraEnv = mapOf(
+                "HERMES_HOME" to hermesHomePath,
+                "HERMES_QUIET" to "1",
+            ),
+        )
+        return runHermesQuietOutput(process)
+    }
+
+    private fun runHermesQuietOutput(process: Process): AgentRunResult {
+        activeProcess = process
+        val assistantLines = mutableListOf<String>()
+        val processLines = mutableListOf<String>()
+        var sessionId = ""
+
+        BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
+            var line = reader.readLine()
+            while (line != null) {
+                val cleaned = stripAnsi(line).trim()
+                if (shouldIgnoreProcessLine(cleaned)) {
+                    line = reader.readLine()
+                    continue
+                }
+                if (cleaned.isNotBlank()) {
+                    val sessionMatch = HERMES_SESSION_ID_LINE_REGEX.find(cleaned)
+                    if (sessionMatch != null) {
+                        val parsed = sessionMatch.groupValues.getOrNull(1).orEmpty().trim()
+                        if (parsed.isNotBlank()) {
+                            sessionId = parsed
+                        }
+                    } else if (cleaned.startsWith("Hermes 网关：")) {
+                        processLines += cleaned
+                    } else {
+                        assistantLines += cleaned
+                    }
+                }
+                line = reader.readLine()
+            }
+        }
+        val exitCode = process.waitFor()
+        activeProcess = null
+
+        if (abortRequested) {
+            return AgentRunResult(
+                assistantText = getString(R.string.cli_task_aborted),
+                processText = processLines.joinToString("\n").trim(),
+                nativeSessionId = sessionId,
+            )
+        }
+        val assistantText = assistantLines.joinToString("\n").trim()
+        if (exitCode != 0) {
+            val raw = (assistantText.ifBlank { processLines.joinToString("\n").trim() })
+            throw IllegalStateException(raw.ifBlank { "command exit code=$exitCode" })
+        }
+        return AgentRunResult(
+            assistantText = assistantText.ifBlank { "Hermes 未返回可解析内容" },
+            processText = processLines.joinToString("\n").trim(),
+            nativeSessionId = sessionId,
+        )
+    }
+
+    private fun ensureHermesRuntimeConfig(config: AgentModelConfig, options: AgentRuntimeOptions): File {
+        val paths = BootstrapInstaller.getPaths(this)
+        val hermesHome = File(paths.homeDir, ".pocketlobster/hermes")
+        if (!hermesHome.exists()) {
+            hermesHome.mkdirs()
+        }
+        val configFile = File(hermesHome, "config.yaml")
+        val mcpConfig = ensureClaudeAnyClawMcpConfig(options)
+        val serverFile = File(mcpConfig.parentFile, "anyclaw-toolbox-server.cjs")
+
+        val yaml = buildString {
+            appendLine("model:")
+            appendLine("  default: ${yamlQuote(config.modelId)}")
+            appendLine("  provider: custom")
+            appendLine("  base_url: ${yamlQuote(config.baseUrl)}")
+            appendLine("  api_key: ${yamlQuote(config.apiKey)}")
+            appendLine("display:")
+            appendLine("  tool_progress: all")
+            appendLine("terminal:")
+            appendLine("  backend: local")
+            appendLine("  cwd: ${yamlQuote("${paths.homeDir}/.openclaw/workspace")}")
+            appendLine("mcp_servers:")
+            appendLine("  anyclaw_toolbox:")
+            appendLine("    command: ${yamlQuote("${paths.prefixDir}/bin/node")}")
+            appendLine("    args:")
+            appendLine("      - ${yamlQuote(serverFile.absolutePath)}")
+            appendLine("    env:")
+            appendLine("      HOME: ${yamlQuote(paths.homeDir)}")
+            appendLine("      PREFIX: ${yamlQuote(paths.prefixDir)}")
+            appendLine("      PATH: ${yamlQuote("${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin")}")
+            appendLine("      ANYCLAW_WEB_BRIDGE_URL: ${yamlQuote("http://127.0.0.1:${ShizukuShellBridgeServer.BRIDGE_PORT}/web/call")}")
+            appendLine("      ANYCLAW_UBUNTU_BIN: ${yamlQuote("${paths.homeDir}/.openclaw-android/linux-runtime/bin/ubuntu-shell.sh")}")
+            appendLine("      ANYCLAW_WORKSPACE_ROOT: ${yamlQuote("${paths.homeDir}/.openclaw/workspace")}")
+            appendLine("      ANYCLAW_ALLOW_SHARED_STORAGE: ${yamlQuote(if (options.allowSharedStorage) "1" else "0")}")
+            appendLine("      ANYCLAW_MCP_CONFIG_PATH: ${yamlQuote(mcpConfig.absolutePath)}")
+        }.trim() + "\n"
+
+        writeTextIfChanged(configFile, yaml)
+        return hermesHome
+    }
+
+    private fun yamlQuote(value: String): String {
+        val escaped = value.replace("'", "''")
+        return "'$escaped'"
     }
 
     private fun buildClaudeSystemPromptFile(): String? {
@@ -1962,7 +2179,7 @@ class CliAgentChatActivity : AppCompatActivity() {
         }.trim()
     }
 
-    private fun buildClaudeMcpProbeBlock(options: AgentRuntimeOptions): String {
+    private fun buildAnyClawMcpProbeBlock(options: AgentRuntimeOptions): String {
         val configFile = ensureClaudeAnyClawMcpConfig(options)
         val serverFile = File(configFile.parentFile, "anyclaw-toolbox-server.cjs")
         val toolNames = if (serverFile.exists()) {
@@ -2075,7 +2292,8 @@ class CliAgentChatActivity : AppCompatActivity() {
         return AgentRuntimeOptions(
             allowSharedStorage = prefs.getBoolean(runtimeOptionKey("allow_shared_storage"), true),
             dangerousAutoApprove = prefs.getBoolean(runtimeOptionKey("dangerous_mode"), false),
-            claudeNativeSession = prefs.getBoolean(runtimeOptionKey("claude_native_session"), true),
+            claudeNativeSession = prefs.getBoolean(runtimeOptionKey("claude_native_session"), agentId == ExternalAgentId.CLAUDE_CODE),
+            hermesGatewayEnabled = prefs.getBoolean(runtimeOptionKey("hermes_gateway_enabled"), false),
         )
     }
 
@@ -2085,6 +2303,7 @@ class CliAgentChatActivity : AppCompatActivity() {
             .putBoolean(runtimeOptionKey("allow_shared_storage"), options.allowSharedStorage)
             .putBoolean(runtimeOptionKey("dangerous_mode"), options.dangerousAutoApprove)
             .putBoolean(runtimeOptionKey("claude_native_session"), options.claudeNativeSession)
+            .putBoolean(runtimeOptionKey("hermes_gateway_enabled"), options.hermesGatewayEnabled)
             .apply()
     }
 

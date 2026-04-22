@@ -62,6 +62,7 @@ class OpenClawChatActivity : AppCompatActivity() {
     private lateinit var btnTabOpenClaw: Button
     private lateinit var btnTabCodex: Button
     private lateinit var btnTabClaude: Button
+    private lateinit var btnTabHermes: Button
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private val adapter = MessageAdapter()
@@ -112,6 +113,7 @@ class OpenClawChatActivity : AppCompatActivity() {
         btnTabOpenClaw = findViewById(R.id.btnOpenClawTabOpenClaw)
         btnTabCodex = findViewById(R.id.btnOpenClawTabCodex)
         btnTabClaude = findViewById(R.id.btnOpenClawTabClaude)
+        btnTabHermes = findViewById(R.id.btnOpenClawTabHermes)
 
         listView.adapter = adapter
 
@@ -136,6 +138,14 @@ class OpenClawChatActivity : AppCompatActivity() {
             startActivity(
                 Intent(this, CliAgentChatActivity::class.java).apply {
                     putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.CLAUDE_CODE.value)
+                },
+            )
+            finish()
+        }
+        btnTabHermes.setOnClickListener {
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.HERMES_AGENT.value)
                 },
             )
             finish()

@@ -15,6 +15,7 @@ class PermissionManagerActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var tvCodexAuthStatus: TextView
     private lateinit var tvClaudeInstallStatus: TextView
+    private lateinit var tvHermesInstallStatus: TextView
     private lateinit var switchBridge: Switch
     private lateinit var btnRequest: Button
     private lateinit var btnOpenShizuku: Button
@@ -22,12 +23,15 @@ class PermissionManagerActivity : AppCompatActivity() {
     private lateinit var btnCodexAuthBrowser: Button
     private lateinit var btnCodexInstall: Button
     private lateinit var btnClaudeInstall: Button
+    private lateinit var btnHermesInstall: Button
     @Volatile
     private var codexLoginRunning = false
     @Volatile
     private var codexInstallRunning = false
     @Volatile
     private var claudeInstallRunning = false
+    @Volatile
+    private var hermesInstallRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,6 +42,7 @@ class PermissionManagerActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvShizukuStatus)
         tvCodexAuthStatus = findViewById(R.id.tvCodexAuthStatus)
         tvClaudeInstallStatus = findViewById(R.id.tvClaudeInstallStatus)
+        tvHermesInstallStatus = findViewById(R.id.tvHermesInstallStatus)
         switchBridge = findViewById(R.id.switchShizukuBridge)
         btnRequest = findViewById(R.id.btnRequestShizukuPermission)
         btnOpenShizuku = findViewById(R.id.btnOpenShizukuApp)
@@ -45,6 +50,7 @@ class PermissionManagerActivity : AppCompatActivity() {
         btnCodexAuthBrowser = findViewById(R.id.btnCodexAuthBrowser)
         btnCodexInstall = findViewById(R.id.btnCodexInstall)
         btnClaudeInstall = findViewById(R.id.btnClaudeInstall)
+        btnHermesInstall = findViewById(R.id.btnHermesInstall)
 
         switchBridge.isChecked = ShizukuController.isBridgeEnabled(this)
         switchBridge.setOnCheckedChangeListener { _, isChecked ->
@@ -87,6 +93,7 @@ class PermissionManagerActivity : AppCompatActivity() {
         btnCodexAuthBrowser.setOnClickListener { startCodexBrowserAuth() }
         btnCodexInstall.setOnClickListener { startCodexInstallRepair() }
         btnClaudeInstall.setOnClickListener { startClaudeInstallRepair() }
+        btnHermesInstall.setOnClickListener { startHermesInstallRepair() }
     }
 
     override fun onResume() {
@@ -271,6 +278,10 @@ class PermissionManagerActivity : AppCompatActivity() {
             R.string.optional_agent_status_template,
             getString(R.string.codex_auth_status_checking),
         )
+        tvHermesInstallStatus.text = getString(
+            R.string.optional_agent_status_template,
+            getString(R.string.codex_auth_status_checking),
+        )
         Thread {
             val claudeInstalled = runCatching { serverManager.isClaudeCodeInstalled() }.getOrElse { false }
             val claudeVersion = if (claudeInstalled) {
@@ -278,8 +289,14 @@ class PermissionManagerActivity : AppCompatActivity() {
             } else {
                 ""
             }
+            val hermesInstalled = runCatching { serverManager.isHermesAgentInstalled() }.getOrElse { false }
+            val hermesVersion = if (hermesInstalled) {
+                runCatching { serverManager.getInstalledHermesAgentVersion() }.getOrElse { "" }
+            } else {
+                ""
+            }
             runOnUiThread {
-                val statusText = if (claudeInstalled) {
+                val claudeStatusText = if (claudeInstalled) {
                     if (claudeVersion.isBlank()) {
                         getString(R.string.optional_agent_installed)
                     } else {
@@ -290,9 +307,24 @@ class PermissionManagerActivity : AppCompatActivity() {
                 }
                 tvClaudeInstallStatus.text = getString(
                     R.string.optional_agent_status_template,
-                    statusText,
+                    claudeStatusText,
                 )
                 btnClaudeInstall.isEnabled = !claudeInstallRunning
+
+                val hermesStatusText = if (hermesInstalled) {
+                    if (hermesVersion.isBlank()) {
+                        getString(R.string.optional_agent_installed)
+                    } else {
+                        "${getString(R.string.optional_agent_installed)} · CLI $hermesVersion"
+                    }
+                } else {
+                    getString(R.string.optional_agent_not_installed)
+                }
+                tvHermesInstallStatus.text = getString(
+                    R.string.optional_agent_status_template,
+                    hermesStatusText,
+                )
+                btnHermesInstall.isEnabled = !hermesInstallRunning
             }
         }.start()
     }
@@ -311,6 +343,27 @@ class PermissionManagerActivity : AppCompatActivity() {
                     getString(R.string.claude_install_success)
                 } else {
                     getString(R.string.claude_install_failed)
+                }
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                refreshOptionalAgentInstallStatus()
+            }
+        }.start()
+    }
+
+    private fun startHermesInstallRepair() {
+        if (hermesInstallRunning) return
+        hermesInstallRunning = true
+        btnHermesInstall.isEnabled = false
+        Toast.makeText(this, getString(R.string.hermes_install_starting), Toast.LENGTH_SHORT).show()
+
+        Thread {
+            val installed = serverManager.installHermesAgent { }
+            runOnUiThread {
+                hermesInstallRunning = false
+                val message = if (installed) {
+                    getString(R.string.hermes_install_success)
+                } else {
+                    getString(R.string.hermes_install_failed)
                 }
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 refreshOptionalAgentInstallStatus()

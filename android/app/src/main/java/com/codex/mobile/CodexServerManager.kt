@@ -28,6 +28,7 @@ class CodexServerManager(private val context: Context) {
         private const val PROXY_PORT = 18924
         private const val CODEX_VERSION = "0.121.0"
         private const val CLAUDE_CODE_VERSION = "2.1.112"
+        private const val HERMES_INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
@@ -50,6 +51,7 @@ class CodexServerManager(private val context: Context) {
     private var proxyProcess: Process? = null
     private var openClawGatewayProcess: Process? = null
     private var openClawControlUiProcess: Process? = null
+    private var hermesGatewayProcess: Process? = null
 
     /**
      * Use Android system shell for process bootstrap.
@@ -250,6 +252,25 @@ class CodexServerManager(private val context: Context) {
         return runCatching {
             JSONObject(pkg.readText()).optString("version", "").trim()
         }.getOrDefault("")
+    }
+
+    fun isHermesAgentInstalled(): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val wrapper = File(paths.prefixDir, "bin/hermes")
+        if (!wrapper.exists()) return false
+        val home = hermesHomeDir(paths)
+        val command = "HERMES_HOME='${home.absolutePath}' hermes --version >/dev/null 2>&1 && echo yes || echo no"
+        return runCapture(command) == "yes"
+    }
+
+    fun getInstalledHermesAgentVersion(): String {
+        val paths = BootstrapInstaller.getPaths(context)
+        val home = hermesHomeDir(paths)
+        return runCapture("HERMES_HOME='${home.absolutePath}' hermes --version 2>/dev/null | head -n 1")
+            .lineSequence()
+            .firstOrNull()
+            .orEmpty()
+            .trim()
     }
 
     fun isServerBundleInstalled(): Boolean = false
@@ -2432,6 +2453,153 @@ EOF
         return isClaudeCodeInstalled()
     }
 
+    fun installHermesAgent(onProgress: (String) -> Unit): Boolean {
+        val paths = BootstrapInstaller.getPaths(context)
+        val home = hermesHomeDir(paths)
+        val installDir = hermesInstallDir(paths)
+        val tmpDir = File(paths.tmpDir)
+        home.mkdirs()
+        installDir.parentFile?.mkdirs()
+        tmpDir.mkdirs()
+
+        val hasBundledSource = runCatching {
+            (context.assets.list("hermes-agent-bundle") ?: emptyArray())
+                .any { it == "hermes-agent-src.tar.gz" }
+        }.getOrElse { false }
+
+        if (hasBundledSource) {
+            onProgress("Installing Hermes Agent from bundled source…")
+            val bundle = File(tmpDir, "hermes-agent-src.tar.gz")
+            if (!writeAssetIfChanged("hermes-agent-bundle/hermes-agent-src.tar.gz", bundle)) {
+                onProgress("Bundled Hermes source not readable, fallback to online install")
+            } else {
+                val code = runInPrefix(
+                    """
+                    set -e
+                    HERMES_HOME=${shellQuote(home.absolutePath)}
+                    INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+                    TMP_ROOT=${shellQuote(File(tmpDir, "hermes-src-stage").absolutePath)}
+                    rm -rf "${'$'}TMP_ROOT" "${'$'}INSTALL_DIR"
+                    mkdir -p "${'$'}TMP_ROOT" "${'$'}HERMES_HOME" "${'$'}INSTALL_DIR"
+                    tar -xzf ${shellQuote(bundle.absolutePath)} -C "${'$'}TMP_ROOT"
+                    SRC_DIR="${'$'}(find "${'$'}TMP_ROOT" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+                    [ -n "${'$'}SRC_DIR" ] || exit 21
+                    cp -a "${'$'}SRC_DIR"/. "${'$'}INSTALL_DIR"/
+                    cd "${'$'}INSTALL_DIR"
+                    python -m venv .venv 2>&1 || true
+                    .venv/bin/python -m pip install -U pip setuptools wheel 2>&1 || true
+                    .venv/bin/python -m pip install -e '.[termux]' -c constraints-termux.txt 2>&1 || \
+                        .venv/bin/python -m pip install -e . 2>&1
+                    rm -rf "${'$'}TMP_ROOT"
+                    """.trimIndent(),
+                    onOutput = { onProgress(it) },
+                )
+                if (code == 0) {
+                    ensureHermesWrapperScript()
+                    if (isHermesAgentInstalled()) {
+                        return true
+                    }
+                } else {
+                    onProgress("Bundled install failed (code=$code), fallback to online install")
+                }
+            }
+        }
+
+        onProgress("Installing Hermes Agent via official installer…")
+        val onlineCode = runInPrefix(
+            """
+            set -e
+            export HERMES_HOME=${shellQuote(home.absolutePath)}
+            export HERMES_INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            mkdir -p "${'$'}HERMES_HOME"
+            if command -v curl >/dev/null 2>&1; then
+              curl -fsSL ${shellQuote(HERMES_INSTALLER_URL)} | bash -s -- \
+                --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
+            elif command -v wget >/dev/null 2>&1; then
+              wget -qO- ${shellQuote(HERMES_INSTALLER_URL)} | bash -s -- \
+                --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
+            else
+              exit 42
+            fi
+            """.trimIndent(),
+            onOutput = { onProgress(it) },
+        )
+        if (onlineCode != 0) {
+            onProgress("Official installer failed (code=$onlineCode), fallback to source clone")
+            val cloneCode = runInPrefix(
+                """
+                set -e
+                HERMES_HOME=${shellQuote(home.absolutePath)}
+                INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+                rm -rf "${'$'}INSTALL_DIR"
+                git clone --depth=1 https://github.com/NousResearch/hermes-agent.git "${'$'}INSTALL_DIR" 2>&1
+                cd "${'$'}INSTALL_DIR"
+                python -m venv .venv 2>&1 || true
+                .venv/bin/python -m pip install -U pip setuptools wheel 2>&1 || true
+                .venv/bin/python -m pip install -e '.[termux]' -c constraints-termux.txt 2>&1 || \
+                    .venv/bin/python -m pip install -e . 2>&1
+                """.trimIndent(),
+                onOutput = { onProgress(it) },
+            )
+            if (cloneCode != 0) {
+                Log.e(TAG, "Hermes source clone install failed with code $cloneCode")
+                return false
+            }
+        }
+
+        ensureHermesWrapperScript()
+        return isHermesAgentInstalled()
+    }
+
+    fun startHermesGateway(): Boolean {
+        val existing = hermesGatewayProcess
+        if (existing != null) {
+            val alive = try {
+                existing.exitValue()
+                false
+            } catch (_: IllegalThreadStateException) {
+                true
+            }
+            if (alive) return true
+        }
+        if (!isHermesAgentInstalled()) return false
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val home = hermesHomeDir(paths)
+        val command = "HERMES_HOME=${shellQuote(home.absolutePath)} hermes gateway run --quiet --replace"
+        return try {
+            val process = startPrefixProcess(command)
+            hermesGatewayProcess = process
+            startProcessLogThread(process, "HermesGateway")
+            Thread.sleep(900)
+            try {
+                process.exitValue()
+                false
+            } catch (_: IllegalThreadStateException) {
+                true
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to start Hermes gateway: ${error.message}")
+            false
+        }
+    }
+
+    fun stopHermesGateway(): Boolean {
+        val process = hermesGatewayProcess ?: return true
+        return try {
+            process.destroy()
+            Thread.sleep(600)
+            if (process.isAlive) {
+                process.destroyForcibly()
+            }
+            hermesGatewayProcess = null
+            true
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to stop Hermes gateway: ${error.message}")
+            false
+        }
+    }
+
     fun ensureCodexWrapperScript() {
         val paths = BootstrapInstaller.getPaths(context)
         val prefix = paths.prefixDir
@@ -4156,6 +4324,47 @@ EOF
             Log.w(TAG, "Failed writing asset $assetPath to ${target.absolutePath}: ${error.message}")
             false
         }
+    }
+
+    private fun hermesHomeDir(paths: BootstrapInstaller.Paths): File {
+        return File(paths.homeDir, ".pocketlobster/hermes")
+    }
+
+    private fun hermesInstallDir(paths: BootstrapInstaller.Paths): File {
+        return File(hermesHomeDir(paths), "hermes-agent")
+    }
+
+    private fun ensureHermesWrapperScript() {
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        val home = hermesHomeDir(paths)
+        val installDir = hermesInstallDir(paths)
+
+        val wrapperCmd = """
+            set -e
+            PREFIX=${shellQuote(prefix)}
+            HERMES_HOME=${shellQuote(home.absolutePath)}
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            TARGET="${'$'}PREFIX/bin/hermes"
+            mkdir -p "${'$'}PREFIX/bin"
+            cat > "${'$'}TARGET" <<EOF
+#!/system/bin/sh
+export HERMES_HOME="${'$'}HERMES_HOME"
+if [ -x "${'$'}INSTALL_DIR/.venv/bin/hermes" ]; then
+  exec "${'$'}INSTALL_DIR/.venv/bin/hermes" "\${@}"
+fi
+if [ -x "${'$'}HOME/.local/bin/hermes" ]; then
+  exec "${'$'}HOME/.local/bin/hermes" "\${@}"
+fi
+if [ -x "${'$'}INSTALL_DIR/hermes" ]; then
+  exec "${'$'}INSTALL_DIR/hermes" "\${@}"
+fi
+echo "Hermes CLI executable not found. Run installHermesAgent first." >&2
+exit 127
+EOF
+            chmod 700 "${'$'}TARGET"
+        """.trimIndent()
+        runInPrefix(wrapperCmd)
     }
 
     private fun buildEnvironment(

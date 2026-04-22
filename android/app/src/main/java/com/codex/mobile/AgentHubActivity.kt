@@ -31,6 +31,14 @@ class AgentHubActivity : AppCompatActivity() {
             )
         }
 
+        findViewById<Button>(R.id.btnAgentHubHermes).setOnClickListener {
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(CliAgentChatActivity.EXTRA_AGENT_ID, ExternalAgentId.HERMES_AGENT.value)
+                },
+            )
+        }
+
         findViewById<Button>(R.id.btnAgentHubPermissionCenter).setOnClickListener {
             startActivity(Intent(this, PermissionManagerActivity::class.java))
         }

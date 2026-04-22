@@ -6,6 +6,7 @@ import org.json.JSONObject
 
 enum class ExternalAgentId(val value: String) {
     CLAUDE_CODE("claude-code"),
+    HERMES_AGENT("hermes-agent"),
 }
 
 enum class ProviderProtocol(val value: String) {
@@ -68,6 +69,43 @@ object AgentModelConfigStore {
                     protocol = ProviderProtocol.ANTHROPIC,
                     baseUrl = "",
                     note = "可接入任意 Anthropic 兼容网关",
+                ),
+            )
+            ExternalAgentId.HERMES_AGENT -> listOf(
+                ProviderPreset(
+                    id = "custom_openai_compatible",
+                    name = "自定义 OpenAI 兼容",
+                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
+                    baseUrl = "",
+                    note = "适配任意 OpenAI 兼容端点（推荐）",
+                ),
+                ProviderPreset(
+                    id = "openai_official",
+                    name = "OpenAI 官方",
+                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
+                    baseUrl = "https://api.openai.com/v1",
+                    note = "官方 OpenAI API 端点",
+                ),
+                ProviderPreset(
+                    id = "openrouter",
+                    name = "OpenRouter",
+                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
+                    baseUrl = "https://openrouter.ai/api/v1",
+                    note = "聚合模型提供商（OpenAI 兼容）",
+                ),
+                ProviderPreset(
+                    id = "deepseek",
+                    name = "DeepSeek",
+                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
+                    baseUrl = "https://api.deepseek.com/v1",
+                    note = "DeepSeek OpenAI 兼容端点",
+                ),
+                ProviderPreset(
+                    id = "siliconflow",
+                    name = "硅基流动 SiliconFlow",
+                    protocol = ProviderProtocol.OPENAI_COMPATIBLE,
+                    baseUrl = "https://api.siliconflow.cn/v1",
+                    note = "中国大陆常用 OpenAI 兼容端点",
                 ),
             )
         }

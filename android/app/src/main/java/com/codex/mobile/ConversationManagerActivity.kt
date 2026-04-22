@@ -45,6 +45,7 @@ class ConversationManagerActivity : AppCompatActivity() {
         CODEX,
         OPENCLAW,
         CLAUDE_CODE,
+        HERMES_AGENT,
     }
 
     private lateinit var spinnerSource: Spinner
@@ -74,6 +75,7 @@ class ConversationManagerActivity : AppCompatActivity() {
             getString(R.string.conversation_source_codex),
             getString(R.string.conversation_source_openclaw),
             getString(R.string.conversation_source_claude),
+            getString(R.string.conversation_source_hermes),
         )
         spinnerSource.adapter = ArrayAdapter(
             this,
@@ -105,6 +107,7 @@ class ConversationManagerActivity : AppCompatActivity() {
             1 -> SourceType.CODEX
             2 -> SourceType.OPENCLAW
             3 -> SourceType.CLAUDE_CODE
+            4 -> SourceType.HERMES_AGENT
             else -> SourceType.ALL
         }
     }
@@ -131,8 +134,13 @@ class ConversationManagerActivity : AppCompatActivity() {
                     warnings += "Claude Code: ${normalizeLoadError(error)}"
                     emptyList()
                 }
+            val hermesRows = runCatching { loadCliAgentRows(ExternalAgentId.HERMES_AGENT, SourceType.HERMES_AGENT) }
+                .getOrElse { error ->
+                    warnings += "Hermes Agent: ${normalizeLoadError(error)}"
+                    emptyList()
+                }
 
-            allRows = (codexRows + openClawRows + claudeRows)
+            allRows = (codexRows + openClawRows + claudeRows + hermesRows)
                 .distinctBy { "${it.source}:${it.id}" }
                 .sortedByDescending { it.updatedAtMs }
                 .toMutableList()
@@ -260,6 +268,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                     SourceType.CODEX -> getString(R.string.conversation_source_codex)
                     SourceType.OPENCLAW -> getString(R.string.conversation_source_openclaw)
                     SourceType.CLAUDE_CODE -> getString(R.string.conversation_source_claude)
+                    SourceType.HERMES_AGENT -> getString(R.string.conversation_source_hermes)
                     SourceType.ALL -> getString(R.string.conversation_source_all)
                 }
                 val stateTag = if (row.source == SourceType.CODEX && row.archived) {
@@ -373,6 +382,7 @@ class ConversationManagerActivity : AppCompatActivity() {
                 }
                 SourceType.OPENCLAW -> Unit
                 SourceType.CLAUDE_CODE -> Unit
+                SourceType.HERMES_AGENT -> Unit
                 SourceType.ALL -> Unit
             }
         }
@@ -382,6 +392,19 @@ class ConversationManagerActivity : AppCompatActivity() {
                     putExtra(
                         CliAgentChatActivity.EXTRA_AGENT_ID,
                         ExternalAgentId.CLAUDE_CODE.value,
+                    )
+                    putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, row.id)
+                },
+            )
+            Toast.makeText(this, getString(R.string.conversation_opening_toast), Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (row.source == SourceType.HERMES_AGENT) {
+            startActivity(
+                Intent(this, CliAgentChatActivity::class.java).apply {
+                    putExtra(
+                        CliAgentChatActivity.EXTRA_AGENT_ID,
+                        ExternalAgentId.HERMES_AGENT.value,
                     )
                     putExtra(CliAgentChatActivity.EXTRA_SESSION_ID, row.id)
                 },
@@ -413,6 +436,9 @@ class ConversationManagerActivity : AppCompatActivity() {
                     }
                     SourceType.CLAUDE_CODE -> {
                         AgentSessionStore.renameSession(this, ExternalAgentId.CLAUDE_CODE, row.id, newTitle)
+                    }
+                    SourceType.HERMES_AGENT -> {
+                        AgentSessionStore.renameSession(this, ExternalAgentId.HERMES_AGENT, row.id, newTitle)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -469,6 +495,9 @@ class ConversationManagerActivity : AppCompatActivity() {
                     }
                     SourceType.CLAUDE_CODE -> {
                         AgentSessionStore.deleteSession(this, ExternalAgentId.CLAUDE_CODE, row.id)
+                    }
+                    SourceType.HERMES_AGENT -> {
+                        AgentSessionStore.deleteSession(this, ExternalAgentId.HERMES_AGENT, row.id)
                     }
                     SourceType.ALL -> Unit
                 }
@@ -585,6 +614,7 @@ class ConversationManagerActivity : AppCompatActivity() {
             SourceType.CODEX -> loadCodexTranscript(row)
             SourceType.OPENCLAW -> loadOpenClawTranscript(row)
             SourceType.CLAUDE_CODE -> loadCliAgentTranscript(ExternalAgentId.CLAUDE_CODE, row.id)
+            SourceType.HERMES_AGENT -> loadCliAgentTranscript(ExternalAgentId.HERMES_AGENT, row.id)
             SourceType.ALL -> ""
         }
     }
