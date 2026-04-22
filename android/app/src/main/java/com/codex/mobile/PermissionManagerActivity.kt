@@ -357,13 +357,36 @@ class PermissionManagerActivity : AppCompatActivity() {
         Toast.makeText(this, getString(R.string.hermes_install_starting), Toast.LENGTH_SHORT).show()
 
         Thread {
-            val installed = serverManager.installHermesAgent { }
+            val progressLines = mutableListOf<String>()
+            val installed = serverManager.installHermesAgent { line ->
+                synchronized(progressLines) {
+                    progressLines.add(line)
+                    if (progressLines.size > 60) {
+                        progressLines.removeAt(0)
+                    }
+                }
+            }
+            val failureDetail = synchronized(progressLines) {
+                progressLines
+                    .asReversed()
+                    .firstOrNull { line ->
+                        val normalized = line.trim()
+                        normalized.isNotEmpty() &&
+                            !normalized.startsWith("Installing") &&
+                            !normalized.startsWith("Preparing") &&
+                            !normalized.startsWith("Collecting") &&
+                            !normalized.startsWith("Using")
+                    }
+                    ?.trim()
+                    .orEmpty()
+            }
             runOnUiThread {
                 hermesInstallRunning = false
                 val message = if (installed) {
                     getString(R.string.hermes_install_success)
                 } else {
-                    getString(R.string.hermes_install_failed)
+                    val base = getString(R.string.hermes_install_failed)
+                    if (failureDetail.isNotBlank()) "$base 原因：$failureDetail" else base
                 }
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 refreshOptionalAgentInstallStatus()

@@ -743,11 +743,28 @@ class MainActivity : AppCompatActivity() {
             updateStatus("Skipping optional Codex CLI install", "You can install it later in Permission Center")
         }
 
-        // Step 3a: Extract web UI from APK assets (every launch)
+        // Step 3a: Hermes is optional but should be prepared on first install so
+        // Permission Center reflects the bundled state immediately.
+        if (serverManager.isHermesAgentInstalled()) {
+            updateStatus("Hermes Agent ready")
+        } else {
+            updateStatus("Installing Hermes Agent (optional)…", "Using bundled source when available")
+            val hermesReady = serverManager.installHermesAgent { msg -> updateDetail(msg) }
+            if (hermesReady) {
+                updateStatus("Hermes Agent ready")
+            } else {
+                updateStatus(
+                    "Hermes Agent install failed",
+                    "You can repair it later in Permission Center",
+                )
+            }
+        }
+
+        // Step 3b: Extract web UI from APK assets (every launch)
         updateStatus("Updating web UI…")
         serverManager.installServerBundle { msg -> updateDetail(msg) }
 
-        // Step 3b: Codex platform binary is also optional and can be installed later.
+        // Step 3c: Codex platform binary is also optional and can be installed later.
         val codexBinaryInstalled = serverManager.isPlatformBinaryInstalled()
         when {
             codexCliInstalled && codexBinaryInstalled -> updateStatus("Codex ready")
@@ -755,7 +772,7 @@ class MainActivity : AppCompatActivity() {
             else -> updateStatus("Codex optional install skipped", "OpenClaw mode is ready")
         }
 
-        // Step 3c: Write full-access config, create default workspace, and bridge shared storage paths
+        // Step 3d: Write full-access config, create default workspace, and bridge shared storage paths
         serverManager.ensureFullAccessConfig()
         serverManager.ensureDefaultWorkspace()
         serverManager.ensureStorageBridge()

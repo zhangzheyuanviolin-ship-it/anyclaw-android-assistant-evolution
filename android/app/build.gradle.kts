@@ -65,8 +65,8 @@ android {
         create("beta") {
             dimension = "channel"
             applicationId = "com.codex.mobile.pocketlobster.beta"
-            versionCode = 223
-            versionNameSuffix = "-beta-v223-hermes"
+            versionCode = 224
+            versionNameSuffix = "-beta-v224-hermes-fix1"
             resValue("string", "app_name", "\"口袋大龙虾测试版\"")
         }
     }
@@ -125,7 +125,7 @@ android {
 
     // Don't compress bootstrap zip or server bundle in assets
     androidResources {
-        noCompress += listOf("zip", "tar", "node")
+        noCompress += listOf("zip", "tar", "gz", "node")
     }
 
 }

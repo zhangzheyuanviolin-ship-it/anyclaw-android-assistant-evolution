@@ -29,6 +29,9 @@ class CodexServerManager(private val context: Context) {
         private const val CODEX_VERSION = "0.121.0"
         private const val CLAUDE_CODE_VERSION = "2.1.112"
         private const val HERMES_INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
+        private const val HERMES_BUNDLE_DIR = "hermes-agent-bundle"
+        private const val HERMES_BUNDLE_TAR = "hermes-agent-src.tar"
+        private const val HERMES_BUNDLE_TAR_GZ = "hermes-agent-src.tar.gz"
         const val OPENCLAW_GATEWAY_PORT = 18789
         const val OPENCLAW_CONTROL_UI_PORT = 19001
         private const val ANYCLAW_SEARCH_PLUGIN_ID = "anyclaw-search-suite"
@@ -2462,47 +2465,65 @@ EOF
         installDir.parentFile?.mkdirs()
         tmpDir.mkdirs()
 
-        val hasBundledSource = runCatching {
-            (context.assets.list("hermes-agent-bundle") ?: emptyArray())
-                .any { it == "hermes-agent-src.tar.gz" }
-        }.getOrElse { false }
+        onProgress("Preparing Hermes prerequisites…")
+        if (!ensureHermesInstallPrerequisites(onProgress)) {
+            onProgress("Hermes prerequisite preparation failed")
+            return false
+        }
 
-        if (hasBundledSource) {
-            onProgress("Installing Hermes Agent from bundled source…")
-            val bundle = File(tmpDir, "hermes-agent-src.tar.gz")
-            if (!writeAssetIfChanged("hermes-agent-bundle/hermes-agent-src.tar.gz", bundle)) {
+        val bundledAssetName = resolveBundledHermesAssetName()
+        if (!bundledAssetName.isNullOrBlank()) {
+            onProgress("Installing Hermes Agent from bundled source ($bundledAssetName)…")
+            val bundle = File(tmpDir, bundledAssetName)
+            if (!copyAssetFromApk("$HERMES_BUNDLE_DIR/$bundledAssetName", bundle)) {
                 onProgress("Bundled Hermes source not readable, fallback to online install")
             } else {
-                val code = runInPrefix(
+                val extractCode = runInPrefix(
                     """
                     set -e
-                    HERMES_HOME=${shellQuote(home.absolutePath)}
                     INSTALL_DIR=${shellQuote(installDir.absolutePath)}
-                    TMP_ROOT=${shellQuote(File(tmpDir, "hermes-src-stage").absolutePath)}
-                    rm -rf "${'$'}TMP_ROOT" "${'$'}INSTALL_DIR"
-                    mkdir -p "${'$'}TMP_ROOT" "${'$'}HERMES_HOME" "${'$'}INSTALL_DIR"
-                    tar -xzf ${shellQuote(bundle.absolutePath)} -C "${'$'}TMP_ROOT"
-                    SRC_DIR="${'$'}(find "${'$'}TMP_ROOT" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-                    [ -n "${'$'}SRC_DIR" ] || exit 21
-                    cp -a "${'$'}SRC_DIR"/. "${'$'}INSTALL_DIR"/
-                    cd "${'$'}INSTALL_DIR"
-                    python -m venv .venv 2>&1 || true
-                    .venv/bin/python -m pip install -U pip setuptools wheel 2>&1 || true
-                    .venv/bin/python -m pip install -e '.[termux]' -c constraints-termux.txt 2>&1 || \
-                        .venv/bin/python -m pip install -e . 2>&1
-                    rm -rf "${'$'}TMP_ROOT"
+                    BUNDLE_FILE=${shellQuote(bundle.absolutePath)}
+                    rm -rf "${'$'}INSTALL_DIR"
+                    mkdir -p "${'$'}INSTALL_DIR"
+                    BUNDLE_SIG="${'$'}(od -An -tx1 -N2 "${'$'}BUNDLE_FILE" 2>/dev/null | tr -d ' \n')"
+                    if [ "${'$'}BUNDLE_SIG" = "1f8b" ]; then
+                      tar -xzf "${'$'}BUNDLE_FILE" -C "${'$'}INSTALL_DIR"
+                    else
+                      tar -xf "${'$'}BUNDLE_FILE" -C "${'$'}INSTALL_DIR"
+                    fi
+                    if [ ! -f "${'$'}INSTALL_DIR/pyproject.toml" ]; then
+                      PROJECT_FILE="${'$'}(find "${'$'}INSTALL_DIR" -mindepth 2 -maxdepth 2 -type f -name pyproject.toml 2>/dev/null | head -n 1)"
+                      if [ -n "${'$'}PROJECT_FILE" ]; then
+                        PROJECT_DIR="${'$'}(dirname "${'$'}PROJECT_FILE")"
+                        TMP_EXTRACT_DIR="${'$'}INSTALL_DIR.__tmp_extract__"
+                        rm -rf "${'$'}TMP_EXTRACT_DIR"
+                        mkdir -p "${'$'}TMP_EXTRACT_DIR"
+                        cp -a "${'$'}PROJECT_DIR"/. "${'$'}TMP_EXTRACT_DIR"/
+                        rm -rf "${'$'}INSTALL_DIR"
+                        mv "${'$'}TMP_EXTRACT_DIR" "${'$'}INSTALL_DIR"
+                      fi
+                    fi
+                    [ -f "${'$'}INSTALL_DIR/pyproject.toml" ] || exit 21
                     """.trimIndent(),
                     onOutput = { onProgress(it) },
                 )
-                if (code == 0) {
-                    ensureHermesWrapperScript()
-                    if (isHermesAgentInstalled()) {
-                        return true
+                if (extractCode == 0) {
+                    val bundledInstallCode = runHermesEditableInstall(home, installDir, onProgress)
+                    if (bundledInstallCode == 0) {
+                        ensureHermesWrapperScript()
+                        if (isHermesAgentInstalled()) {
+                            return true
+                        }
+                        onProgress("Bundled Hermes install verification failed, fallback to online install")
+                    } else {
+                        onProgress("Bundled Hermes pip install failed (code=$bundledInstallCode), fallback to online install")
                     }
                 } else {
-                    onProgress("Bundled install failed (code=$code), fallback to online install")
+                    onProgress("Bundled Hermes extraction failed (code=$extractCode), fallback to online install")
                 }
             }
+        } else {
+            onProgress("Bundled Hermes source missing in APK assets, fallback to online install")
         }
 
         onProgress("Installing Hermes Agent via official installer…")
@@ -2511,44 +2532,146 @@ EOF
             set -e
             export HERMES_HOME=${shellQuote(home.absolutePath)}
             export HERMES_INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            export TERMUX_VERSION=anyclaw
+            export PREFIX=${shellQuote(paths.prefixDir)}
             mkdir -p "${'$'}HERMES_HOME"
             if command -v curl >/dev/null 2>&1; then
               curl -fsSL ${shellQuote(HERMES_INSTALLER_URL)} | bash -s -- \
-                --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
+                --no-venv --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
             elif command -v wget >/dev/null 2>&1; then
               wget -qO- ${shellQuote(HERMES_INSTALLER_URL)} | bash -s -- \
-                --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
+                --no-venv --skip-setup --hermes-home "${'$'}HERMES_HOME" --dir "${'$'}HERMES_INSTALL_DIR"
             else
               exit 42
             fi
             """.trimIndent(),
             onOutput = { onProgress(it) },
         )
-        if (onlineCode != 0) {
-            onProgress("Official installer failed (code=$onlineCode), fallback to source clone")
-            val cloneCode = runInPrefix(
-                """
-                set -e
-                HERMES_HOME=${shellQuote(home.absolutePath)}
-                INSTALL_DIR=${shellQuote(installDir.absolutePath)}
-                rm -rf "${'$'}INSTALL_DIR"
-                git clone --depth=1 https://github.com/NousResearch/hermes-agent.git "${'$'}INSTALL_DIR" 2>&1
-                cd "${'$'}INSTALL_DIR"
-                python -m venv .venv 2>&1 || true
-                .venv/bin/python -m pip install -U pip setuptools wheel 2>&1 || true
-                .venv/bin/python -m pip install -e '.[termux]' -c constraints-termux.txt 2>&1 || \
-                    .venv/bin/python -m pip install -e . 2>&1
-                """.trimIndent(),
-                onOutput = { onProgress(it) },
-            )
-            if (cloneCode != 0) {
-                Log.e(TAG, "Hermes source clone install failed with code $cloneCode")
-                return false
+        if (onlineCode == 0) {
+            ensureHermesWrapperScript()
+            if (isHermesAgentInstalled()) {
+                return true
             }
+            onProgress("Official installer finished but Hermes command unavailable, fallback to source clone")
+        } else {
+            onProgress("Official installer failed (code=$onlineCode), fallback to source clone")
+        }
+
+        val cloneCode = runInPrefix(
+            """
+            set -e
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            rm -rf "${'$'}INSTALL_DIR"
+            git clone --depth=1 https://github.com/NousResearch/hermes-agent.git "${'$'}INSTALL_DIR" 2>&1
+            """.trimIndent(),
+            onOutput = { onProgress(it) },
+        )
+        if (cloneCode != 0) {
+            Log.e(TAG, "Hermes source clone failed with code $cloneCode")
+            return false
+        }
+
+        val cloneInstallCode = runHermesEditableInstall(home, installDir, onProgress)
+        if (cloneInstallCode != 0) {
+            Log.e(TAG, "Hermes editable pip install failed with code $cloneInstallCode")
+            return false
         }
 
         ensureHermesWrapperScript()
         return isHermesAgentInstalled()
+    }
+
+    private fun resolveBundledHermesAssetName(): String? {
+        val assetNames = runCatching {
+            context.assets.list(HERMES_BUNDLE_DIR) ?: emptyArray()
+        }.getOrElse { emptyArray() }
+        return when {
+            assetNames.contains(HERMES_BUNDLE_TAR_GZ) -> HERMES_BUNDLE_TAR_GZ
+            assetNames.contains(HERMES_BUNDLE_TAR) -> HERMES_BUNDLE_TAR
+            else -> assetNames.firstOrNull { it.startsWith("hermes-agent-src.tar") }
+        }
+    }
+
+    private fun ensureHermesInstallPrerequisites(onProgress: (String) -> Unit): Boolean {
+        if (!isPythonInstalled()) {
+            onProgress("Python is missing, installing runtime first…")
+            if (!installPython(onProgress) || !isPythonInstalled()) {
+                return false
+            }
+        }
+
+        val paths = BootstrapInstaller.getPaths(context)
+        val prefix = paths.prefixDir
+        val termuxPrefix = "/data/data/com.termux/files/usr"
+        val code = runInPrefix(
+            """
+            set +e
+            PREFIX=${shellQuote(prefix)}
+            TERMUX_PREFIX=${shellQuote(termuxPrefix)}
+            cd "${'$'}PREFIX/tmp" || exit 60
+            apt-get update --allow-insecure-repositories 2>&1 || true
+            apt-get download --allow-unauthenticated \
+              python-pip git tar xz-utils make pkg-config clang rust libffi openssl libexpat 2>&1 || true
+
+            mkdir -p _hermes_stage
+            found=0
+            for deb in *.deb; do
+              [ -f "${'$'}deb" ] || continue
+              found=1
+              dpkg-deb -x "${'$'}deb" _hermes_stage/ 2>&1 || true
+            done
+            if [ "${'$'}found" = "1" ]; then
+              if [ -d "_hermes_stage${'$'}TERMUX_PREFIX" ]; then
+                cp -a _hermes_stage${'$'}TERMUX_PREFIX/* "${'$'}PREFIX/" 2>&1 || true
+              elif [ -d "_hermes_stage/usr" ]; then
+                cp -a _hermes_stage/usr/* "${'$'}PREFIX/" 2>&1 || true
+              fi
+            fi
+            rm -rf _hermes_stage *.deb 2>/dev/null || true
+            if [ -f "${'$'}PREFIX/bin/python3" ] && [ ! -f "${'$'}PREFIX/bin/python" ]; then
+              ln -sf python3 "${'$'}PREFIX/bin/python"
+            fi
+
+            if command -v python >/dev/null 2>&1; then
+              python -m ensurepip --upgrade 2>&1 || true
+              python -m pip --version >/dev/null 2>&1 || pip --version >/dev/null 2>&1 || exit 62
+            else
+              exit 61
+            fi
+            command -v git >/dev/null 2>&1 || exit 63
+            command -v tar >/dev/null 2>&1 || exit 64
+            echo "hermes-prereq-ready"
+            exit 0
+            """.trimIndent(),
+            onOutput = { onProgress(it) },
+        )
+        return code == 0
+    }
+
+    private fun runHermesEditableInstall(
+        home: File,
+        installDir: File,
+        onProgress: (String) -> Unit,
+    ): Int {
+        return runInPrefix(
+            """
+            set -e
+            export HERMES_HOME=${shellQuote(home.absolutePath)}
+            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
+            cd "${'$'}INSTALL_DIR"
+            PYTHON_BIN="python"
+            python -m venv .venv 2>&1 || true
+            if [ -x ".venv/bin/python" ]; then
+              PYTHON_BIN=".venv/bin/python"
+            fi
+            "${'$'}PYTHON_BIN" -m ensurepip --upgrade 2>&1 || true
+            "${'$'}PYTHON_BIN" -m pip install -U pip setuptools wheel 2>&1 || true
+            "${'$'}PYTHON_BIN" -m pip install -e '.[termux]' -c constraints-termux.txt 2>&1 || \
+              "${'$'}PYTHON_BIN" -m pip install -e . -c constraints-termux.txt 2>&1 || \
+              "${'$'}PYTHON_BIN" -m pip install -e . 2>&1
+            """.trimIndent(),
+            onOutput = { onProgress(it) },
+        )
     }
 
     fun startHermesGateway(): Boolean {
@@ -4307,6 +4430,21 @@ EOF
         }
     }
 
+    private fun copyAssetFromApk(assetPath: String, target: File): Boolean {
+        return try {
+            context.assets.open(assetPath).use { input ->
+                target.parentFile?.mkdirs()
+                target.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            true
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed copying asset $assetPath to ${target.absolutePath}: ${error.message}")
+            false
+        }
+    }
+
     private fun writeAssetIfChanged(assetPath: String, target: File): Boolean {
         return try {
             val bytes = context.assets.open(assetPath).use { it.readBytes() }
@@ -4339,25 +4477,34 @@ EOF
         val prefix = paths.prefixDir
         val home = hermesHomeDir(paths)
         val installDir = hermesInstallDir(paths)
+        val hermesHome = shellQuote(home.absolutePath)
+        val venvHermes = shellQuote("${installDir.absolutePath}/.venv/bin/hermes")
+        val localHermes = shellQuote("${paths.homeDir}/.local/bin/hermes")
+        val installHermes = shellQuote("${installDir.absolutePath}/hermes")
+        val prefixPython = shellQuote("${prefix}/bin/python")
 
         val wrapperCmd = """
             set -e
             PREFIX=${shellQuote(prefix)}
-            HERMES_HOME=${shellQuote(home.absolutePath)}
-            INSTALL_DIR=${shellQuote(installDir.absolutePath)}
             TARGET="${'$'}PREFIX/bin/hermes"
             mkdir -p "${'$'}PREFIX/bin"
-            cat > "${'$'}TARGET" <<EOF
+            cat > "${'$'}TARGET" <<'EOF'
 #!/system/bin/sh
-export HERMES_HOME="${'$'}HERMES_HOME"
-if [ -x "${'$'}INSTALL_DIR/.venv/bin/hermes" ]; then
-  exec "${'$'}INSTALL_DIR/.venv/bin/hermes" "${'$'}@"
+export HERMES_HOME=$hermesHome
+if [ -x $venvHermes ]; then
+  exec $venvHermes "${'$'}@"
 fi
-if [ -x "${'$'}HOME/.local/bin/hermes" ]; then
-  exec "${'$'}HOME/.local/bin/hermes" "${'$'}@"
+if [ -x $localHermes ]; then
+  exec $localHermes "${'$'}@"
 fi
-if [ -x "${'$'}INSTALL_DIR/hermes" ]; then
-  exec "${'$'}INSTALL_DIR/hermes" "${'$'}@"
+if [ -x $installHermes ]; then
+  exec $installHermes "${'$'}@"
+fi
+if [ -x $prefixPython ]; then
+  exec $prefixPython -m hermes_cli.main "${'$'}@"
+fi
+if command -v python >/dev/null 2>&1; then
+  exec python -m hermes_cli.main "${'$'}@"
 fi
 echo "Hermes CLI executable not found. Run installHermesAgent first." >&2
 exit 127
